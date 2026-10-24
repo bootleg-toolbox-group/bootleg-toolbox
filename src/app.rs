@@ -17,13 +17,81 @@ use crate::ops::{self, Level, Msg, Op, Options, Target, ThemeChoice, Tracker, AP
 
 const AUTO_DETAILS_LIMIT: usize = 3000;
 
+/// Linux: a menu entry (~/.local/share/applications) and the icon (hicolor theme) for this
+/// executable, for the current user. Without it, the desktop shows a generic icon.
+#[cfg(target_os = "linux")]
+fn install_desktop_entry() -> Result<String, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .ok_or("no home folder")?;
+    let icon_dir = data.join("icons/hicolor/256x256/apps");
+    let apps_dir = data.join("applications");
+    for dir in [&icon_dir, &apps_dir] {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    std::fs::write(icon_dir.join("bootleg-helper.png"), include_bytes!("../assets/icon.png")).map_err(|e| e.to_string())?;
+    // Exec: the path quoted, with the characters the specification asks to escape.
+    let path = exe.to_string_lossy();
+    let mut quoted = String::from("\"");
+    for c in path.chars() {
+        if matches!(c, '"' | '`' | '$' | '\\') {
+            quoted.push('\\');
+        }
+        if c == '%' {
+            quoted.push('%');
+        }
+        quoted.push(c);
+    }
+    quoted.push('"');
+    let entry = format!(
+        "[Desktop Entry]\nType=Application\nName={APP_NAME}\nGenericName=Lossless concert recordings helper\n\
+         Comment=Checksums, decode tests, torrents, conversions and SBE fixing for lossless concert recordings\n\
+         Exec={} %F\nIcon=bootleg-helper\nTerminal=false\nStartupWMClass=bootleg-helper\n\
+         Categories=AudioVideo;Audio;Utility;\nKeywords=flac;ffp;md5;st5;shn;ape;bootleg;checksum;torrent;sbe;\n",
+        quoted.replace('\\', "\\\\")
+    );
+    let desktop = apps_dir.join("bootleg-helper.desktop");
+    std::fs::write(&desktop, entry).map_err(|e| e.to_string())?;
+    // Refresh the menus where the tools exist; harmless when they do not.
+    for cmd in [vec!["update-desktop-database".to_string(), apps_dir.display().to_string()], vec!["kbuildsycoca6".into()], vec!["kbuildsycoca5".into()]] {
+        let _ = std::process::Command::new(&cmd[0])
+            .args(&cmd[1..])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    Ok(format!("Added to the applications menu ({}), for {}", desktop.display(), exe.display()))
+}
+
+/// The window icon (the cassette), decoded once from the PNG built into the program.
+fn app_icon() -> std::sync::Arc<egui::IconData> {
+    static ICON: std::sync::OnceLock<std::sync::Arc<egui::IconData>> = std::sync::OnceLock::new();
+    ICON.get_or_init(|| {
+        let decoded = png::Decoder::new(std::io::Cursor::new(include_bytes!("../assets/icon.png").as_slice()))
+            .read_info()
+            .and_then(|mut reader| {
+                let mut rgba = vec![0; reader.output_buffer_size().unwrap_or(0)];
+                let frame = reader.next_frame(&mut rgba)?;
+                rgba.truncate(frame.buffer_size());
+                Ok(egui::IconData { rgba, width: frame.width, height: frame.height })
+            });
+        std::sync::Arc::new(decoded.unwrap_or_default())
+    })
+    .clone()
+}
+
 pub fn run(paths: Vec<PathBuf>) -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(APP_NAME)
             .with_inner_size([1250.0, 760.0])
             .with_min_inner_size([620.0, 320.0])
-            .with_drag_and_drop(true),
+            .with_drag_and_drop(true)
+            .with_app_id("bootleg-helper")
+            .with_icon(app_icon()),
         ..Default::default()
     };
     // winit has no drag and drop on Wayland: go through XWayland when it is there.
@@ -721,6 +789,18 @@ impl App {
                 });
                 ui.menu_button("Help", |ui| {
                     menu_open = true;
+                    #[cfg(target_os = "linux")]
+                    if ui
+                        .button("Add to the applications menu")
+                        .on_hover_text("Adds Bootleg Helper, with its icon, to the menu of your desktop, for this program file where it is now. Use it again if you move the program.")
+                        .clicked()
+                    {
+                        ui.close_menu();
+                        match install_desktop_entry() {
+                            Ok(text) => self.log(text, Level::Ok),
+                            Err(e) => self.log(format!("Could not add the menu entry: {e}"), Level::Error),
+                        }
+                    }
                     if ui.button(format!("About {APP_NAME}")).clicked() {
                         ui.close_menu();
                         self.about = true;
@@ -1578,6 +1658,7 @@ impl App {
             let id = egui::ViewportId::from_hash_of(("report", *kind, path));
             let window_title = format!("{} - {}", report.heading, report.title);
             let builder = egui::ViewportBuilder::default()
+                .with_icon(app_icon())
                 .with_title(&window_title)
                 .with_inner_size([760.0, 640.0])
                 .with_min_inner_size([420.0, 300.0]);
@@ -1711,6 +1792,7 @@ impl App {
             let title = format!("Spectrogram - {}", file_name(&spec.source));
             let id = egui::ViewportId::from_hash_of(("spectrogram", &spec.source));
             let builder = egui::ViewportBuilder::default()
+                .with_icon(app_icon())
                 .with_title(&title)
                 .with_inner_size(size + egui::vec2(0.0, 44.0))
                 .with_min_inner_size([420.0, 280.0]);

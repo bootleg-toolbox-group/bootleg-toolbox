@@ -39,7 +39,8 @@ next to them.
 
 Ready-to-run executables for Windows and Linux are on the Releases page of this
 repository. On Windows, run `bootleg-helper.exe`; on Linux, make the file executable
-(`chmod +x bootleg-helper`) and run it.
+(`chmod +x bootleg-helper`) and run it. To add it, with its icon, to your desktop's applications
+menu, use **Help > Add to the applications menu** (again if you move the file).
 
 ## Usage
 
