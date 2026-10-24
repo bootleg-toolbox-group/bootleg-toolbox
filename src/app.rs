@@ -87,7 +87,7 @@ pub fn run(paths: Vec<PathBuf>) -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(APP_NAME)
-            .with_inner_size([1250.0, 760.0])
+            .with_inner_size([1000.0, 465.0])
             .with_min_inner_size([620.0, 320.0])
             .with_drag_and_drop(true)
             .with_app_id("bootleg-helper")
@@ -293,7 +293,7 @@ impl Col {
             return Column::remainder().at_least(120.0).clip(true);
         }
         match self {
-            Col::Name => Column::initial(420.0).at_least(150.0).clip(true),
+            Col::Name => Column::initial(300.0).at_least(150.0).clip(true),
             _ => Column::auto().at_least(24.0).clip(true).auto_size_this_frame(fit),
         }
     }
@@ -1038,8 +1038,9 @@ impl App {
             ui.spacing_mut().item_spacing.x = 16.0;
             egui::ScrollArea::horizontal().show(ui, |ui| {
                 let mut table = TableBuilder::new(ui)
-                    // Each set of visible columns keeps its own widths.
-                    .id_salt(cols.iter().map(|c| c.title()).collect::<Vec<_>>())
+                    // Each set of visible columns keeps its own widths. The number changes with
+                    // the default widths, so that widths saved before are not kept over them.
+                    .id_salt((2, cols.iter().map(|c| c.title()).collect::<Vec<_>>()))
                     .striped(true)
                     .resizable(true)
                     .sense(egui::Sense::click_and_drag())
