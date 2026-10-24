@@ -20,7 +20,7 @@ jobs:
     # The oldest supported Ubuntu: the Linux executable then runs on older systems too.
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Tools
         run: |
@@ -29,6 +29,16 @@ jobs:
           rustup update stable
           rustup default stable
           rustup target add x86_64-pc-windows-gnu
+
+      # Downloaded crates and compiled dependencies, reused while Cargo.lock does not change.
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
 
       - name: Tests
         run: cargo test --release
@@ -52,7 +62,7 @@ jobs:
           sha256sum bootleg-helper-linux-x86_64 bootleg-helper-windows-x86_64.exe > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bootleg-helper-${{ github.sha }}
           path: out/
@@ -65,7 +75,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: bootleg-helper-${{ github.sha }}
           path: out
