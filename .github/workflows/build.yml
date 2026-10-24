@@ -1,0 +1,82 @@
+# Tests and builds the Linux and Windows executables.
+# - On every push to main and by hand (Actions > Build > Run workflow): the executables
+#   are kept as downloadable artifacts of the run for 14 days.
+# - On a version tag (v0.1.0...): a Release is created with both executables and their
+#   SHA-256 checksums.
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # The oldest supported Ubuntu: the Linux executable then runs on older systems too.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mingw-w64
+          rustup update stable
+          rustup default stable
+          rustup target add x86_64-pc-windows-gnu
+
+      - name: Tests
+        run: cargo test --release
+
+      - name: Version check
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match the version in Cargo.toml ($version)" >&2
+            exit 1
+          fi
+
+      - name: Executables
+        run: |
+          ./build-dist.sh
+          mkdir -p out
+          cp dist/bootleg-helper out/bootleg-helper-linux-x86_64
+          cp dist/bootleg-helper.exe out/bootleg-helper-windows-x86_64.exe
+          cd out
+          sha256sum bootleg-helper-linux-x86_64 bootleg-helper-windows-x86_64.exe > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bootleg-helper-${{ github.sha }}
+          path: out/
+          retention-days: 14
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: bootleg-helper-${{ github.sha }}
+          path: out
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" out/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Bootleg Helper ${GITHUB_REF_NAME#v}" \
+            --notes "Windows: download bootleg-helper-windows-x86_64.exe and run it.
+          Linux: download bootleg-helper-linux-x86_64, make it executable (chmod +x) and run it; Help > Add to the applications menu adds it to your menu.
+          SHA256SUMS.txt lists the checksums of both files."
