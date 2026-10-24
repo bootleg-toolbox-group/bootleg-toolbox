@@ -1547,6 +1547,58 @@ pub fn ffp_text(root: &Path) -> Option<String> {
     (!texts.is_empty()).then(|| texts.join("\n"))
 }
 
+/// The FFP of a show built from the MD5 signatures in its FLAC headers (nothing is decoded),
+/// as Create would write it, for a show without a .ffp file. Also returns the number of
+/// FLAC files without a signature (their line is all zeros).
+pub fn ffp_from_headers(show: &Show) -> Result<(String, usize, usize), String> {
+    let flacs: Vec<&PathBuf> = show.files.iter().filter(|p| Format::from_path(p) == Some(Format::Flac)).collect();
+    if flacs.is_empty() {
+        return Err("no FLAC file in the show".into());
+    }
+    let mut lines = Vec::with_capacity(flacs.len());
+    let mut unsigned = 0;
+    for path in &flacs {
+        let md5 = audio::probe(path).map_err(|e| format!("{}: {e}", file_name(path)))?.md5.unwrap_or(ZERO_MD5);
+        if md5 == ZERO_MD5 {
+            unsigned += 1;
+        }
+        lines.push(format!("{}:{}", rel_posix(path, &show.root), hex(&md5)));
+    }
+    Ok((lines.join("\n"), flacs.len(), unsigned))
+}
+
+/// Words in the name of text files that are not the info file of a show.
+const NOT_INFO: [&str; 7] = ["ffp", "md5", "st5", "checksum", "fingerprint", "audiochecker", "aucdtect"];
+
+/// The text files that may be the info file of a show, the most likely first: those of
+/// the show folder (or, when it has none, of its sub-folders), ranked by name (the name of
+/// the folder, then "info" in the name), then by size.
+pub fn info_candidates(root: &Path) -> Vec<PathBuf> {
+    let is_candidate = |p: &PathBuf| {
+        let name = file_name(p).to_lowercase();
+        matches!(ext_lower(p).as_str(), "txt" | "nfo") && !NOT_INFO.iter().any(|w| name.contains(w))
+    };
+    let all: Vec<PathBuf> = files::all_files(root, true)
+        .into_iter()
+        .filter(|p| {
+            let rel = p.strip_prefix(root).unwrap_or(p);
+            !rel.components().any(|c| c.as_os_str().to_string_lossy().eq_ignore_ascii_case("SBE-fixed"))
+        })
+        .filter(is_candidate)
+        .collect();
+    let top: Vec<PathBuf> = all.iter().filter(|p| p.parent() == Some(root)).cloned().collect();
+    let mut found = if top.is_empty() { all } else { top };
+    let folder = file_name(root).to_lowercase();
+    let rank = |p: &PathBuf| {
+        let stem = p.file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let size = fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        let score = if stem == folder { 2 } else if stem.contains("info") { 1 } else { 0 };
+        (std::cmp::Reverse(score), std::cmp::Reverse(size))
+    };
+    found.sort_by_key(rank);
+    found
+}
+
 /// Sends a file to the system trash (Windows Recycle Bin or freedesktop trash).
 pub fn move_to_trash(path: &Path) -> bool {
     trash::delete(path).is_ok()
@@ -1555,6 +1607,27 @@ pub fn move_to_trash(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn info_file_ranking() {
+        let dir = std::env::temp_dir().join(format!("bh-info-{}", std::process::id())).join("Band - 1990-01-01");
+        fs::create_dir_all(dir.join("CD1")).unwrap();
+        fs::write(dir.join("notes.txt"), "a long text, longer than the others").unwrap();
+        fs::write(dir.join("Info.txt"), "info").unwrap();
+        fs::write(dir.join("Band - 1990-01-01.txt"), "show").unwrap();
+        fs::write(dir.join("Band - 1990-01-01 ffp.txt"), "x").unwrap();
+        fs::write(dir.join("AudioChecker.txt"), "x").unwrap();
+        fs::write(dir.join("CD1").join("cd1.txt"), "x").unwrap();
+        let names: Vec<String> = info_candidates(&dir).iter().map(|p| file_name(p)).collect();
+        assert_eq!(names, ["Band - 1990-01-01.txt", "Info.txt", "notes.txt"]);
+        // Nothing in the show folder: the sub-folders are searched.
+        for n in ["notes.txt", "Info.txt", "Band - 1990-01-01.txt"] {
+            fs::remove_file(dir.join(n)).unwrap();
+        }
+        let names: Vec<String> = info_candidates(&dir).iter().map(|p| file_name(p)).collect();
+        assert_eq!(names, ["cd1.txt"]);
+        fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+    }
 
     #[test]
     fn bencode_sorted_keys() {

@@ -17,6 +17,16 @@ use crate::ops::{self, Level, Msg, Op, Options, Target, ThemeChoice, Tracker, AP
 
 const AUTO_DETAILS_LIMIT: usize = 3000;
 
+const INFO_TIP: &str = "Copy the show's info file (.txt or .nfo, whatever its name) to the clipboard, for the upload forms. With several text files, a window lets you pick the right one.";
+
+/// The text files that may be a show's info file, the most likely first.
+struct InfoChoice {
+    root: PathBuf,
+    candidates: Vec<PathBuf>,
+    texts: Vec<String>,
+    chosen: usize,
+}
+
 /// Linux: a menu entry (~/.local/share/applications) and the icon (hicolor theme) for this
 /// executable, for the current user. Without it, the desktop shows a generic icon.
 #[cfg(target_os = "linux")]
@@ -176,6 +186,7 @@ enum Action {
     Toggle(PathBuf),
     OpenFolder(PathBuf),
     CopyFfp,
+    CopyInfo,
     Remove,
     Deselect,
     SelectAll,
@@ -218,6 +229,8 @@ pub struct App {
     flash: Option<(String, Instant)>,
     settings: Option<Options>,
     about: bool,
+    /// "Copy info file" with several text files: the choice window.
+    info_choice: Option<InfoChoice>,
     title: String,
     /// A context or menu-bar menu was open during the last frame (Escape closes it
     /// instead of clearing the selection).
@@ -361,6 +374,7 @@ impl App {
             flash: None,
             settings: None,
             about: false,
+            info_choice: None,
             title: String::new(),
             menu_open: false,
             spectrograms: Vec::new(),
@@ -691,12 +705,117 @@ impl App {
             self.flash("Select a single show to copy its FFP.");
             return;
         }
-        match ops::ffp_text(&shows[0].root) {
-            Some(text) => {
+        let show = shows[0].clone();
+        let name = file_name(&show.root);
+        if let Some(text) = ops::ffp_text(&show.root) {
+            ctx.copy_text(text);
+            let msg = format!("FFP of {name} copied to the clipboard.");
+            self.log(msg.clone(), Level::Ok);
+            self.flash(msg);
+            return;
+        }
+        // No .ffp file: the same lines, made from the MD5 signatures in the FLAC headers.
+        match ops::ffp_from_headers(&show) {
+            Ok((text, count, unsigned)) => {
                 ctx.copy_text(text);
-                self.flash(format!("FFP of {} copied to the clipboard.", file_name(&shows[0].root)));
+                let msg = format!("No .ffp file in {name}: FFP of its {count} FLAC file(s) made from their headers and copied to the clipboard.");
+                if unsigned > 0 {
+                    self.log(format!("{msg} {unsigned} file(s) have no MD5 signature: their lines are all zeros (re-encode them)."), Level::Warn);
+                } else {
+                    self.log(msg.clone(), Level::Ok);
+                }
+                self.flash(msg);
             }
-            None => self.flash(format!("No .ffp file in {}. Create checksums first.", file_name(&shows[0].root))),
+            Err(e) => {
+                let msg = format!("Nothing copied: no .ffp file in {name}, and {e}.");
+                self.log(msg.clone(), Level::Warn);
+                self.flash(msg);
+            }
+        }
+    }
+
+    fn copy_info(&mut self, ctx: &egui::Context) {
+        let (shows, _) = self.selection();
+        if shows.len() != 1 {
+            self.flash("Select a single show to copy its info file.");
+            return;
+        }
+        let root = shows[0].root.clone();
+        let name = file_name(&root);
+        let candidates = ops::info_candidates(&root);
+        match candidates.len() {
+            0 => {
+                let msg = format!("Nothing copied: no info file (.txt or .nfo) in {name}.");
+                self.log(msg.clone(), Level::Warn);
+                self.flash(msg);
+            }
+            1 => self.copy_info_file(ctx, &root, &candidates[0]),
+            _ => {
+                let texts = candidates.iter().map(|p| crate::files::read_text(p).unwrap_or_else(|e| format!("(cannot read: {e})"))).collect();
+                self.info_choice = Some(InfoChoice { root, candidates, texts, chosen: 0 });
+            }
+        }
+    }
+
+    fn copy_info_file(&mut self, ctx: &egui::Context, root: &std::path::Path, path: &std::path::Path) {
+        match crate::files::read_text(path) {
+            Ok(text) => {
+                ctx.copy_text(text);
+                let msg = format!("Info file of {} copied to the clipboard: {}", file_name(root), rel_posix(path, root));
+                self.log(msg.clone(), Level::Ok);
+                self.flash(msg);
+            }
+            Err(e) => self.log(format!("Cannot read {}: {e}", path.display()), Level::Error),
+        }
+    }
+
+    /// Several possible info files: the user picks one, with a preview.
+    fn info_window(&mut self, ctx: &egui::Context) {
+        let Some(mut choice) = self.info_choice.take() else { return };
+        let (mut copy, mut close) = (false, false);
+        ctx.input_mut(|i| {
+            if i.consume_key(Modifiers::NONE, Key::ArrowDown) {
+                choice.chosen = (choice.chosen + 1).min(choice.candidates.len() - 1);
+            }
+            if i.consume_key(Modifiers::NONE, Key::ArrowUp) {
+                choice.chosen = choice.chosen.saturating_sub(1);
+            }
+            copy |= i.consume_key(Modifiers::NONE, Key::Enter);
+            close |= i.consume_key(Modifiers::NONE, Key::Escape);
+        });
+        let mut open = true;
+        egui::Window::new("Copy info file")
+            .collapsible(false)
+            .default_size([640.0, 420.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label(format!("{} has several text files. Which one is the info file?", file_name(&choice.root)));
+                ui.add_space(4.0);
+                for (i, path) in choice.candidates.iter().enumerate() {
+                    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                    let label = format!("{}   ({:.1} KB)", rel_posix(path, &choice.root), size as f64 / 1024.0);
+                    if ui.radio(choice.chosen == i, label).clicked() {
+                        choice.chosen = i;
+                    }
+                }
+                ui.add_space(6.0);
+                egui::TopBottomPanel::bottom("info_buttons").show_inside(ui, |ui| {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        copy |= ui.button("Copy").clicked();
+                        close |= ui.button("Cancel").clicked();
+                        ui.label(RichText::new("↑ ↓ to choose, Enter to copy").weak());
+                    });
+                });
+                egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
+                    ui.add(egui::Label::new(RichText::new(&choice.texts[choice.chosen]).monospace()).extend());
+                });
+            });
+        if copy {
+            let path = choice.candidates[choice.chosen].clone();
+            self.copy_info_file(ctx, &choice.root, &path);
+        } else if open && !close {
+            self.info_choice = Some(choice);
         }
     }
 
@@ -878,6 +997,10 @@ impl App {
                         {
                             ui.close_menu();
                             actions.push(Action::CopyFfp);
+                        }
+                        if ui.button("📋 Copy info file").on_hover_text(INFO_TIP).clicked() {
+                            ui.close_menu();
+                            actions.push(Action::CopyInfo);
                         }
                     })
                     .response
@@ -1371,6 +1494,7 @@ impl App {
                     }
                 }
                 Action::CopyFfp => self.copy_ffp(ctx),
+                Action::CopyInfo => self.copy_info(ctx),
                 Action::Remove => self.remove_selected(),
                 Action::ToggleColumn(col) => {
                     self.fit_columns = true;
@@ -1413,7 +1537,8 @@ impl App {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
-        if ctx.wants_keyboard_input() {
+        // The info file choice window takes the keys (arrows, Enter, Escape).
+        if ctx.wants_keyboard_input() || self.info_choice.is_some() {
             return;
         }
         let busy = self.running.is_some();
@@ -1966,6 +2091,10 @@ fn ops_menu(ui: &mut egui::Ui, disabled: bool, flac_level: u8, trackers: &[(Stri
         ui.close_menu();
         actions.push(Action::CopyFfp);
     }
+    if ui.add_enabled(!disabled, egui::Button::new("📋 Copy info file")).on_hover_text(INFO_TIP).clicked() {
+        ui.close_menu();
+        actions.push(Action::CopyInfo);
+    }
 }
 
 fn torrent_menu(ui: &mut egui::Ui, trackers: &[(String, &'static str, Vec<Tracker>)], actions: &mut Vec<Action>) {
@@ -1989,6 +2118,7 @@ impl eframe::App for App {
         self.table(ctx, &mut actions);
         self.settings_window(ctx);
         self.about_window(ctx);
+        self.info_window(ctx);
         self.after_flac_window(ctx);
         self.spectrogram_windows(ctx);
         self.report_windows(ctx);
