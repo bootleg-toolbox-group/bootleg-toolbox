@@ -211,6 +211,116 @@ fn write_flac(
     Ok(Encoded { samples, md5 })
 }
 
+/// What a float WAV holds: FLAC stores integers only.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FloatScan {
+    /// 16 or 24 when every sample is exactly a 16-bit or 24-bit value (the float only
+    /// carries integer audio, which converts bit-exact); None for real float audio.
+    pub exact_bits: Option<u32>,
+    /// Samples above full scale, which 24-bit integers cannot hold.
+    pub clipped: u64,
+    /// Largest absolute sample value (1.0 = 0 dBFS).
+    pub peak: f64,
+}
+
+/// One float sample per call to `each`, from the PCM bytes of a float WAV.
+fn float_samples(path: &Path, info: &AudioInfo, cancel: &AtomicBool, mut each: impl FnMut(f64)) -> Result<u64, String> {
+    let width = info.bits.div_ceil(8) as usize;
+    if !info.float || !(width == 4 || width == 8) {
+        return Err("not a 32-bit or 64-bit float WAV".into());
+    }
+    let mut leftover: Vec<u8> = Vec::new();
+    audio::read_pcm(path, cancel, |chunk| {
+        leftover.extend_from_slice(chunk);
+        let whole = leftover.len() / width * width;
+        for b in leftover[..whole].chunks_exact(width) {
+            each(if width == 4 { f32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64 } else { f64::from_le_bytes(b.try_into().unwrap()) });
+        }
+        leftover.drain(..whole);
+    })
+}
+
+/// Reads a float WAV through, to find out how it converts to FLAC.
+pub fn scan_float(source: &Path, cancel: &AtomicBool) -> Result<FloatScan, String> {
+    let info = audio::probe(source)?;
+    let (mut fits16, mut fits24, mut invalid) = (true, true, false);
+    let mut scan = FloatScan::default();
+    let fits = |v: f64, bits: i32| {
+        let x = v * 2f64.powi(bits - 1);
+        x == x.round() && x >= -(2f64.powi(bits - 1)) && x < 2f64.powi(bits - 1)
+    };
+    float_samples(source, &info, cancel, |v| {
+        if !v.is_finite() {
+            invalid |= v.is_nan();
+            scan.clipped += 1;
+            return;
+        }
+        scan.peak = scan.peak.max(v.abs());
+        if v * 8_388_608.0 > 8_388_607.5 || v * 8_388_608.0 < -8_388_608.5 {
+            scan.clipped += 1;
+        }
+        if v != 0.0 {
+            fits16 = fits16 && fits(v, 16);
+            fits24 = fits24 && fits(v, 24);
+        }
+    })?;
+    if invalid {
+        return Err("the file holds invalid float values (NaN): it is damaged".into());
+    }
+    scan.exact_bits = if fits16 { Some(16) } else if fits24 { Some(24) } else { None };
+    Ok(scan)
+}
+
+/// How a float WAV was converted.
+pub struct FloatConverted {
+    pub bits: u32,
+    /// Bit-exact: the float only held 16-bit or 24-bit values.
+    pub exact: bool,
+    pub clipped: u64,
+    /// Largest difference between the float samples and the FLAC ones, in dBFS (None when
+    /// there is none).
+    pub max_diff_db: Option<f64>,
+}
+
+/// Converts a float WAV to FLAC: bit-exact when it only holds 16-bit or 24-bit values,
+/// otherwise rounded to 24 bits when `round` is set (refused when it is not).
+pub fn float_to_flac(source: &Path, out: &Path, level: u8, tags: &[(String, String)], round: bool, cancel: &AtomicBool) -> Result<FloatConverted, String> {
+    let info = audio::probe(source)?;
+    let scan = scan_float(source, cancel)?;
+    let bits = match scan.exact_bits {
+        Some(bits) => bits,
+        None if round => 24,
+        None => return Err("real 32-bit float audio: FLAC would round it to 24 bits (not bit-exact), and rounding was not allowed".into()),
+    };
+    let scale = 2f64.powi(bits as i32 - 1);
+    let (lo, hi) = (-scale, scale - 1.0);
+    let width = (bits / 8) as usize;
+    let (mut clipped, mut max_diff) = (0u64, 0f64);
+    let flac_info = AudioInfo { format: Format::Flac, rate: info.rate, bits, channels: info.channels, samples: info.samples, md5: None, float: false };
+    pcm_to_flac(out, &flac_info, level, tags, cancel, |sink| {
+        let mut buf: Vec<u8> = Vec::with_capacity(1 << 16);
+        float_samples(source, &info, cancel, |v| {
+            let x = if v.is_finite() { v * scale } else if v > 0.0 { hi } else { lo };
+            let rounded = x.round();
+            let n = rounded.clamp(lo, hi);
+            if n != rounded {
+                clipped += 1;
+            } else {
+                max_diff = max_diff.max((x - n).abs() / scale);
+            }
+            buf.extend_from_slice(&(n as i32).to_le_bytes()[..width]);
+            if buf.len() >= 1 << 16 {
+                sink(&buf);
+                buf.clear();
+            }
+        })?;
+        sink(&buf);
+        Ok(())
+    })?;
+    let exact = scan.exact_bits.is_some() && clipped == 0 && max_diff == 0.0;
+    Ok(FloatConverted { bits, exact, clipped, max_diff_db: (max_diff > 0.0).then(|| 20.0 * max_diff.log10()) })
+}
+
 /// Decodes `source` to a WAV file `out` (through a ".part" file), then checks it.
 /// WAVE_FORMAT_EXTENSIBLE above 16 bits or 2 channels, as the reference decoder writes.
 pub fn to_wav(source: &Path, out: &Path, cancel: &AtomicBool) -> Result<Encoded, String> {

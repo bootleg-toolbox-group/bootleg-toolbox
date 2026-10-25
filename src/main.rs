@@ -63,6 +63,8 @@ fn run_cli(args: &[String]) -> i32 {
         .map(|(name, announce)| ops::CustomTracker { name: name.into(), announce: announce.into() })
         .collect();
     // FLAC level for to-flac: BH_LEVEL (default 8).
+    // Float WAVs that do not hold exact 16/24-bit values: BH_FLOAT=round rounds them to 24 bits.
+    let round_float = std::env::var("BH_FLOAT").is_ok_and(|v| v == "round");
     let level = std::env::var("BH_LEVEL").ok().and_then(|l| l.parse().ok()).unwrap_or(8);
     let op = match command.as_str() {
         "details" => Op::Details { verbose: true },
@@ -80,8 +82,8 @@ fn run_cli(args: &[String]) -> i32 {
         "spectrogram" => Op::Spectrogram,
         "lossless" => Op::Lossless,
         "speed" => Op::Speed,
-        "to-flac" => Op::Convert { target: ops::Target::Flac, level },
-        "to-wav" => Op::Convert { target: ops::Target::Wav, level },
+        "to-flac" => Op::Convert { target: ops::Target::Flac, level, round_float },
+        "to-wav" => Op::Convert { target: ops::Target::Wav, level, round_float },
         "mp3-320" => Op::Mp3(encode::Mp3Mode::Cbr320),
         "mp3-v0" => Op::Mp3(encode::Mp3Mode::V0),
         "fix-sbe" => Op::FixSbe,

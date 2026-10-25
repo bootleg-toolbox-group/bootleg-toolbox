@@ -50,8 +50,11 @@ pub enum Msg {
     Source { path: PathBuf, text: String, level: Level, tooltip: String, report: Arc<crate::lossless::Report> },
     /// Speed check verdict, for the Speed column, with the full analysis.
     Speed { path: PathBuf, text: String, level: Level, tooltip: String, report: Arc<crate::report::Report> },
-    /// After a conversion: the sources converted successfully, and how many were not.
-    Converted { target: Target, sources: Vec<PathBuf>, failed: usize },
+    /// After a conversion: the sources converted successfully (except the float WAVs that
+    /// were rounded, whose originals are kept), how many were not, how many were rounded.
+    Converted { target: Target, sources: Vec<PathBuf>, failed: usize, rounded: usize },
+    /// Float WAVs read before a conversion to FLAC (see `encode::scan_float`).
+    FloatScan(Vec<(PathBuf, crate::encode::FloatScan)>),
     Finished { summary: String, rescan: bool },
 }
 
@@ -201,7 +204,11 @@ pub enum Op {
     Spectrogram,
     Lossless,
     Speed,
-    Convert { target: Target, level: u8 },
+    /// `round_float`: float WAVs that do not hold exact 16/24-bit values are rounded to
+    /// 24 bits (otherwise they are refused).
+    Convert { target: Target, level: u8, round_float: bool },
+    /// Reads the float WAVs among the files before a conversion to FLAC.
+    ScanFloat,
     Mp3(crate::encode::Mp3Mode),
     FixSbe,
     /// Follow-up of a conversion to FLAC (the choices of its window).
@@ -242,6 +249,7 @@ impl Op {
             Op::Speed => "Checking tape speed",
             Op::Convert { target: Target::Flac, .. } => "Converting to FLAC",
             Op::Convert { target: Target::Wav, .. } => "Converting to WAV",
+            Op::ScanFloat => "Reading the 32-bit float files",
             Op::Mp3(_) => "Encoding MP3 copies",
             Op::FixSbe => "Fixing sector boundary errors",
             Op::AfterFlac { .. } => "Tidying up after the conversion",
@@ -308,7 +316,8 @@ pub fn spawn(op: Op, shows: Vec<Show>, files: Vec<PathBuf>, opt: Options, tx: Se
                 Op::Spectrogram => op_spectrogram(&ctx, &files),
                 Op::Lossless => op_lossless(&ctx, &shows, &files),
                 Op::Speed => op_speed(&ctx, &shows, &files),
-                Op::Convert { target, level } => op_convert(&ctx, &files, *target, *level),
+                Op::Convert { target, level, round_float } => op_convert(&ctx, &files, *target, *level, *round_float),
+                Op::ScanFloat => op_scan_float(&ctx, &files),
                 Op::Mp3(mode) => op_mp3(&ctx, &shows, &files, *mode),
                 Op::FixSbe => op_fix_sbe(&ctx, &shows, &files),
                 Op::AfterFlac { roots, sources, trash_sources, trash_checksums, create_ffp } => {
@@ -374,8 +383,9 @@ pub fn quality_label(info: &AudioInfo) -> String {
     let mut label = if info.is_cd() {
         "CD-ready".to_string()
     } else {
-        let mut l = format!("{}-bit/{} kHz", info.bits, audio::trim_float(info.rate as f64 / 1000.0));
-        if info.bits >= 24 || info.rate > 48000 {
+        let float = if info.float { " float" } else { "" };
+        let mut l = format!("{}-bit{float}/{} kHz", info.bits, audio::trim_float(info.rate as f64 / 1000.0));
+        if !info.float && (info.bits >= 24 || info.rate > 48000) {
             l.push_str(" hi-res");
         }
         l
@@ -903,7 +913,24 @@ pub fn op_lossless(ctx: &Ctx, shows: &[Show], files: &[PathBuf]) -> String {
 
 // ---------------------------------------------------------------- Conversions
 
-pub fn op_convert(ctx: &Ctx, files: &[PathBuf], target: Target, level: u8) -> String {
+/// The float WAVs among `files`, read through: what a conversion to FLAC would do with them.
+pub fn op_scan_float(ctx: &Ctx, files: &[PathBuf]) -> String {
+    let floats: Vec<PathBuf> = files
+        .iter()
+        .filter(|p| Format::from_path(p) == Some(Format::Wav) && audio::probe(p).is_ok_and(|i| i.float))
+        .cloned()
+        .collect();
+    ctx.add_total(floats.len());
+    let scans = par_map(ctx, &floats, |p| p.clone(), |path| crate::encode::scan_float(path, &ctx.cancel));
+    let found: Vec<(PathBuf, crate::encode::FloatScan)> = floats.iter().zip(scans).filter_map(|(p, s)| s.map(|s| (p.clone(), s))).collect();
+    let count = found.len();
+    if !ctx.cancelled() {
+        let _ = ctx.tx.send(Msg::FloatScan(found));
+    }
+    format!("{count} float file(s) read")
+}
+
+pub fn op_convert(ctx: &Ctx, files: &[PathBuf], target: Target, level: u8, round_float: bool) -> String {
     let todo: Vec<PathBuf> = files.iter().filter(|f| Format::from_path(f) != Some(target.format())).cloned().collect();
     for f in files.iter().filter(|f| Format::from_path(f) == Some(target.format())) {
         ctx.status(f, format!("Already in {}", target.name()), Level::Info, "");
@@ -920,6 +947,7 @@ pub fn op_convert(ctx: &Ctx, files: &[PathBuf], target: Target, level: u8) -> St
         ctx.log(format!("FLAC compression level {level}"), Level::Info);
     }
     ctx.add_total(todo.len());
+    // Per file: None = skipped, Some((level, rounded from float)).
     let results = par_map(ctx, &todo, |p| p.clone(), |path| {
         let out = path.with_extension(match target {
             Target::Flac => "flac",
@@ -927,7 +955,24 @@ pub fn op_convert(ctx: &Ctx, files: &[PathBuf], target: Target, level: u8) -> St
         });
         if out.exists() {
             ctx.status(path, format!("Skipped: {} already exists", file_name(&out)), Level::Warn, "");
-            return Ok(false);
+            return Ok(None);
+        }
+        let float = target == Target::Flac && audio::probe(path)?.float;
+        if float {
+            let done = crate::encode::float_to_flac(path, &out, level, &audio::source_tags(path), round_float, &ctx.cancel)?;
+            ctx.rescan.store(true, Ordering::SeqCst);
+            let (text, level) = if done.exact {
+                (format!("Converted to {} (verified; the float held {}-bit values: bit-exact)", file_name(&out), done.bits), Level::Ok)
+            } else {
+                let diff = done.max_diff_db.map(|d| format!(", largest difference {d:.1} dBFS")).unwrap_or_default();
+                let mut text = format!("Converted to {} (verified; float rounded to {}-bit{diff})", file_name(&out), done.bits);
+                if done.clipped > 0 {
+                    text.push_str(&format!("; {} sample(s) above 0 dBFS clipped", done.clipped));
+                }
+                (text, if done.clipped > 0 { Level::Warn } else { Level::Ok })
+            };
+            ctx.status(path, text, level, "");
+            return Ok(Some((level, !done.exact)));
         }
         match target {
             Target::Flac => crate::encode::to_flac(path, &out, level, &audio::source_tags(path), &ctx.cancel)?,
@@ -935,14 +980,19 @@ pub fn op_convert(ctx: &Ctx, files: &[PathBuf], target: Target, level: u8) -> St
         };
         ctx.rescan.store(true, Ordering::SeqCst);
         ctx.status(path, format!("Converted to {} (verified)", file_name(&out)), Level::Ok, "");
-        Ok(true)
+        Ok(Some((Level::Ok, false)))
     });
-    let sources: Vec<PathBuf> = todo.iter().zip(&results).filter(|(_, r)| matches!(r, Some(true))).map(|(p, _)| p.clone()).collect();
-    let failed = todo.len() - sources.len();
-    if !ctx.cancelled() {
-        let _ = ctx.tx.send(Msg::Converted { target, sources: sources.clone(), failed });
+    // The originals of rounded float files are not offered for the trash: they hold more.
+    let sources: Vec<PathBuf> = todo.iter().zip(&results).filter(|(_, r)| matches!(r, Some(Some((_, false))))).map(|(p, _)| p.clone()).collect();
+    let rounded = results.iter().filter(|r| matches!(r, Some(Some((_, true))))).count();
+    let failed = todo.len() - sources.len() - rounded;
+    if rounded > 0 {
+        ctx.log(format!("{rounded} float file(s) rounded to 24-bit: their originals are kept"), Level::Info);
     }
-    let levels: Vec<Option<Level>> = results.iter().map(|r| r.map(|ok| if ok { Level::Ok } else { Level::Warn })).collect();
+    if !ctx.cancelled() {
+        let _ = ctx.tx.send(Msg::Converted { target, sources: sources.clone(), failed, rounded });
+    }
+    let levels: Vec<Option<Level>> = results.iter().map(|r| r.map(|done| done.map(|(level, _)| level).unwrap_or(Level::Warn))).collect();
     summarize(&levels, &format!("file(s) converted to {}", target.name()))
 }
 

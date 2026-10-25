@@ -247,7 +247,10 @@ pub struct App {
     /// Fit the columns to their content on the next frame (new files, new results).
     fit_columns: bool,
     /// Result of the last conversion, and the window offered after a conversion to FLAC.
-    converted: Option<(Target, Vec<PathBuf>, usize)>,
+    converted: Option<(Target, Vec<PathBuf>, usize, usize)>,
+    /// A conversion to FLAC waiting for the float WAVs to be read, then for the user's choice.
+    float_pending: Option<FloatPending>,
+    float_dialog: Option<FloatPending>,
     after_flac: Option<AfterFlac>,
     clipboard: Option<arboard::Clipboard>,
 }
@@ -333,10 +336,20 @@ fn columns_menu(ui: &mut egui::Ui, visible: &[Col], actions: &mut Vec<Action>) {
 }
 
 /// The window offered once a conversion to FLAC is done.
+/// A conversion to FLAC of a selection with float WAVs.
+struct FloatPending {
+    level: u8,
+    shows: Vec<Show>,
+    files: Vec<PathBuf>,
+    scans: Vec<(PathBuf, crate::encode::FloatScan)>,
+}
+
 struct AfterFlac {
     roots: Vec<PathBuf>,
     sources: Vec<PathBuf>,
     failed: usize,
+    /// Float WAVs rounded to 24-bit: converted, but their originals are kept.
+    rounded: usize,
     /// Checksum files listing the converted originals.
     old: Vec<PathBuf>,
     trash: bool,
@@ -387,6 +400,8 @@ impl App {
             speed: HashMap::new(),
             fit_columns: true,
             converted: None,
+            float_pending: None,
+            float_dialog: None,
             after_flac: None,
             clipboard: None,
         };
@@ -599,7 +614,102 @@ impl App {
 
     fn run_on_selection(&mut self, op: Op) {
         let (shows, files) = self.selection();
+        // To FLAC with float WAVs: read them first, to say what the conversion will do.
+        if let Op::Convert { target: Target::Flac, level, round_float: false } = op {
+            let float = |p: &PathBuf| match self.info.get(p) {
+                Some(info) => info.float,
+                None => crate::audio::probe(p).is_ok_and(|i| i.float),
+            };
+            if self.running.is_none() && files.iter().any(float) {
+                self.float_pending = Some(FloatPending { level, shows: shows.clone(), files: files.clone(), scans: Vec::new() });
+                self.start(Op::ScanFloat, shows, files, false);
+                return;
+            }
+        }
         self.start(op, shows, files, false);
+    }
+
+    /// After the float WAVs were read: convert at once when they all convert bit-exact,
+    /// otherwise ask.
+    fn float_scanned(&mut self, stopped: bool) {
+        let Some(pending) = self.float_pending.take() else { return };
+        if stopped {
+            return;
+        }
+        if pending.scans.iter().all(|(_, s)| s.exact_bits.is_some()) {
+            let op = Op::Convert { target: Target::Flac, level: pending.level, round_float: false };
+            self.start(op, pending.shows, pending.files, false);
+        } else {
+            self.float_dialog = Some(pending);
+        }
+    }
+
+    fn float_window(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.float_dialog.take() else { return };
+        let exact16 = pending.scans.iter().filter(|(_, s)| s.exact_bits == Some(16)).count();
+        let exact24 = pending.scans.iter().filter(|(_, s)| s.exact_bits == Some(24)).count();
+        let real: Vec<&(PathBuf, crate::encode::FloatScan)> = pending.scans.iter().filter(|(_, s)| s.exact_bits.is_none()).collect();
+        let clipped: Vec<&(PathBuf, crate::encode::FloatScan)> = pending.scans.iter().filter(|(_, s)| s.clipped > 0).collect();
+        let others = pending.files.len() - pending.scans.len();
+        let (mut round, mut exact_only, mut cancel) = (false, false, false);
+        egui::Window::new("32-bit float files")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label("FLAC stores whole numbers only: 32-bit float audio has to be turned into 16-bit or 24-bit samples.");
+                ui.add_space(6.0);
+                if exact16 + exact24 > 0 {
+                    ui.label(colored(
+                        format!("{} file(s) only hold 16-bit or 24-bit values: they convert bit-exact.", exact16 + exact24),
+                        Level::Ok,
+                    ));
+                }
+                ui.label(colored(
+                    format!(
+                        "{} file(s) are real float audio: converting them rounds them to 24-bit. The differences stay \
+                         below -144 dBFS (inaudible), but the FLAC is not bit-exact; their originals will be kept.",
+                        real.len()
+                    ),
+                    Level::Warn,
+                ));
+                for (path, scan) in real.iter().take(8) {
+                    ui.label(format!("    {}   (peak {:.2} dBFS)", file_name(path), 20.0 * scan.peak.max(1e-12).log10()));
+                }
+                if real.len() > 8 {
+                    ui.label("    ...");
+                }
+                if !clipped.is_empty() {
+                    let total: u64 = clipped.iter().map(|(_, s)| s.clipped).sum();
+                    ui.label(colored(
+                        format!("{total} sample(s) in {} file(s) go above 0 dBFS: 24-bit cannot hold them, they will be clipped.", clipped.len()),
+                        Level::Error,
+                    ));
+                }
+                if others > 0 {
+                    ui.label(format!("The {others} other file(s) convert as usual."));
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    round = ui.button("Convert all (round the float files)").clicked();
+                    if exact16 + exact24 + others > 0 {
+                        exact_only = ui.button("Convert only the bit-exact ones").clicked();
+                    }
+                    cancel = ui.button("Cancel").clicked();
+                });
+            });
+        cancel |= ctx.input(|i| i.key_pressed(Key::Escape));
+        if round || exact_only {
+            let mut files = pending.files.clone();
+            if exact_only {
+                files.retain(|f| !real.iter().any(|(p, _)| p == f));
+            }
+            let op = Op::Convert { target: Target::Flac, level: pending.level, round_float: round };
+            let shows = pending.shows.clone();
+            self.start(op, shows, files, false);
+        } else if !cancel {
+            self.float_dialog = Some(pending);
+        }
     }
 
     fn stop(&mut self) {
@@ -643,8 +753,13 @@ impl App {
                         running.done = done;
                         running.total = total;
                     }
-                    Msg::Converted { target, sources, failed } => {
-                        self.converted = Some((target, sources, failed));
+                    Msg::Converted { target, sources, failed, rounded } => {
+                        self.converted = Some((target, sources, failed, rounded));
+                    }
+                    Msg::FloatScan(found) => {
+                        if let Some(pending) = &mut self.float_pending {
+                            pending.scans = found;
+                        }
                     }
                     Msg::Finished { summary, rescan } => {
                         finished = Some((summary, rescan));
@@ -658,11 +773,16 @@ impl App {
         }
         if let Some((summary, rescan)) = finished {
             self.running = None;
+            if self.float_pending.is_some() {
+                self.flash(summary.clone());
+                self.float_scanned(summary == "Stopped.");
+                return;
+            }
             self.fit_columns = true;
             self.log(summary.clone(), Level::Info);
             // After a conversion to FLAC: offer to tidy up (before the list changes).
-            if let Some((Target::Flac, sources, failed)) = self.converted.take() {
-                if !sources.is_empty() && summary != "Stopped." {
+            if let Some((Target::Flac, sources, failed, rounded)) = self.converted.take() {
+                if (!sources.is_empty() || rounded > 0) && summary != "Stopped." {
                     let roots: Vec<PathBuf> =
                         self.shows.iter().filter(|s| s.files.iter().any(|f| sources.contains(f))).map(|s| s.root.clone()).collect();
                     let extensions: HashSet<String> = sources
@@ -673,6 +793,7 @@ impl App {
                     self.after_flac = Some(AfterFlac {
                         roots,
                         failed,
+                        rounded,
                         trash: self.opt.after_flac_trash,
                         trash_old: self.opt.after_flac_old,
                         ffp: self.opt.after_flac_ffp,
@@ -1031,13 +1152,13 @@ impl App {
                             if ui.button(text).clicked() {
                                 ui.close_menu();
                                 actions.push(Action::FlacLevel(l));
-                                actions.push(Action::Run(Op::Convert { target: Target::Flac, level: l }));
+                                actions.push(Action::Run(Op::Convert { target: Target::Flac, level: l, round_float: false }));
                             }
                         }
                         ui.separator();
                         if ui.button("To WAV").clicked() {
                             ui.close_menu();
-                            actions.push(Action::Run(Op::Convert { target: Target::Wav, level }));
+                            actions.push(Action::Run(Op::Convert { target: Target::Wav, level, round_float: false }));
                         }
                         ui.separator();
                         ui.label(RichText::new("MP3 copy (separate folder)").strong());
@@ -1550,7 +1671,7 @@ impl App {
 
     fn shortcuts(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         // The info file choice window takes the keys (arrows, Enter, Escape).
-        if ctx.wants_keyboard_input() || self.info_choice.is_some() {
+        if ctx.wants_keyboard_input() || self.info_choice.is_some() || self.float_dialog.is_some() {
             return;
         }
         let busy = self.running.is_some();
@@ -1717,7 +1838,10 @@ impl App {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
-                ui.label(format!("{} file(s) converted to FLAC and verified.", dialog.sources.len()));
+                ui.label(format!("{} file(s) converted to FLAC and verified.", dialog.sources.len() + dialog.rounded));
+                if dialog.rounded > 0 {
+                    ui.label(format!("{} of them were 32-bit float rounded to 24-bit: their originals are kept, and not offered for the trash.", dialog.rounded));
+                }
                 if dialog.failed > 0 {
                     ui.label(colored(
                         format!("{} file(s) were not converted (error, or FLAC already there): their originals are kept.", dialog.failed),
@@ -1725,7 +1849,9 @@ impl App {
                     ));
                 }
                 ui.add_space(6.0);
-                ui.checkbox(&mut dialog.trash, format!("Move the {} original file(s) to the trash (only the ones converted successfully)", dialog.sources.len()));
+                if !dialog.sources.is_empty() {
+                    ui.checkbox(&mut dialog.trash, format!("Move the {} original file(s) to the trash (only the ones converted successfully)", dialog.sources.len()));
+                }
                 if !dialog.old.is_empty() {
                     let mut names: Vec<String> = dialog.old.iter().take(8).map(|p| format!("    {}", file_name(p))).collect();
                     if dialog.old.len() > 8 {
@@ -2085,7 +2211,7 @@ fn ops_menu(ui: &mut egui::Ui, disabled: bool, flac_level: u8, trackers: &[(Stri
     for (label, target) in [(format!("🎵 To FLAC (level {flac_level})"), Target::Flac), ("🎵 To WAV".to_string(), Target::Wav)] {
         if ui.add_enabled(!disabled, egui::Button::new(label)).clicked() {
             ui.close_menu();
-            actions.push(Action::Run(Op::Convert { target, level: flac_level }));
+            actions.push(Action::Run(Op::Convert { target, level: flac_level, round_float: false }));
         }
     }
     mp3_buttons(ui, disabled, actions);
@@ -2144,6 +2270,7 @@ impl eframe::App for App {
         self.settings_window(ctx);
         self.about_window(ctx);
         self.info_window(ctx);
+        self.float_window(ctx);
         self.after_flac_window(ctx);
         self.spectrogram_windows(ctx);
         self.report_windows(ctx);

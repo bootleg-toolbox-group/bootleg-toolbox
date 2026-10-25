@@ -114,7 +114,8 @@ impl AudioInfo {
 
     /// "FLAC 16/44.1"
     pub fn label(&self) -> String {
-        format!("{} {}/{}", self.format.name(), self.bits, trim_float(self.rate as f64 / 1000.0))
+        let float = if self.float { " float" } else { "" };
+        format!("{} {}{float}/{}", self.format.name(), self.bits, trim_float(self.rate as f64 / 1000.0))
     }
 }
 
