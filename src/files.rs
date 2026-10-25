@@ -93,12 +93,19 @@ pub fn natural_path_cmp(a: &Path, b: &Path) -> Ordering {
 
 // ---------------------------------------------------------------- scanning
 
+/// A disc, set or tape side of a show: "CD1", "Disc 2 - Encore", "D1", "Set B", "Side A",
+/// "Part 2", "Tape 1", "Vol 1", or a bare letter or number ("A", "B", "1", "2").
 fn disc_dir_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?i)^(cd|disc|disk|dvd|set|d)[\s._-]*\d+").unwrap())
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)^(?:(?:cd|disc|disk|dvd|set|d|part|pt|side|tape|vol|volume)[\s._-]*\d+|(?:cd|disc|disk|set|part|side|tape)[\s._-]+[a-z](?:$|[\s._-])|[a-z]$|\d{1,2}$)",
+        )
+        .unwrap()
+    })
 }
 
-/// CD1/CD2/Set 1 sub-folders belong to the show folder above them.
+/// CD1/CD2/Set 1/A/B sub-folders belong to the show folder above them.
 fn show_root_for(dir: &Path, top: Option<&Path>) -> PathBuf {
     let name = file_name(dir);
     if top != Some(dir) && disc_dir_re().is_match(&name) {
@@ -333,5 +340,11 @@ mod tests {
         assert!(disc_dir_re().is_match("Disc 2"));
         assert!(disc_dir_re().is_match("set_1"));
         assert!(!disc_dir_re().is_match("Concert"));
+        for disc in ["A", "b", "1", "02", "Side A", "Set B", "Part 2", "Tape 1", "Vol. 1", "CD A", "Disc 2 - Encore"] {
+            assert!(disc_dir_re().is_match(disc), "{disc}");
+        }
+        for show in ["Dave Matthews Band", "Doors 1968", "Setlist", "Tapes", "Sideshow", "AB", "Part of it", "1977-05-08", "123"] {
+            assert!(!disc_dir_re().is_match(show), "{show}");
+        }
     }
 }
