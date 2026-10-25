@@ -211,6 +211,8 @@ pub enum Op {
     ScanFloat,
     Mp3(crate::encode::Mp3Mode),
     FixSbe,
+    /// Checks the files against these .torrent files.
+    TorrentCheck(Vec<PathBuf>),
     /// Follow-up of a conversion to FLAC (the choices of its window).
     AfterFlac { roots: Vec<PathBuf>, sources: Vec<PathBuf>, trash_sources: bool, trash_checksums: Vec<PathBuf>, create_ffp: bool },
 }
@@ -252,6 +254,7 @@ impl Op {
             Op::ScanFloat => "Reading the 32-bit float files",
             Op::Mp3(_) => "Encoding MP3 copies",
             Op::FixSbe => "Fixing sector boundary errors",
+            Op::TorrentCheck(_) => "Checking against the torrent",
             Op::AfterFlac { .. } => "Tidying up after the conversion",
         }
     }
@@ -284,6 +287,10 @@ impl Ctx {
     fn add_total(&self, n: usize) {
         let total = self.total.fetch_add(n, Ordering::SeqCst) + n;
         let _ = self.tx.send(Msg::Progress { done: self.done.load(Ordering::SeqCst), total });
+    }
+    fn advance(&self, n: usize) {
+        let done = self.done.fetch_add(n, Ordering::SeqCst) + n;
+        let _ = self.tx.send(Msg::Progress { done, total: self.total.load(Ordering::SeqCst) });
     }
     fn tick(&self) {
         let done = self.done.fetch_add(1, Ordering::SeqCst) + 1;
@@ -320,6 +327,7 @@ pub fn spawn(op: Op, shows: Vec<Show>, files: Vec<PathBuf>, opt: Options, tx: Se
                 Op::ScanFloat => op_scan_float(&ctx, &files),
                 Op::Mp3(mode) => op_mp3(&ctx, &shows, &files, *mode),
                 Op::FixSbe => op_fix_sbe(&ctx, &shows, &files),
+                Op::TorrentCheck(torrents) => op_torrent_check(&ctx, &shows, torrents),
                 Op::AfterFlac { roots, sources, trash_sources, trash_checksums, create_ffp } => {
                     op_after_flac(&ctx, roots, sources, *trash_sources, trash_checksums, *create_ffp)
                 }
@@ -1488,6 +1496,141 @@ fn hash_pieces(ctx: &Ctx, paths: &[PathBuf], piece_length: u64) -> Result<Vec<u8
         pieces.extend_from_slice(&Sha1::digest(&buffer));
     }
     Ok(pieces)
+}
+
+fn human_size(bytes: u64) -> String {
+    let (value, unit) = match bytes {
+        b if b >= 1 << 30 => (b as f64 / (1u64 << 30) as f64, "GB"),
+        b if b >= 1 << 20 => (b as f64 / (1u64 << 20) as f64, "MB"),
+        b => (b as f64 / 1024.0, "KB"),
+    };
+    format!("{value:.1} {unit}")
+}
+
+/// The folder a torrent's files are in: a show of the list named like the torrent, a
+/// folder of that name next to the .torrent, or else the only show of the selection.
+fn torrent_root(t: &crate::torrent_check::Torrent, torrent: &Path, shows: &[Show]) -> Result<(PathBuf, Option<String>), String> {
+    let beside = torrent.parent().map(Path::to_path_buf).unwrap_or_default();
+    if t.single_file {
+        let mut dirs: Vec<PathBuf> = shows.iter().map(|s| s.root.clone()).collect();
+        dirs.push(beside);
+        return dirs
+            .into_iter()
+            .find(|d| d.join(&t.name).is_file())
+            .map(|d| (d, None))
+            .ok_or_else(|| format!("{} not found next to the torrent or in the shows of the list", t.name));
+    }
+    if let Some(show) = shows.iter().find(|s| file_name(&s.root) == t.name) {
+        return Ok((show.root.clone(), None));
+    }
+    if beside.join(&t.name).is_dir() {
+        return Ok((beside.join(&t.name), None));
+    }
+    match shows {
+        [only] => Ok((only.root.clone(), Some(format!("the torrent's folder is named \"{}\": checked against {} instead", t.name, file_name(&only.root))))),
+        [] => Err(format!("no folder \"{}\" next to the torrent: add the show to the list, then check again", t.name)),
+        _ => Err(format!("no show named \"{}\" in the list: select the show to check, then check again", t.name)),
+    }
+}
+
+/// Checks shows against .torrent files: every piece hashed again, differences traced to files.
+pub fn op_torrent_check(ctx: &Ctx, shows: &[Show], torrents: &[PathBuf]) -> String {
+    use crate::torrent_check as tc;
+    let (mut matching, mut differing, mut failed) = (0, 0, 0);
+    for torrent in torrents {
+        if ctx.cancelled() {
+            break;
+        }
+        let tname = file_name(torrent);
+        let t = match tc::read(torrent) {
+            Ok(t) => t,
+            Err(e) => {
+                ctx.log(format!("{tname}: {e}"), Level::Error);
+                failed += 1;
+                continue;
+            }
+        };
+        let mut about = format!(
+            "{tname}: \"{}\", {} file(s), {}, pieces of {}, {}",
+            t.name,
+            t.files.iter().filter(|(p, _)| !p.is_empty()).count(),
+            human_size(t.total()),
+            human_size(t.piece_length),
+            if t.private { "private" } else { "public" }
+        );
+        if let Some(source) = &t.source {
+            about.push_str(&format!(", source {source}"));
+        }
+        if let Some(tracker) = &t.tracker {
+            about.push_str(&format!(", tracker {tracker}"));
+        }
+        if let Some(by) = &t.created_by {
+            about.push_str(&format!(", made with {by}"));
+        }
+        about.push_str(&format!(", info hash {}", t.info_hash));
+        ctx.log(about, Level::Info);
+        let (root, note) = match torrent_root(&t, torrent, shows) {
+            Ok(found) => found,
+            Err(e) => {
+                ctx.log(format!("{tname}: {e}"), Level::Error);
+                failed += 1;
+                continue;
+            }
+        };
+        if let Some(note) = note {
+            ctx.log(format!("{tname}: {note}"), Level::Warn);
+        }
+        ctx.add_total(t.pieces.len());
+        let extra = if t.single_file { Vec::new() } else { torrent_files(&root).0 };
+        let check = match tc::check(&t, &root, extra, &ctx.cancel, &|n| ctx.advance(n)) {
+            Ok(c) => c,
+            Err(e) => {
+                if !ctx.cancelled() {
+                    ctx.log(format!("{tname}: {e}"), Level::Error);
+                    failed += 1;
+                }
+                continue;
+            }
+        };
+        let mut problems = 0;
+        for f in check.files.iter().filter(|f| f.path.is_some()) {
+            let path = f.path.as_ref().unwrap();
+            let (text, level) = match f.found {
+                None => (format!("Missing: listed in {tname}"), Level::Error),
+                Some(size) if size != f.expected => (format!("Wrong size: {size} bytes, {tname} says {}", f.expected), Level::Error),
+                _ if f.bad_pieces > 0 => (format!("Damaged: {} of its {} piece(s) differ from {tname}", f.bad_pieces, f.pieces), Level::Error),
+                _ => (format!("Matches {tname}"), Level::Ok),
+            };
+            if level != Level::Ok {
+                problems += 1;
+                ctx.log(format!("{}: {text}", f.rel), level);
+            }
+            ctx.status(path, text, level, "");
+        }
+        for path in &check.extra {
+            ctx.log(format!("{}: in the folder but not in {tname}", rel_posix(path, &root)), Level::Info);
+        }
+        let show_text = if problems == 0 {
+            matching += 1;
+            format!("Matches {tname} ({} pieces checked)", t.pieces.len())
+        } else {
+            differing += 1;
+            format!("{problems} file(s) differ from {tname} ({} of {} pieces)", check.bad_pieces, t.pieces.len())
+        };
+        let level = if problems == 0 { Level::Ok } else { Level::Error };
+        if shows.iter().any(|s| s.root == root) {
+            ctx.status(&root, &show_text, level, "");
+        }
+        ctx.log(format!("{}: {show_text}", file_name(&root)), level);
+    }
+    let mut summary = format!("{} torrent(s) checked: {matching} match", torrents.len());
+    if differing > 0 {
+        summary.push_str(&format!(", {differing} differ"));
+    }
+    if failed > 0 {
+        summary.push_str(&format!(", {failed} could not be checked"));
+    }
+    summary
 }
 
 pub fn op_torrent(ctx: &Ctx, shows: &[Show], trackers: &[Tracker]) -> String {

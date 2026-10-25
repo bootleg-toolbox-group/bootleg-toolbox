@@ -211,6 +211,8 @@ enum Action {
     OpenFolder(PathBuf),
     CopyFfp,
     CopyInfo,
+    /// Pick .torrent files, then check the selection against them.
+    TorrentCheck,
     Remove,
     Deselect,
     SelectAll,
@@ -275,6 +277,8 @@ pub struct App {
     /// A conversion to FLAC waiting for the float WAVs to be read, then for the user's choice.
     float_pending: Option<FloatPending>,
     float_dialog: Option<FloatPending>,
+    /// .torrent files dropped while something ran: checked when it ends.
+    pending_torrents: Option<Vec<PathBuf>>,
     after_flac: Option<AfterFlac>,
     clipboard: Option<arboard::Clipboard>,
 }
@@ -426,6 +430,7 @@ impl App {
             converted: None,
             float_pending: None,
             float_dialog: None,
+            pending_torrents: None,
             after_flac: None,
             clipboard: None,
         };
@@ -620,7 +625,7 @@ impl App {
         if self.running.is_some() {
             return;
         }
-        if files.is_empty() {
+        if files.is_empty() && !matches!(op, Op::TorrentCheck(_)) {
             if !quiet {
                 self.flash("Add show folders or audio files first (drag and drop them onto the list).");
             }
@@ -832,6 +837,12 @@ impl App {
                 // With the after-FLAC window open, read the details once it is closed.
                 if self.after_flac.is_none() {
                     self.auto_details();
+                }
+            }
+            // .torrent files dropped with folders: checked once the folders are read.
+            if self.running.is_none() {
+                if let Some(torrents) = self.pending_torrents.take() {
+                    self.run_on_selection(Op::TorrentCheck(torrents));
                 }
             }
         }
@@ -1128,6 +1139,9 @@ impl App {
                             if ui.add(egui::Button::new(label).shortcut_text(key)).on_hover_text(tip).clicked() {
                                 ui.close_menu();
                                 actions.push(Action::Run(op));
+                            }
+                            if i == 1 {
+                                torrent_check_button(ui, false, actions);
                             }
                         }
                     }))
@@ -1653,6 +1667,16 @@ impl App {
                 }
                 Action::CopyFfp => self.copy_ffp(ctx),
                 Action::CopyInfo => self.copy_info(ctx),
+                Action::TorrentCheck => {
+                    let (shows, _) = self.selection();
+                    let mut dialog = rfd::FileDialog::new().add_filter("Torrent", &["torrent"]).set_title("Torrent to check against");
+                    if let Some(dir) = shows.first().and_then(|s| s.root.parent()) {
+                        dialog = dialog.set_directory(dir);
+                    }
+                    if let Some(torrents) = dialog.pick_files() {
+                        self.run_on_selection(Op::TorrentCheck(torrents));
+                    }
+                }
                 Action::Remove => self.remove_selected(),
                 Action::ToggleColumn(col) => {
                     self.fit_columns = true;
@@ -1741,8 +1765,18 @@ impl App {
             painter.text(rect.center(), egui::Align2::CENTER_CENTER,
                 "Drop to replace the list\n(hold Ctrl to add to it)", egui::FontId::proportional(22.0), Color32::WHITE);
         }
+        // Dropped .torrent files are checked against the shows (or the folders beside them).
+        let (torrents, dropped): (Vec<PathBuf>, Vec<PathBuf>) =
+            dropped.into_iter().partition(|p| crate::files::ext_lower(p) == "torrent" && p.is_file());
         if !dropped.is_empty() {
             self.add_paths(dropped, ctrl);
+        }
+        if !torrents.is_empty() {
+            if self.running.is_some() {
+                self.pending_torrents = Some(torrents);
+            } else {
+                self.run_on_selection(Op::TorrentCheck(torrents));
+            }
         }
     }
 
@@ -2282,6 +2316,16 @@ fn mp3_buttons(ui: &mut egui::Ui, disabled: bool, actions: &mut Vec<Action>) {
     }
 }
 
+/// "Check against torrent...": every piece of the files hashed again and compared.
+fn torrent_check_button(ui: &mut egui::Ui, disabled: bool, actions: &mut Vec<Action>) {
+    let tip = "Check the show against a .torrent file: every piece is hashed again, and damaged, missing or resized files are named. \
+               The torrent's folder is found by its name in the list or next to the .torrent. You can also drop .torrent files on the window.";
+    if ui.add_enabled(!disabled, egui::Button::new("🧲 Check against torrent...")).on_hover_text(tip).clicked() {
+        ui.close_menu();
+        actions.push(Action::TorrentCheck);
+    }
+}
+
 /// "Fix SBE": corrected copies, as `shntool fix`.
 /// The last file of its folder (CD1, CD2...) in the show: an SBE there is normal.
 fn last_of_disc(show: &crate::files::Show, fi: usize) -> bool {
@@ -2340,6 +2384,7 @@ fn ops_menu(ui: &mut egui::Ui, disabled: bool, flac_level: u8, trackers: &[(Stri
         }
     }
     ui.separator();
+    torrent_check_button(ui, disabled, actions);
     if ui.add_enabled(!disabled, egui::Button::new("📋 Copy FFP contents")).on_hover_text("Copy the show's .ffp file to the clipboard (for the TTD upload form)").clicked() {
         ui.close_menu();
         actions.push(Action::CopyFfp);
