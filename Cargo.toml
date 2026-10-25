@@ -1,6 +1,6 @@
 [package]
 name = "bootleg-toolbox"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 authors = ["Rattlehead80"]
 license = "GPL-3.0-or-later"
