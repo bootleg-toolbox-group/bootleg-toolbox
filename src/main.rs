@@ -50,10 +50,10 @@ fn attach_console() {
 fn attach_console() {}
 
 /// Text mode, handy for scripting and testing:
-///   bootleg-helper --cli details|verify|create|test|torrent-dime|torrent-ttd|torrent-both|torrent-all|spectrogram|lossless|speed|to-flac|to-wav|mp3-320|mp3-v0|fix-sbe|torrent-check <paths...>
+///   bootleg-helper --cli details|verify|create|test|torrent-dime|torrent-ttd|torrent-both|torrent-all|spectrogram|lossless|speed|to-flac|to-wav|mp3-320|mp3-v0|fix-sbe|clean-wav|torrent-check <paths...>
 fn run_cli(args: &[String]) -> i32 {
     let Some(command) = args.first() else {
-        eprintln!("usage: bootleg-helper --cli details|verify|create|test|torrent-dime|torrent-ttd|torrent-both|torrent-all|spectrogram|lossless|speed|to-flac|to-wav|mp3-320|mp3-v0|fix-sbe|torrent-check <paths...>");
+        eprintln!("usage: bootleg-helper --cli details|verify|create|test|torrent-dime|torrent-ttd|torrent-both|torrent-all|spectrogram|lossless|speed|to-flac|to-wav|mp3-320|mp3-v0|fix-sbe|clean-wav|torrent-check <paths...>");
         return 2;
     };
     // Extra trackers for torrent-all: BH_TRACKERS="Name=announce;Other=announce".
@@ -88,6 +88,7 @@ fn run_cli(args: &[String]) -> i32 {
         "mp3-320" => Op::Mp3(encode::Mp3Mode::Cbr320),
         "mp3-v0" => Op::Mp3(encode::Mp3Mode::V0),
         "fix-sbe" => Op::FixSbe,
+        "clean-wav" => Op::CleanWav,
         // .torrent files among the paths, checked against the folders (or the folders next to them).
         "torrent-check" => Op::TorrentCheck(args[1..].iter().map(PathBuf::from).filter(|p| crate::files::ext_lower(p) == "torrent").collect()),
         other => {

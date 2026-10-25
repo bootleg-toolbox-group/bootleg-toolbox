@@ -245,6 +245,86 @@ fn probe_flac(path: &Path) -> Result<AudioInfo, String> {
 /// Returns the info plus the offset and the readable length of the WAV data chunk.
 /// `info.samples` is what the header announces: a truncated file has fewer
 /// readable bytes, which `read_pcm` reports.
+/// What a WAV file holds besides its sound, for "Clean WAV headers".
+pub struct WavLayout {
+    /// Every chunk in order: id and size as written.
+    pub chunks: Vec<(String, u64)>,
+    /// fmt chunk: format tag (1 = PCM, 3 = float, 0xFFFE = extensible) and its length.
+    pub format_tag: u16,
+    pub fmt_len: u64,
+    pub bits: u32,
+    pub channels: u32,
+    /// The RIFF size field agrees with the file length.
+    pub riff_size_ok: bool,
+    /// The data size field: None when it is 0 or 0xFFFFFFFF (never filled in).
+    pub data_declared: Option<u64>,
+    /// Bytes of sound actually present.
+    pub data_available: u64,
+    /// Bytes left after the last complete chunk.
+    pub trailing: u64,
+}
+
+/// Walks every chunk of a WAV file (unlike `probe_wav`, which stops at the sound).
+pub fn wav_layout(path: &Path) -> Result<WavLayout, String> {
+    let mut f = BufReader::new(File::open(path).map_err(io_err)?);
+    let file_len = f.get_ref().metadata().map_err(io_err)?.len();
+    let mut riff = [0u8; 12];
+    f.read_exact(&mut riff).map_err(|_| "file too short".to_string())?;
+    if &riff[0..4] != b"RIFF" || &riff[8..12] != b"WAVE" {
+        return Err("not a RIFF/WAVE file".into());
+    }
+    let riff_size = u32::from_le_bytes(riff[4..8].try_into().unwrap()) as u64;
+    let mut layout = WavLayout {
+        chunks: Vec::new(),
+        format_tag: 0,
+        fmt_len: 0,
+        bits: 0,
+        channels: 0,
+        riff_size_ok: riff_size + 8 == file_len,
+        data_declared: None,
+        data_available: 0,
+        trailing: 0,
+    };
+    let mut pos = 12u64;
+    while pos + 8 <= file_len {
+        let mut head = [0u8; 8];
+        f.read_exact(&mut head).map_err(io_err)?;
+        let id = String::from_utf8_lossy(&head[0..4]).into_owned();
+        let size = u32::from_le_bytes(head[4..8].try_into().unwrap()) as u64;
+        pos += 8;
+        let available = file_len - pos;
+        if id == "fmt " {
+            let mut fmt = vec![0u8; size.min(64).min(available) as usize];
+            f.read_exact(&mut fmt).map_err(io_err)?;
+            if fmt.len() >= 16 {
+                layout.format_tag = u16::from_le_bytes([fmt[0], fmt[1]]);
+                layout.channels = u16::from_le_bytes([fmt[2], fmt[3]]) as u32;
+                layout.bits = u16::from_le_bytes([fmt[14], fmt[15]]) as u32;
+            }
+            layout.fmt_len = size;
+            f.seek(SeekFrom::Current((size + (size & 1)).saturating_sub(fmt.len() as u64) as i64)).map_err(io_err)?;
+        } else if id == "data" {
+            let filled = size != 0 && size != 0xFFFF_FFFF;
+            layout.data_declared = filled.then_some(size);
+            let len = if filled { size } else { available };
+            layout.data_available = len.min(available);
+            layout.chunks.push((id, size));
+            pos += len + (len & 1);
+            if pos > file_len {
+                break;
+            }
+            f.seek(SeekFrom::Start(pos)).map_err(io_err)?;
+            continue;
+        } else {
+            f.seek(SeekFrom::Current((size + (size & 1)) as i64)).map_err(io_err)?;
+        }
+        layout.chunks.push((id, size));
+        pos += size + (size & 1);
+    }
+    layout.trailing = file_len.saturating_sub(pos);
+    Ok(layout)
+}
+
 pub fn probe_wav(path: &Path) -> Result<(AudioInfo, u64, u64), String> {
     let mut f = BufReader::new(File::open(path).map_err(io_err)?);
     let file_len = f.get_ref().metadata().map_err(io_err)?.len();

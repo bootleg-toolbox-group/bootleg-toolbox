@@ -214,6 +214,7 @@ pub enum Op {
     ScanFloat,
     Mp3(crate::encode::Mp3Mode),
     FixSbe,
+    CleanWav,
     /// Checks the files against these .torrent files.
     TorrentCheck(Vec<PathBuf>),
     /// Follow-up of a conversion to FLAC (the choices of its window).
@@ -257,6 +258,7 @@ impl Op {
             Op::ScanFloat => "Reading the 32-bit float files",
             Op::Mp3(_) => "Encoding MP3 copies",
             Op::FixSbe => "Fixing sector boundary errors",
+            Op::CleanWav => "Cleaning WAV headers",
             Op::TorrentCheck(_) => "Checking against the torrent",
             Op::AfterFlac { .. } => "Tidying up after the conversion",
         }
@@ -330,6 +332,7 @@ pub fn spawn(op: Op, shows: Vec<Show>, files: Vec<PathBuf>, opt: Options, tx: Se
                 Op::ScanFloat => op_scan_float(&ctx, &files),
                 Op::Mp3(mode) => op_mp3(&ctx, &shows, &files, *mode),
                 Op::FixSbe => op_fix_sbe(&ctx, &shows, &files),
+                Op::CleanWav => op_clean_wav(&ctx, &shows, &files),
                 Op::TorrentCheck(torrents) => op_torrent_check(&ctx, &shows, torrents),
                 Op::AfterFlac { roots, sources, trash_sources, trash_checksums, create_ffp } => {
                     op_after_flac(&ctx, roots, sources, *trash_sources, trash_checksums, *create_ffp)
@@ -1098,7 +1101,7 @@ pub fn op_mp3(ctx: &Ctx, shows: &[Show], files: &[PathBuf], mode: crate::encode:
         if !ctx.cancelled() && out_root.exists() {
             for extra in files::all_files(&show.root, true) {
                 let rel = extra.strip_prefix(&show.root).unwrap_or(&extra);
-                let in_sbe_fixed = rel.components().any(|c| c.as_os_str().to_string_lossy().eq_ignore_ascii_case("SBE-fixed"));
+                let in_sbe_fixed = rel.components().any(|c| is_output_dir(&c.as_os_str().to_string_lossy()));
                 if in_sbe_fixed || !COMPANION_EXT.contains(&ext_lower(&extra).as_str()) {
                     continue;
                 }
@@ -1131,6 +1134,92 @@ pub fn op_mp3(ctx: &Ctx, shows: &[Show], files: &[PathBuf], mode: crate::encode:
     if same_name > 0 { summary.push_str(&format!(", {same_name} skipped (same name as another file)")); }
     if failed > 0 { summary.push_str(&format!(", {failed} error(s)")); }
     summary
+}
+
+/// Folders Bootleg Helper writes corrected copies into, inside a show: left out of
+/// torrents, MP3 copies and the info file search.
+const OUTPUT_DIRS: [&str; 2] = ["SBE-fixed", "WAV-cleaned"];
+
+fn is_output_dir(name: &str) -> bool {
+    OUTPUT_DIRS.iter().any(|d| name.eq_ignore_ascii_case(d))
+}
+
+/// What is wrong with a WAV file's structure, besides its sound; Err when the sound itself
+/// is incomplete (nothing to clean then).
+fn wav_issues(path: &Path) -> Result<Vec<String>, String> {
+    let l = audio::wav_layout(path)?;
+    if let Some(declared) = l.data_declared {
+        if declared > l.data_available {
+            return Err(format!("truncated: the header announces {declared} bytes of sound, only {} are there", l.data_available));
+        }
+    }
+    let mut issues = Vec::new();
+    let extra: Vec<String> = l.chunks.iter().filter(|(id, _)| id != "fmt " && id != "data").map(|(id, n)| format!("{} ({n} bytes)", id.trim())).collect();
+    if !extra.is_empty() {
+        issues.push(format!("extra chunks: {}", extra.join(", ")));
+    }
+    if l.format_tag == 0xFFFE && l.bits <= 16 && l.channels <= 2 {
+        issues.push("extensible header on 16-bit stereo or mono audio".into());
+    }
+    if l.format_tag == 1 && l.fmt_len != 16 {
+        issues.push(format!("fmt chunk of {} bytes instead of 16", l.fmt_len));
+    }
+    if !l.riff_size_ok {
+        issues.push("RIFF size does not match the file".into());
+    }
+    if l.data_declared.is_none() {
+        issues.push("sound size never filled in".into());
+    }
+    if l.trailing > 0 {
+        issues.push(format!("{} stray byte(s) at the end", l.trailing));
+    }
+    Ok(issues)
+}
+
+/// "Clean WAV headers": a copy with only the format and the sound, in the canonical
+/// layout, in "<show>/WAV-cleaned" (verified: same sound). Float WAVs are left alone.
+pub fn op_clean_wav(ctx: &Ctx, shows: &[Show], files: &[PathBuf]) -> String {
+    let jobs: Vec<(PathBuf, PathBuf)> = shows
+        .iter()
+        .flat_map(|show| {
+            show.files
+                .iter()
+                .filter(|f| files.contains(f) && Format::from_path(f) == Some(Format::Wav))
+                .map(|f| (show.root.clone(), f.clone()))
+        })
+        .collect();
+    if jobs.is_empty() {
+        let text = "No WAV file in the selection.".to_string();
+        ctx.log(&text, Level::Warn);
+        return text;
+    }
+    ctx.add_total(jobs.len());
+    let results = par_map(ctx, &jobs, |(_, p)| p.clone(), |(root, path)| {
+        if audio::probe(path)?.float {
+            ctx.status(path, "Float WAV: left as it is", Level::Info, "");
+            return Ok(Level::Ok);
+        }
+        let issues = wav_issues(path)?;
+        if issues.is_empty() {
+            ctx.status(path, "Clean: only the format and the sound, canonical header", Level::Ok, "");
+            return Ok(Level::Ok);
+        }
+        let out = root.join("WAV-cleaned").join(path.strip_prefix(root).unwrap_or(path));
+        if out.exists() {
+            ctx.status(path, format!("Skipped: {} already exists", rel_posix(&out, root)), Level::Warn, issues.join("\n"));
+            return Ok(Level::Warn);
+        }
+        if let Some(dir) = out.parent() {
+            fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+        }
+        crate::encode::to_wav(path, &out, &ctx.cancel)?;
+        ctx.rescan.store(true, Ordering::SeqCst);
+        let text = format!("Cleaned copy (same sound): {}; fixed: {}", rel_posix(&out, root), issues.join("; "));
+        ctx.log(format!("{}: {}", file_name(path), issues.join("; ")), Level::Info);
+        ctx.status(path, text, Level::Ok, "");
+        Ok(Level::Ok)
+    });
+    summarize(&results, "WAV file(s) checked")
 }
 
 /// SBE fix, disc by disc (CD1, CD2... folders), as `shntool fix`: corrected copies of the
@@ -1469,7 +1558,7 @@ fn torrent_files(root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
         let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().to_string()).collect();
         let name = parts.last().cloned().unwrap_or_default().to_lowercase();
         let hidden_or_skipped_dir = parts[..parts.len().saturating_sub(1)].iter()
-            .any(|p| p.starts_with('.') || p.eq_ignore_ascii_case("SBE-fixed"));
+            .any(|p| p.starts_with('.') || is_output_dir(p));
         if hidden_or_skipped_dir || name.starts_with('.') || TORRENT_SKIP_NAMES.contains(&name.as_str())
             || TORRENT_SKIP_EXT.contains(&ext_lower(&path).as_str())
             || fs::symlink_metadata(&path).map(|m| m.file_type().is_symlink()).unwrap_or(false)
@@ -1805,7 +1894,7 @@ pub fn info_candidates(root: &Path) -> Vec<PathBuf> {
         .into_iter()
         .filter(|p| {
             let rel = p.strip_prefix(root).unwrap_or(p);
-            !rel.components().any(|c| c.as_os_str().to_string_lossy().eq_ignore_ascii_case("SBE-fixed"))
+            !rel.components().any(|c| is_output_dir(&c.as_os_str().to_string_lossy()))
         })
         .filter(is_candidate)
         .collect();

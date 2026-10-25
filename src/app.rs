@@ -1203,6 +1203,7 @@ impl App {
                         mp3_buttons(ui, false, actions);
                         ui.separator();
                         sbe_button(ui, false, actions);
+                        clean_wav_button(ui, false, actions);
                     }))
                     .response
                     .on_hover_text(format!("Convert {scope} to FLAC (each file is decoded again and checked) or to WAV, make an MP3 copy of the shows in a separate folder, or fix SBEs. The originals are kept."));
@@ -1457,10 +1458,18 @@ impl App {
                     });
             });
             self.menu_open |= menu_open;
-            // A click in the empty space below the rows clears the selection.
+            // The empty space below the rows: a click clears the selection; a drag selects from
+            // the last row up to the row the pointer reaches.
             let rest = ui.available_rect_before_wrap();
-            if rest.height() > 0.0 && ui.allocate_rect(rest, egui::Sense::click()).clicked() {
-                actions.push(Action::Deselect);
+            if rest.height() > 0.0 {
+                let response = ui.allocate_rect(rest, egui::Sense::click_and_drag());
+                if response.clicked() {
+                    actions.push(Action::Deselect);
+                }
+                let rows = self.rows().len();
+                if response.drag_started_by(egui::PointerButton::Primary) && rows > 0 {
+                    actions.push(Action::DragStart { index: rows - 1, ctrl: modifiers.command });
+                }
             }
         });
     }
@@ -2330,6 +2339,17 @@ fn mp3_buttons(ui: &mut egui::Ui, disabled: bool, actions: &mut Vec<Action>) {
     }
 }
 
+/// "Clean WAV headers": copies with only the format and the sound.
+fn clean_wav_button(ui: &mut egui::Ui, disabled: bool, actions: &mut Vec<Action>) {
+    let tip = "Rewrite WAV files with only their format and their sound, in the canonical layout: extra chunks (LIST, id3, bext...), \
+               non-standard headers and stray bytes are left out. Copies go to a WAV-cleaned folder and are checked to hold the same \
+               sound; the originals are not touched. Some burning and SBE tools stumble on WAVs that are not canonical.";
+    if ui.add_enabled(!disabled, egui::Button::new("🧹 Clean WAV headers")).on_hover_text(tip).clicked() {
+        ui.close_menu();
+        actions.push(Action::Run(Op::CleanWav));
+    }
+}
+
 /// "Check against torrent...": every piece of the files hashed again and compared.
 fn torrent_check_button(ui: &mut egui::Ui, disabled: bool, actions: &mut Vec<Action>) {
     let tip = "Check the show against a .torrent file: every piece is hashed again, and damaged, missing or resized files are named. \
@@ -2383,6 +2403,7 @@ fn ops_menu(ui: &mut egui::Ui, disabled: bool, flac_level: u8, trackers: &[(Stri
     }
     mp3_buttons(ui, disabled, actions);
     sbe_button(ui, disabled, actions);
+    clean_wav_button(ui, disabled, actions);
     ui.separator();
     if ui.add_enabled(!disabled, egui::Button::new("📊 Spectrogram").shortcut_text("F9")).clicked() {
         ui.close_menu();
