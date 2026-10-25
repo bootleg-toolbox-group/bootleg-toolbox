@@ -5,9 +5,11 @@ mod app;
 mod audio;
 mod dsp;
 mod encode;
+mod dvd;
 mod files;
 mod integration;
 mod lossless;
+mod mediainfo;
 mod ops;
 mod report;
 mod sbe;
@@ -17,7 +19,7 @@ mod speed;
 mod wv;
 mod spectrogram;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{mpsc, Arc};
 
@@ -51,10 +53,10 @@ fn attach_console() {
 fn attach_console() {}
 
 /// Text mode, handy for scripting and testing:
-///   bootleg-helper --cli details|verify|create|test|torrent-dime|torrent-ttd|torrent-both|torrent-all|spectrogram|lossless|speed|to-flac|to-wav|mp3-320|mp3-v0|fix-sbe|clean-wav|torrent-check|shell-menu-add|shell-menu-remove <paths...>
+///   bootleg-helper --cli details|verify|create|test|torrent-dime|torrent-ttd|torrent-both|torrent-all|spectrogram|lossless|speed|to-flac|to-wav|mp3-320|mp3-v0|fix-sbe|clean-wav|torrent-check|media-info|shell-menu-add|shell-menu-remove <paths...>
 fn run_cli(args: &[String]) -> i32 {
     let Some(command) = args.first() else {
-        eprintln!("usage: bootleg-helper --cli details|verify|create|test|torrent-dime|torrent-ttd|torrent-both|torrent-all|spectrogram|lossless|speed|to-flac|to-wav|mp3-320|mp3-v0|fix-sbe|clean-wav|torrent-check|shell-menu-add|shell-menu-remove <paths...>");
+        eprintln!("usage: bootleg-helper --cli details|verify|create|test|torrent-dime|torrent-ttd|torrent-both|torrent-all|spectrogram|lossless|speed|to-flac|to-wav|mp3-320|mp3-v0|fix-sbe|clean-wav|torrent-check|media-info|shell-menu-add|shell-menu-remove <paths...>");
         return 2;
     };
     // Extra trackers for torrent-all: BH_TRACKERS="Name=announce;Other=announce".
@@ -106,6 +108,8 @@ fn run_cli(args: &[String]) -> i32 {
         "clean-wav" => Op::CleanWav,
         // .torrent files among the paths, checked against the folders (or the folders next to them).
         "torrent-check" => Op::TorrentCheck(args[1..].iter().map(PathBuf::from).filter(|p| crate::files::ext_lower(p) == "torrent").collect()),
+        // DVDs (VIDEO_TS folders, VOB files) found in the paths as well as the audio files.
+        "media-info" => Op::MediaInfo(args[1..].iter().flat_map(|p| dvd::find(Path::new(p))).collect()),
         other => {
             eprintln!("unknown command: {other}");
             return 2;
@@ -166,6 +170,7 @@ fn run_cli(args: &[String]) -> i32 {
                     }
                 }
             }
+            Msg::MediaInfo { text, .. } => println!("{text}"),
             Msg::Finished { summary, .. } => {
                 println!("{summary}");
                 break;

@@ -55,6 +55,8 @@ pub enum Msg {
     Converted { target: Target, sources: Vec<PathBuf>, failed: usize, rounded: usize },
     /// Float WAVs read before a conversion to FLAC (see `encode::scan_float`).
     FloatScan(Vec<(PathBuf, crate::encode::FloatScan)>),
+    /// A media info summary: its name (show or DVD) and text.
+    MediaInfo { title: String, text: String },
     Finished { summary: String, rescan: bool },
 }
 
@@ -220,6 +222,8 @@ pub enum Op {
     CleanWav,
     /// Checks the files against these .torrent files.
     TorrentCheck(Vec<PathBuf>),
+    /// Technical summary of the selected files and of these DVDs (VIDEO_TS folders, VOB files).
+    MediaInfo(Vec<PathBuf>),
     /// Follow-up of a conversion to FLAC (the choices of its window).
     AfterFlac { roots: Vec<PathBuf>, sources: Vec<PathBuf>, trash_sources: bool, trash_checksums: Vec<PathBuf>, create_ffp: bool },
 }
@@ -263,6 +267,7 @@ impl Op {
             Op::FixSbe => "Fixing sector boundary errors",
             Op::CleanWav => "Cleaning WAV headers",
             Op::TorrentCheck(_) => "Checking against the torrent",
+            Op::MediaInfo(_) => "Reading media info",
             Op::AfterFlac { .. } => "Tidying up after the conversion",
         }
     }
@@ -337,6 +342,7 @@ pub fn spawn(op: Op, shows: Vec<Show>, files: Vec<PathBuf>, opt: Options, tx: Se
                 Op::FixSbe => op_fix_sbe(&ctx, &shows, &files),
                 Op::CleanWav => op_clean_wav(&ctx, &shows, &files),
                 Op::TorrentCheck(torrents) => op_torrent_check(&ctx, &shows, torrents),
+                Op::MediaInfo(dvds) => op_media_info(&ctx, &shows, &files, dvds),
                 Op::AfterFlac { roots, sources, trash_sources, trash_checksums, create_ffp } => {
                     op_after_flac(&ctx, roots, sources, *trash_sources, trash_checksums, *create_ffp)
                 }
@@ -1615,6 +1621,59 @@ fn hash_pieces(ctx: &Ctx, paths: &[PathBuf], piece_length: u64) -> Result<Vec<u8
         pieces.extend_from_slice(&Sha1::digest(&buffer));
     }
     Ok(pieces)
+}
+
+/// One summary per show (its selected files) and per DVD.
+fn op_media_info(ctx: &Ctx, shows: &[Show], files: &[PathBuf], dvds: &[PathBuf]) -> String {
+    ctx.add_total(files.len() + dvds.len());
+    let mut done = 0;
+    for show in shows {
+        let mine: Vec<PathBuf> = show.files.iter().filter(|f| files.contains(f)).cloned().collect();
+        if mine.is_empty() {
+            continue;
+        }
+        let read: Vec<Result<crate::mediainfo::FileInfo, String>> = mine
+            .par_iter()
+            .map(|f| {
+                let r = crate::mediainfo::read_file(f);
+                ctx.tick();
+                r
+            })
+            .collect();
+        if ctx.cancelled() {
+            return String::new();
+        }
+        let mut ok = Vec::new();
+        let mut failed = Vec::new();
+        for (path, r) in mine.into_iter().zip(read) {
+            match r {
+                Ok(info) => ok.push(info),
+                Err(e) => failed.push((path, e)),
+            }
+        }
+        let text = crate::mediainfo::audio_text(&show.root, &ok, &failed);
+        let _ = ctx.tx.send(Msg::MediaInfo { title: file_name(&show.root), text });
+        done += 1;
+    }
+    for root in dvds {
+        if ctx.cancelled() {
+            return String::new();
+        }
+        match crate::dvd::read(root) {
+            Ok(dvd) => {
+                let text = crate::mediainfo::dvd_text(&dvd);
+                let _ = ctx.tx.send(Msg::MediaInfo { title: dvd.name.clone(), text });
+                done += 1;
+            }
+            Err(e) => ctx.log(format!("{}: {e}", file_name(root)), Level::Error),
+        }
+        ctx.tick();
+    }
+    format!("Media info: {}.", match done {
+        0 => "nothing to show".to_string(),
+        1 => "1 summary".to_string(),
+        n => format!("{n} summaries"),
+    })
 }
 
 fn human_size(bytes: u64) -> String {

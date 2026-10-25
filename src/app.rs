@@ -41,6 +41,16 @@ const COMPONENTS: &[(&str, &str, &str)] = &[
     ("Shorten decoder", "SHN decoding (written for Bootleg Helper)", "GPL-3.0"),
 ];
 
+const DVD_TIP: &str = "Pick a DVD folder (VIDEO_TS, or the folder above it) for a technical summary: video standard, resolution, aspect ratio, bit rates, audio tracks, subtitles, titles and chapters. Dropping a DVD folder on the window does the same.";
+
+/// The name a DVD is known by: the folder above VIDEO_TS, else its own name.
+fn dvd_name(path: &Path) -> String {
+    match path.parent() {
+        Some(parent) if file_name(path).eq_ignore_ascii_case("VIDEO_TS") => file_name(parent),
+        _ => file_name(path),
+    }
+}
+
 const INFO_TIP: &str = "Copy the show's info file (.txt or .nfo, whatever its name) to the clipboard, for the upload forms. With several text files, a window lets you pick the right one.";
 
 /// The text files that may be a show's info file, the most likely first.
@@ -279,6 +289,10 @@ pub struct App {
     float_dialog: Option<FloatPending>,
     /// .torrent files dropped while something ran: checked when it ends.
     pending_torrents: Option<Vec<PathBuf>>,
+    /// DVDs added (they are not shown in the list): their media info is read when free.
+    pending_dvds: Vec<PathBuf>,
+    /// Open media info windows: (show or DVD name, text).
+    media_windows: Vec<(String, String)>,
     after_flac: Option<AfterFlac>,
     clipboard: Option<arboard::Clipboard>,
 }
@@ -431,6 +445,8 @@ impl App {
             float_pending: None,
             float_dialog: None,
             pending_torrents: None,
+            pending_dvds: Vec::new(),
+            media_windows: Vec::new(),
             after_flac: None,
             clipboard: None,
         };
@@ -523,10 +539,38 @@ impl App {
             self.flash("Wait for the current task to finish.");
             return;
         }
+        // DVDs open their media info instead of joining the list; a drop of DVDs only
+        // leaves the list as it is.
+        let mut dvds = Vec::new();
+        let mut audio = Vec::new();
+        for p in paths {
+            let found = crate::dvd::find(&p);
+            if found.is_empty() {
+                audio.push(p);
+            } else {
+                if !scan_paths(std::slice::from_ref(&p), &HashSet::new()).is_empty() {
+                    audio.push(p);
+                }
+                dvds.extend(found);
+            }
+        }
+        if !dvds.is_empty() {
+            const MAX: usize = 4;
+            if dvds.len() > MAX {
+                self.log(format!("{} DVDs found: media info for the first {MAX} only (add the others one by one).", dvds.len()), Level::Warn);
+                dvds.truncate(MAX);
+            }
+            self.log(format!("DVD found: {} (DVDs are not added to the list; their media info opens in a window).", dvds.iter().map(|d| dvd_name(d)).collect::<Vec<_>>().join(", ")), Level::Info);
+            self.pending_dvds.extend(dvds);
+        }
+        if audio.is_empty() {
+            self.start_pending_dvds();
+            return;
+        }
         if !keep {
             self.clear_list();
         }
-        for p in paths {
+        for p in audio {
             let p = std::path::absolute(&p).unwrap_or(p);
             self.excluded.retain(|e| e != &p && !e.starts_with(&p));
             if !self.roots.contains(&p) {
@@ -535,6 +579,24 @@ impl App {
         }
         self.rebuild();
         self.auto_details();
+        self.start_pending_dvds();
+    }
+
+    fn start_pending_dvds(&mut self) {
+        if self.running.is_none() && !self.pending_dvds.is_empty() {
+            let dvds = std::mem::take(&mut self.pending_dvds);
+            self.start(Op::MediaInfo(dvds), Vec::new(), Vec::new(), false);
+        }
+    }
+
+    fn pick_dvd(&mut self) {
+        if let Some(dir) = rfd::FileDialog::new().set_title("DVD folder (or the folder above VIDEO_TS)").pick_folder() {
+            if crate::dvd::find(&dir).is_empty() {
+                self.flash("No DVD in this folder (no VOB or IFO file).");
+            } else {
+                self.add_paths(vec![dir], true);
+            }
+        }
     }
 
     fn clear_list(&mut self) {
@@ -631,7 +693,12 @@ impl App {
         if self.running.is_some() {
             return;
         }
-        if files.is_empty() && !matches!(op, Op::TorrentCheck(_)) {
+        let without_files = match &op {
+            Op::TorrentCheck(_) => true,
+            Op::MediaInfo(dvds) => !dvds.is_empty(),
+            _ => false,
+        };
+        if files.is_empty() && !without_files {
             if !quiet {
                 self.flash("Add show folders or audio files first (drag and drop them onto the list).");
             }
@@ -791,6 +858,10 @@ impl App {
                     Msg::Converted { target, sources, failed, rounded } => {
                         self.converted = Some((target, sources, failed, rounded));
                     }
+                    Msg::MediaInfo { title, text } => {
+                        self.media_windows.retain(|(t, _)| t != &title);
+                        self.media_windows.push((title, text));
+                    }
                     Msg::FloatScan(found) => {
                         if let Some(pending) = &mut self.float_pending {
                             pending.scans = found;
@@ -851,6 +922,7 @@ impl App {
                     self.run_on_selection(Op::TorrentCheck(torrents));
                 }
             }
+            self.start_pending_dvds();
         }
     }
 
@@ -1017,6 +1089,10 @@ impl App {
                             self.add_paths(files, true);
                         }
                     }
+                    if ui.add_enabled(!busy, egui::Button::new("DVD media info...")).on_hover_text(DVD_TIP).clicked() {
+                        ui.close_menu();
+                        self.pick_dvd();
+                    }
                     ui.separator();
                     if ui.add_enabled(has, egui::Button::new("Select all").shortcut_text("Ctrl+A")).clicked() {
                         ui.close_menu();
@@ -1116,6 +1192,10 @@ impl App {
                                 self.add_paths(files, true);
                             }
                         }
+                        if ui.button("📀 DVD media info...").on_hover_text(DVD_TIP).clicked() {
+                            ui.close_menu();
+                            self.pick_dvd();
+                        }
                         ui.separator();
                         if ui.add_enabled(has, egui::Button::new("🗑 Clear list")).clicked() {
                             ui.close_menu();
@@ -1130,13 +1210,14 @@ impl App {
                 ui.add_enabled_ui(on, |ui| {
                     ui.menu_button("✔ Check ⏷", |ui| fit_below(ui, |ui| {
                         menu_open = true;
-                        let items: [(&str, &str, Op, String); 6] = [
+                        let items: [(&str, &str, Op, String); 7] = [
                             ("🛡 Verify checksums", "F5", Op::Verify, format!("Check the files of {scope} against their .ffp, .md5, .st5 and .sfv files.\nAn FFP line only compares the MD5 stored in the FLAC header: use Decode test to find damaged audio.")),
                             ("✔ Decode test", "F7", Op::Test, format!("Decode every file of {scope} completely to find damaged or truncated audio; FLAC files are also checked against their MD5 signature.\nNeeds no checksum file.")),
                             ("🔍 Lossless?", "Ctrl+L", Op::Lossless, format!("Analyse the spectrum of every file of {scope} to find lossy (MP3/AAC) sources, FM broadcasts, upsampled files and fake 24-bit.\nThe verdict goes to the Source column; click it for the full analysis.")),
                             ("⏱ Speed?", "Ctrl+P", Op::Speed, format!("Estimate whether the tape of {scope} runs too fast or too slow, and the correction to apply.\nThe verdict goes to the Speed column; click it for the full analysis.")),
                             ("📊 Spectrogram", "F9", Op::Spectrogram, format!("Show the spectrogram of the first files of {scope}, up to 4, to see lossy sources for yourself")),
                             ("ℹ Show details", "F8", Op::Details { verbose: true }, format!("Read the format, length and SBEs of {scope} again, and list them in the log")),
+                            ("📋 Media info", "Ctrl+I", Op::MediaInfo(Vec::new()), format!("A technical summary of {scope} (format, encoder, length, bit rate, tags), as text to copy.\nFor a DVD, add its folder: the summary opens by itself.")),
                         ];
                         for (i, (label, key, op, tip)) in items.into_iter().enumerate() {
                             if i == 4 {
@@ -1754,6 +1835,7 @@ impl App {
                 if i.consume_key(Modifiers::NONE, Key::F9) { actions.push(Action::Run(Op::Spectrogram)); }
                 if i.consume_key(Modifiers::COMMAND, Key::L) { actions.push(Action::Run(Op::Lossless)); }
                 if i.consume_key(Modifiers::COMMAND, Key::P) { actions.push(Action::Run(Op::Speed)); }
+                if i.consume_key(Modifiers::COMMAND, Key::I) { actions.push(Action::Run(Op::MediaInfo(Vec::new()))); }
                 if i.consume_key(Modifiers::COMMAND, Key::A) { actions.push(Action::SelectAll); }
                 if i.consume_key(Modifiers::NONE, Key::F10) { actions.push(Action::Run(Op::Torrent(Tracker::all(&self.opt)))); }
                 if i.consume_key(Modifiers::NONE, Key::Delete) { actions.push(Action::Remove); }
@@ -2155,6 +2237,58 @@ impl App {
         }
     }
 
+    /// Media info summaries, each in its own system window, copyable as text.
+    fn media_windows(&mut self, ctx: &egui::Context) {
+        let mut closed = Vec::new();
+        for (index, (title, text)) in self.media_windows.iter().enumerate() {
+            let id = egui::ViewportId::from_hash_of(("media info", title));
+            let window_title = format!("Media info - {title}");
+            let builder = egui::ViewportBuilder::default()
+                .with_icon(app_icon())
+                .with_title(&window_title)
+                .with_inner_size([720.0, 600.0])
+                .with_min_inner_size([420.0, 300.0]);
+            ctx.show_viewport_immediate(id, builder, |vctx, class| {
+                let content = |ui: &mut egui::Ui| {
+                    egui::TopBottomPanel::bottom(egui::Id::new(("media buttons", index))).show_inside(ui, |ui| {
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("📋 Copy").on_hover_text("Copy this summary as text (for a forum post or an info file)").clicked() {
+                                vctx.copy_text(text.clone());
+                            }
+                            if ui.button("Close").clicked() {
+                                closed.push(index);
+                            }
+                        });
+                        ui.add_space(2.0);
+                    });
+                    egui::CentralPanel::default().show_inside(ui, |ui| {
+                        egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
+                            ui.add(egui::Label::new(RichText::new(text).monospace()).selectable(true).extend());
+                        });
+                    });
+                };
+                if class == egui::ViewportClass::Embedded {
+                    let mut open = true;
+                    egui::Window::new(&window_title).id(egui::Id::new(id)).open(&mut open).default_width(680.0).show(vctx, content);
+                    if !open {
+                        closed.push(index);
+                    }
+                } else {
+                    egui::CentralPanel::default().show(vctx, content);
+                    if vctx.input(|i| i.viewport().close_requested() || i.key_pressed(Key::Escape)) {
+                        closed.push(index);
+                    }
+                }
+            });
+        }
+        closed.sort_unstable();
+        closed.dedup();
+        for index in closed.into_iter().rev() {
+            self.media_windows.remove(index);
+        }
+    }
+
     /// Each spectrogram is a separate system window, free to leave the main one.
     fn spectrogram_windows(&mut self, ctx: &egui::Context) {
         let mut closed = Vec::new();
@@ -2400,13 +2534,14 @@ fn sbe_button(ui: &mut egui::Ui, disabled: bool, actions: &mut Vec<Action>) {
 }
 
 fn ops_menu(ui: &mut egui::Ui, disabled: bool, flac_level: u8, trackers: &[(String, &'static str, Vec<Tracker>)], actions: &mut Vec<Action>) {
-    let items: [(&str, &str, Op); 6] = [
+    let items: [(&str, &str, Op); 7] = [
         ("🛡 Verify checksums", "F5", Op::Verify),
         ("✚ Create checksums", "F6", Op::Create),
         ("✔ Decode test", "F7", Op::Test),
         ("🔍 Lossless?", "Ctrl+L", Op::Lossless),
         ("⏱ Speed?", "Ctrl+P", Op::Speed),
         ("ℹ Show details", "F8", Op::Details { verbose: true }),
+        ("📋 Media info", "Ctrl+I", Op::MediaInfo(Vec::new())),
     ];
     for (label, key, op) in items {
         if ui.add_enabled(!disabled, egui::Button::new(label).shortcut_text(key)).clicked() {
@@ -2483,6 +2618,7 @@ impl eframe::App for App {
         self.after_flac_window(ctx);
         self.spectrogram_windows(ctx);
         self.report_windows(ctx);
+        self.media_windows(ctx);
         self.apply(ctx, actions);
 
         let file_count: usize = self.shows.iter().map(|s| s.files.len()).sum();

@@ -557,7 +557,7 @@ fn decode_mpa(path: &Path, format: Format, cancel: &AtomicBool, mut sink: impl F
     Ok(frames)
 }
 
-fn open_ape(path: &Path) -> Result<ape_decoder::ApeDecoder<BufReader<File>>, String> {
+pub fn open_ape(path: &Path) -> Result<ape_decoder::ApeDecoder<BufReader<File>>, String> {
     let file = BufReader::new(File::open(path).map_err(io_err)?);
     ape_decoder::ApeDecoder::new(file).map_err(|e| match e {
         ape_decoder::ApeError::UnsupportedVersion(v) => {
@@ -588,6 +588,19 @@ pub fn source_tags(path: &Path) -> Vec<(String, String)> {
 
 /// The VORBIS_COMMENT block of a FLAC file ("ARTIST", "Some name").
 fn flac_tags(path: &Path) -> Result<Vec<(String, String)>, String> {
+    flac_comment(path).map(|d| parse_vorbis_comment(&d))
+}
+
+/// The encoder a FLAC file names in its VORBIS_COMMENT block ("reference libFLAC 1.4.3 20230623").
+pub fn flac_vendor(path: &Path) -> Option<String> {
+    let d = flac_comment(path).ok()?;
+    let len = u32::from_le_bytes(d.get(..4)?.try_into().ok()?) as usize;
+    let vendor = String::from_utf8_lossy(d.get(4..4 + len)?).trim().to_string();
+    (!vendor.is_empty()).then_some(vendor)
+}
+
+/// The raw VORBIS_COMMENT block (empty if there is none).
+fn flac_comment(path: &Path) -> Result<Vec<u8>, String> {
     let mut f = BufReader::new(File::open(path).map_err(io_err)?);
     let mut magic = [0u8; 4];
     f.read_exact(&mut magic).map_err(io_err)?;
@@ -609,7 +622,7 @@ fn flac_tags(path: &Path) -> Result<Vec<(String, String)>, String> {
         if header[0] & 0x7f == 4 {
             let mut data = vec![0u8; len];
             f.read_exact(&mut data).map_err(io_err)?;
-            return Ok(parse_vorbis_comment(&data));
+            return Ok(data);
         }
         if header[0] & 0x80 != 0 {
             return Ok(Vec::new());
