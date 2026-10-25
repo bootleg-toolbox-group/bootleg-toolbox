@@ -196,6 +196,7 @@ enum Action {
     DragOver(usize),
     FlacLevel(u8),
     Compact(bool),
+    AlwaysOnTop(bool),
     LogOpen(bool),
     Theme(ThemeChoice),
     ShowAllColumns,
@@ -231,6 +232,8 @@ pub struct App {
     about: bool,
     /// "Copy info file" with several text files: the choice window.
     info_choice: Option<InfoChoice>,
+    /// The saved "Always on top" choice was applied to the window.
+    window_level_set: bool,
     title: String,
     /// A context or menu-bar menu was open during the last frame (Escape closes it
     /// instead of clearing the selection).
@@ -375,6 +378,7 @@ impl App {
             settings: None,
             about: false,
             info_choice: None,
+            window_level_set: false,
             title: String::new(),
             menu_open: false,
             spectrograms: Vec::new(),
@@ -897,6 +901,10 @@ impl App {
                     let mut log_open = self.opt.log_open;
                     if ui.checkbox(&mut log_open, "Show the log").clicked() {
                         actions.push(Action::LogOpen(log_open));
+                    }
+                    let mut on_top = self.opt.always_on_top;
+                    if ui.checkbox(&mut on_top, "Always on top").on_hover_text("Keep the window above the other windows").clicked() {
+                        actions.push(Action::AlwaysOnTop(on_top));
                     }
                     ui.separator();
                     ui.label(RichText::new("Theme").strong());
@@ -1511,6 +1519,10 @@ impl App {
                     self.fit_columns = true;
                 }
                 Action::LogOpen(open) => self.opt.log_open = open,
+                Action::AlwaysOnTop(on) => {
+                    self.opt.always_on_top = on;
+                    set_window_level(ctx, on);
+                }
                 Action::Theme(choice) => {
                     self.opt.theme = choice;
                     self.apply_theme(ctx);
@@ -2019,6 +2031,12 @@ fn tracker_entries(opt: &Options) -> Vec<(String, &'static str, Vec<Tracker>)> {
 }
 
 /// "320 kbps (CBR)" and "VBR V0" entries.
+/// "Always on top" (honoured by Windows and by X11 desktops; native Wayland has no such request).
+fn set_window_level(ctx: &egui::Context, on_top: bool) {
+    let level = if on_top { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal };
+    ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
+}
+
 fn mp3_buttons(ui: &mut egui::Ui, disabled: bool, actions: &mut Vec<Action>) {
     for (label, mode) in [("🎧 To MP3 320 kbps (CBR)", Mp3Mode::Cbr320), ("🎧 To MP3 VBR V0 (about 245 kbps)", Mp3Mode::V0)] {
         let tip = format!("Writes \"<show> [{}]\" next to the show folder (or in the folder set in Settings), with the text files and pictures", mode.tag());
@@ -2108,6 +2126,13 @@ fn torrent_menu(ui: &mut egui::Ui, trackers: &[(String, &'static str, Vec<Tracke
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // The saved "Always on top" choice, once the window exists.
+        if !self.window_level_set {
+            self.window_level_set = true;
+            if self.opt.always_on_top {
+                set_window_level(ctx, true);
+            }
+        }
         self.poll();
         self.drops(ctx);
         let mut actions = Vec::new();

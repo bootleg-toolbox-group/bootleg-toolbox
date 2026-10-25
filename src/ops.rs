@@ -144,6 +144,8 @@ pub struct Options {
     pub after_flac_ffp: bool,
     /// The log panel is unfolded (it unfolds by itself on an error).
     pub log_open: bool,
+    /// The main window stays above the other windows.
+    pub always_on_top: bool,
     /// Compact view: fewer columns (Format then gives bits and rate), tighter rows.
     pub compact: bool,
     /// Table columns the user chose to hide (by title).
@@ -184,6 +186,7 @@ impl Default for Options {
             hidden_columns: Vec::new(),
             log_open: false,
             compact: false,
+            always_on_top: false,
         }
     }
 }
