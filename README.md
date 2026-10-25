@@ -4,6 +4,9 @@ A desktop tool for collectors of lossless concert recordings: checksums, decode 
 torrents for the trading trackers, format conversions and SBE fixing, in one program.
 A modern, open-source take on Trader's Little Helper.
 
+For a detailed description of every feature and a comparison with Trader's Little Helper,
+see the [overview](docs/OVERVIEW.md).
+
 **One executable for Windows and Linux. Nothing else to install:** no flac, shntool,
 ffmpeg or LAME. Every decoder and encoder is built in.
 
