@@ -7,6 +7,7 @@ mod dsp;
 mod encode;
 mod dvd;
 mod files;
+mod help;
 mod integration;
 mod lossless;
 mod mediainfo;
@@ -14,6 +15,7 @@ mod ops;
 mod report;
 mod sbe;
 mod torrent_check;
+mod update;
 mod shn;
 mod speed;
 mod wv;
@@ -27,6 +29,11 @@ use ops::{Level, Msg, Op, Options, Tracker};
 
 fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if matches!(args.first().map(String::as_str), Some("--help" | "-h" | "/?")) {
+        attach_console();
+        print!("{}", help::text());
+        return Ok(());
+    }
     if args.first().map(String::as_str) == Some("--cli") {
         attach_console();
         std::process::exit(run_cli(&args[1..]));
@@ -53,12 +60,16 @@ fn attach_console() {
 fn attach_console() {}
 
 /// Text mode, handy for scripting and testing:
-///   bootleg-toolbox --cli details|verify|create|test|torrent-dime|torrent-ttd|torrent-both|torrent-all|spectrogram|lossless|speed|to-flac|to-wav|mp3-320|mp3-v0|fix-sbe|clean-wav|torrent-check|media-info|shell-menu-add|shell-menu-remove <paths...>
+///   bootleg-toolbox --cli <command> <paths...> (the commands: `help::COMMANDS`)
 fn run_cli(args: &[String]) -> i32 {
     let Some(command) = args.first() else {
-        eprintln!("usage: bootleg-toolbox --cli details|verify|create|test|torrent-dime|torrent-ttd|torrent-both|torrent-all|spectrogram|lossless|speed|to-flac|to-wav|mp3-320|mp3-v0|fix-sbe|clean-wav|torrent-check|media-info|shell-menu-add|shell-menu-remove <paths...>");
+        eprintln!("usage: {}\n(bootleg-toolbox --cli help lists the commands)", help::CLI_USAGE);
         return 2;
     };
+    if command == "help" {
+        print!("{}", help::text());
+        return 0;
+    }
     // Extra trackers for torrent-all: BT_TRACKERS="Name=announce;Other=announce".
     let custom_trackers: Vec<ops::CustomTracker> = std::env::var("BT_TRACKERS")
         .unwrap_or_default()
@@ -70,6 +81,22 @@ fn run_cli(args: &[String]) -> i32 {
     // Float WAVs that do not hold exact 16/24-bit values: BT_FLOAT=round rounds them to 24 bits.
     let round_float = std::env::var("BT_FLOAT").is_ok_and(|v| v == "round");
     let level = std::env::var("BT_LEVEL").ok().and_then(|l| l.parse().ok()).unwrap_or(8);
+    if command == "check-update" {
+        return match update::newer_version() {
+            Ok(Some(version)) => {
+                println!("Version {version} is available (this is {}): {}/latest", ops::APP_VERSION, update::RELEASES);
+                0
+            }
+            Ok(None) => {
+                println!("{} is the latest version.", ops::APP_VERSION);
+                0
+            }
+            Err(e) => {
+                eprintln!("Could not check for updates: {e}.");
+                1
+            }
+        };
+    }
     // The file manager's right-click entry (the Settings option, for scripts and tests).
     if let "shell-menu-add" | "shell-menu-remove" = command.as_str() {
         let done = if command == "shell-menu-add" {
@@ -117,7 +144,7 @@ fn run_cli(args: &[String]) -> i32 {
         // DVDs (VIDEO_TS folders, VOB files) found in the paths as well as the audio files.
         "media-info" => Op::MediaInfo(args[1..].iter().flat_map(|p| dvd::find(Path::new(p))).collect()),
         other => {
-            eprintln!("unknown command: {other}");
+            eprintln!("unknown command: {other} (bootleg-toolbox --cli help lists the commands)");
             return 2;
         }
     };

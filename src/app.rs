@@ -37,6 +37,8 @@ const COMPONENTS: &[(&str, &str, &str)] = &[
     ("ab_glyph, png", "spectrogram text and images", "Apache-2.0 / MIT or Apache-2.0"),
     ("serde", "settings", "MIT or Apache-2.0"),
     ("zbus", "desktop services (Linux)", "MIT"),
+    ("ureq, rustls", "update check (HTTPS)", "MIT or Apache-2.0 / Apache-2.0, ISC or MIT"),
+    ("ring, rustls-webpki, webpki-roots", "encryption, certificates", "Apache-2.0 and ISC / ISC / CDLA-Permissive-2.0"),
     ("Hack, Ubuntu, Noto Emoji fonts", "interface fonts (from egui)", "MIT / UFL / OFL"),
     ("Shorten decoder", "SHN decoding (written for Bootleg Toolbox)", "GPL-3.0"),
 ];
@@ -290,6 +292,8 @@ pub struct App {
     flash: Option<(String, Instant)>,
     settings: Option<Options>,
     about: bool,
+    /// Help > Keyboard shortcuts and command line.
+    help: bool,
     /// "Copy info file" with several text files: the choice window.
     info_choice: Option<InfoChoice>,
     /// The saved "Always on top" choice was applied to the window.
@@ -319,6 +323,10 @@ pub struct App {
     media_windows: Vec<(String, String)>,
     after_flac: Option<AfterFlac>,
     clipboard: Option<arboard::Clipboard>,
+    /// A running update check: (asked from the Help menu, result).
+    update_check: Option<mpsc::Receiver<(bool, Result<Option<String>, String>)>>,
+    /// A newer version found on GitHub.
+    newer_version: Option<String>,
 }
 
 /// An open spectrogram window.
@@ -456,6 +464,7 @@ impl App {
             flash: None,
             settings: None,
             about: false,
+            help: false,
             info_choice: None,
             window_level_set: false,
             title: String::new(),
@@ -473,6 +482,8 @@ impl App {
             media_windows: Vec::new(),
             after_flac: None,
             clipboard: None,
+            update_check: None,
+            newer_version: None,
         };
         // A more modern look: roomier, rounded buttons, a blue tint on hover.
         cc.egui_ctx.all_styles_mut(|style| {
@@ -519,6 +530,9 @@ impl App {
                     }
                 }
             }
+        }
+        if app.opt.check_updates {
+            app.check_updates(false);
         }
         // Keep the right-click entry pointing at this program file, wherever it now is.
         if app.opt.shell_integration {
@@ -619,6 +633,35 @@ impl App {
         self.rebuild();
         self.auto_details();
         self.start_pending_dvds();
+    }
+
+    /// Asks GitHub for the latest release, in the background.
+    fn check_updates(&mut self, manual: bool) {
+        if self.update_check.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send((manual, crate::update::newer_version()));
+        });
+        self.update_check = Some(rx);
+    }
+
+    fn poll_update_check(&mut self) {
+        let Some(rx) = &self.update_check else { return };
+        let Ok((manual, result)) = rx.try_recv() else { return };
+        self.update_check = None;
+        match result {
+            Ok(Some(version)) => {
+                self.log(format!("{APP_NAME} {version} is available (you have {APP_VERSION}): Help > Download version {version}."), Level::Ok);
+                self.flash(format!("{APP_NAME} {version} is available: see the Help menu."));
+                self.newer_version = Some(version);
+            }
+            Ok(None) if manual => self.log(format!("{APP_NAME} {APP_VERSION} is the latest version."), Level::Ok),
+            Err(e) if manual => self.log(format!("Could not check for updates: {e}."), Level::Warn),
+            // The automatic check stays silent when there is nothing to say.
+            _ => {}
+        }
     }
 
     fn start_pending_dvds(&mut self) {
@@ -1193,6 +1236,21 @@ impl App {
                 }));
                 ui.menu_button("Help", |ui| fit_below(ui, |ui| {
                     menu_open = true;
+                    if let Some(version) = self.newer_version.clone() {
+                        if ui.button(RichText::new(format!("⬇ Download version {version}")).strong()).on_hover_text("Open the release page on GitHub").clicked() {
+                            ui.close_menu();
+                            let _ = open::that(format!("{}/latest", crate::update::RELEASES));
+                        }
+                    }
+                    if ui
+                        .add_enabled(self.update_check.is_none(), egui::Button::new("Check for updates"))
+                        .on_hover_text("Ask github.com whether a newer version has been released. Nothing is sent but the program's name and version.")
+                        .clicked()
+                    {
+                        ui.close_menu();
+                        self.check_updates(true);
+                    }
+                    ui.separator();
                     #[cfg(target_os = "linux")]
                     if ui
                         .button("Add to the applications menu")
@@ -1204,6 +1262,10 @@ impl App {
                             Ok(text) => self.log(text, Level::Ok),
                             Err(e) => self.log(format!("Could not add the menu entry: {e}"), Level::Error),
                         }
+                    }
+                    if ui.add(egui::Button::new("Keyboard shortcuts and command line").shortcut_text("F1")).clicked() {
+                        ui.close_menu();
+                        self.help = true;
                     }
                     if ui.button(format!("About {APP_NAME}")).clicked() {
                         ui.close_menu();
@@ -1865,6 +1927,9 @@ impl App {
             return;
         }
         let busy = self.running.is_some();
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F1)) {
+            self.help = true;
+        }
         ctx.input_mut(|i| {
             if !busy && !self.shows.is_empty() {
                 if i.consume_key(Modifiers::NONE, Key::F5) { actions.push(Action::Run(Op::Verify)); }
@@ -1885,6 +1950,9 @@ impl App {
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
             if busy {
                 self.stop();
+            } else if self.help || self.about {
+                self.help = false;
+                self.about = false;
             } else if !self.menu_open && !ctx.memory(|m| m.any_popup_open()) {
                 actions.push(Action::Deselect);
             }
@@ -2007,6 +2075,10 @@ impl App {
                     ui.add(egui::DragValue::new(&mut draft.jobs).range(1..=64));
                 });
                 ui.checkbox(&mut draft.auto_details, "Read file details automatically when adding files");
+                ui.checkbox(&mut draft.check_updates, "Check for a new version at startup")
+                    .on_hover_text("Asks github.com once at each start whether a newer version has been released. \
+                                    Nothing is sent but the program's name and version. \
+                                    Otherwise the program never connects to the network.");
                 ui.checkbox(&mut draft.shell_integration, "Add \"Open in Bootleg Toolbox\" to the file manager's right-click menu")
                     .on_hover_text("For folders and audio files, for your user only (no administrator rights). \
                                     Windows: Explorer (on Windows 11, under Show more options). Linux: Dolphin, Nautilus and Nemo.\n\
@@ -2117,6 +2189,64 @@ impl App {
         } else {
             self.after_flac = Some(dialog);
         }
+    }
+
+    fn help_window(&mut self, ctx: &egui::Context) {
+        use crate::help;
+        let mut open = self.help;
+        let size = ctx.screen_rect().size();
+        egui::Window::new("Keyboard shortcuts and command line")
+            .collapsible(false)
+            .open(&mut open)
+            .default_size([(size.x - 40.0).min(760.0), (size.y - 80.0).min(620.0)])
+            .max_height(size.y - 60.0)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("📋 Copy").on_hover_text("Copy this help as text").clicked() {
+                        ui.ctx().copy_text(help::text());
+                    }
+                    ui.label(RichText::new("Also printed by bootleg-toolbox --help").weak());
+                });
+                ui.separator();
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    let grid = |ui: &mut egui::Ui, id: &str, rows: &[(&str, &str)], mono: bool| {
+                        egui::Grid::new(id).num_columns(2).striped(true).spacing([16.0, 4.0]).show(ui, |ui| {
+                            for (key, text) in rows {
+                                let key = RichText::new(*key).strong();
+                                ui.label(if mono { key.monospace() } else { key });
+                                ui.add(egui::Label::new(*text).wrap());
+                                ui.end_row();
+                            }
+                        });
+                    };
+                    let heading = |ui: &mut egui::Ui, text: &str| {
+                        ui.add_space(8.0);
+                        ui.label(RichText::new(text).size(16.0).strong());
+                        ui.add_space(2.0);
+                    };
+                    heading(ui, "Keyboard shortcuts");
+                    grid(ui, "help keys", help::SHORTCUTS, false);
+                    heading(ui, "Mouse and drag and drop");
+                    grid(ui, "help mouse", help::MOUSE, false);
+                    heading(ui, "Command line");
+                    ui.label(RichText::new(help::CLI_USAGE).monospace());
+                    ui.add_space(4.0);
+                    for note in help::CLI_NOTES {
+                        ui.label(*note);
+                    }
+                    heading(ui, "Commands");
+                    grid(ui, "help commands", help::COMMANDS, true);
+                    heading(ui, "Environment variables");
+                    grid(ui, "help variables", help::VARIABLES, true);
+                    heading(ui, "Examples");
+                    for example in help::CLI_EXAMPLES {
+                        ui.label(RichText::new(*example).monospace());
+                    }
+                });
+            });
+        self.help = open;
     }
 
     fn about_window(&mut self, ctx: &egui::Context) {
@@ -2643,6 +2773,10 @@ impl eframe::App for App {
             }
         }
         self.poll();
+        self.poll_update_check();
+        if self.update_check.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
         self.drops(ctx);
         let mut actions = Vec::new();
         self.shortcuts(ctx, &mut actions);
@@ -2652,6 +2786,7 @@ impl eframe::App for App {
         self.table(ctx, &mut actions);
         self.settings_window(ctx);
         self.about_window(ctx);
+        self.help_window(ctx);
         self.info_window(ctx);
         self.float_window(ctx);
         self.after_flac_window(ctx);

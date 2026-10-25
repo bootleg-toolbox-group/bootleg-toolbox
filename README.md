@@ -10,15 +10,17 @@ ffmpeg or LAME. Every decoder and encoder is built in.
 ## Features
 
 - **Reads** FLAC, WAV (integer and float), SHN (Shorten), APE (Monkey's Audio 3.95 and
-  later) and WavPack (lossless).
+  later) and WavPack (lossless), and MP3/MP2 (always flagged as lossy).
 - **File details**: format, length, CD-readiness, MD5 signature, sector boundary errors
   (SBE), for every track and every show.
 - **Checksums**: verifies and creates `.ffp` (FLAC fingerprints), `.st5` (MD5 of the
-  decoded audio, as shntool) and `.md5` (whole files). Reads files written on Windows
+  decoded audio, as shntool), `.md5` and `.sfv` (whole files). Reads files written on Windows
   (`\` paths, other letter case, Windows-1252 names).
 - **Decode test**: decodes every file in full and reports damaged or truncated ones.
 - **Torrents** for DIME and The Traders' Den (private, one `source` per tracker so both
   can be seeded), and for any other tracker you add.
+- **Torrent check**: checks a show against its `.torrent`, piece by piece, and names the
+  damaged, missing and extra files (drop the `.torrent` on the window).
 - **Conversions**: to FLAC (levels 0 to 8, each file decoded again and checked), to WAV,
   and MP3 copies (320 kbps CBR or VBR V0) in a separate folder, with tags, text files and
   artwork. After a conversion to FLAC, a window offers to move the originals and the old
@@ -31,9 +33,21 @@ ffmpeg or LAME. Every decoder and encoder is built in.
 - **Speed?**: estimates whether a tape runs too fast or too slow (FM pilot tone, tuning
   against A440, mains hum), with the correction to apply.
 - **Spectrograms**, to copy or save as PNG.
+- **WAV clean-up**: canonical headers (extra chunks, wrong sizes, stray bytes removed),
+  audio untouched, in a `WAV-cleaned` folder.
+- **Media info**: a MediaInfo-style summary of a show's files or of a DVD (video standard,
+  resolution, bit rates, audio tracks marked lossless or lossy, subtitles, titles and
+  chapters), as text to copy into a forum post or an info file.
+- **Upload helpers**: copy a show's FFP or its info file to the clipboard.
+- **File manager integration** (optional): "Open in Bootleg Toolbox" in the right-click
+  menu of Explorer, Dolphin, Nautilus and Nemo.
 
-The original files are never changed: conversions, MP3 copies and SBE fixes are written
-next to them.
+The original files are never changed: conversions, MP3 copies, SBE fixes and cleaned WAVs
+are written next to them.
+
+The program makes no network connection, unless you ask it to check for a new version
+(Help > Check for updates, or the Settings option, off by default): it then asks
+github.com for the latest release, sending nothing but its name and version.
 
 ## Download
 
@@ -62,15 +76,21 @@ bootleg-toolbox --cli <command> <folders or files...>
 | --- | --- |
 | `details` | File details |
 | `verify` | Verify checksum files |
-| `create` | Create checksum files (`BT_OVERWRITE=1` to replace, `BT_MD5=1` to add `.md5`) |
+| `create` | Create checksum files (`BT_OVERWRITE=1` to replace, `BT_MD5=1` to add `.md5`, `BT_SFV=1` to add `.sfv`) |
 | `test` | Decode test |
 | `torrent-dime`, `torrent-ttd`, `torrent-both` | Torrents for DIME, TTD, or both |
 | `torrent-all` | Torrents for DIME, TTD and the trackers in `BT_TRACKERS="Name=announce;..."` |
 | `lossless`, `speed` | Lossless and speed analyses (`BT_REPORT=1` for the full report) |
 | `spectrogram` | Spectrograms, saved as PNG in the current folder |
-| `to-flac`, `to-wav` | Conversions (`BT_LEVEL=0`...`8` for FLAC, 8 by default) |
+| `to-flac`, `to-wav` | Conversions (`BT_LEVEL=0`...`8` for FLAC, 8 by default; `BT_FLOAT=round` rounds float WAVs to 24 bits) |
 | `mp3-320`, `mp3-v0` | MP3 copies (`BT_MP3_DIR` for another folder) |
 | `fix-sbe` | SBE fix |
+| `clean-wav` | WAV clean-up |
+| `torrent-check` | Check the `.torrent` files given against their shows |
+| `media-info` | Media info of the shows and of the DVDs (`VIDEO_TS` folders, VOB files) |
+| `check-update` | Look for a newer release |
+| `shell-menu-add`, `shell-menu-remove` | Add or remove the file manager entry |
+| `help` | Every command, variable and keyboard shortcut (also `bootleg-toolbox --help`, and Help > Keyboard shortcuts and command line, F1, in the window) |
 
 ## Building from source
 

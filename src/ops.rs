@@ -155,6 +155,8 @@ pub struct Options {
     pub always_on_top: bool,
     /// "Open in Bootleg Toolbox" in the file manager's right-click menu.
     pub shell_integration: bool,
+    /// Look for a newer release on GitHub at startup (the only network access; off by default).
+    pub check_updates: bool,
     /// The entries of the former name (Bootleg Helper) have been looked for and removed.
     pub legacy_cleaned: bool,
     /// Compact view: fewer columns (Format then gives bits and rate), tighter rows.
@@ -201,6 +203,7 @@ impl Default for Options {
             always_on_top: false,
             shell_integration: false,
             legacy_cleaned: false,
+            check_updates: false,
         }
     }
 }

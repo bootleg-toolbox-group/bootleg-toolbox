@@ -33,6 +33,7 @@ ape-decoder = "0.3.2"
 wavicle = "0.1.0"
 # MP3 encoding: LAME 3.100 (C, LGPL-3.0), built from source into the executable.
 mp3lame-encoder = "0.2.5"
+ureq = { version = "2", default-features = false, features = ["tls"] }
 
 # Same winit as eframe, only to pick the X11 backend (drag and drop).
 [target.'cfg(target_os = "linux")'.dependencies]
