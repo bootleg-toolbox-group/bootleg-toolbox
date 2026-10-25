@@ -116,7 +116,7 @@ Torrent check answers the question every downloader has: is this show complete a
 
 Conversions keep the originals and verify every result before it is kept.
 
-- **To FLAC**, levels 0 to 8 (the level is remembered). Each file is written to a temporary ".part" file, decoded again and compared with the source audio (MD5 and sample count), and only then renamed. Sizes come within 0.3% of the reference flac encoder.
+- **To FLAC**, levels 0 to 8 (the level is remembered). Each file is written to a temporary ".part" file, decoded again and compared with the source audio (MD5 and sample count), and only then renamed. The audio is identical bit for bit (checked after every file), and so is the MD5 signature stored in the FLAC, so FFP files match those of any other encoder; only the compression differs slightly, so files come within 0.3% of the size the reference flac encoder would give.
 - **Tags carried over:** FLAC Vorbis comments, and APEv2 tags from APE and WavPack files (year, track and disc numbers, album artist).
 - **To WAV** from any format, also verified.
 - **After a conversion to FLAC**, a window offers to move the converted originals to the trash, to remove the old .md5/.st5 files that list them, and to create the new FFP. Your choices are remembered.
@@ -306,7 +306,7 @@ Measured on a desktop Linux PC during development (times include reading the fil
 
 ### Honest limits
 
-- FLAC encoding uses a pure-Rust encoder: the files come within 0.3% of the reference encoder's size, but encoding is 2 to 5 times slower per file than the reference flac.exe. Parallel processing makes up most of the difference on a whole show.
+- FLAC encoding uses a pure-Rust encoder: the audio is the same bit for bit and the files come within 0.3% of the reference encoder's size, but encoding is 2 to 5 times slower per file than the reference flac.exe. Parallel processing makes up most of the difference on a whole show.
 - The Lossless? and Speed? analyses decode every track in full, so they take about as long as a decode test plus the analysis itself.
 
 ## Platforms, installation and safety
