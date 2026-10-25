@@ -66,7 +66,7 @@ impl Report {
                 }
             }
         }
-        out.push_str(&format!("\n({}, Bootleg Helper {})\n", self.heading, crate::ops::APP_VERSION));
+        out.push_str(&format!("\n({}, Bootleg Toolbox {})\n", self.heading, crate::ops::APP_VERSION));
         out
     }
 }

@@ -1,4 +1,4 @@
-# Bootleg Helper
+# Bootleg Toolbox
 
 A desktop tool for collectors of lossless concert recordings: checksums, decode tests,
 torrents for the trading trackers, format conversions and SBE fixing, in one program.
@@ -38,8 +38,8 @@ next to them.
 ## Download
 
 Ready-to-run executables for Windows and Linux are on the Releases page of this
-repository. On Windows, run `bootleg-helper.exe`; on Linux, make the file executable
-(`chmod +x bootleg-helper`) and run it. To add it, with its icon, to your desktop's applications
+repository. On Windows, run `bootleg-toolbox.exe`; on Linux, make the file executable
+(`chmod +x bootleg-toolbox`) and run it. To add it, with its icon, to your desktop's applications
 menu, use **Help > Add to the applications menu** (again if you move the file).
 
 ## Usage
@@ -55,21 +55,21 @@ with no selection, actions apply to the whole list. Every action is in the toolb
 The same operations run without a window, for scripts:
 
 ```
-bootleg-helper --cli <command> <folders or files...>
+bootleg-toolbox --cli <command> <folders or files...>
 ```
 
 | Command | Action |
 | --- | --- |
 | `details` | File details |
 | `verify` | Verify checksum files |
-| `create` | Create checksum files (`BH_OVERWRITE=1` to replace, `BH_MD5=1` to add `.md5`) |
+| `create` | Create checksum files (`BT_OVERWRITE=1` to replace, `BT_MD5=1` to add `.md5`) |
 | `test` | Decode test |
 | `torrent-dime`, `torrent-ttd`, `torrent-both` | Torrents for DIME, TTD, or both |
-| `torrent-all` | Torrents for DIME, TTD and the trackers in `BH_TRACKERS="Name=announce;..."` |
-| `lossless`, `speed` | Lossless and speed analyses (`BH_REPORT=1` for the full report) |
+| `torrent-all` | Torrents for DIME, TTD and the trackers in `BT_TRACKERS="Name=announce;..."` |
+| `lossless`, `speed` | Lossless and speed analyses (`BT_REPORT=1` for the full report) |
 | `spectrogram` | Spectrograms, saved as PNG in the current folder |
-| `to-flac`, `to-wav` | Conversions (`BH_LEVEL=0`...`8` for FLAC, 8 by default) |
-| `mp3-320`, `mp3-v0` | MP3 copies (`BH_MP3_DIR` for another folder) |
+| `to-flac`, `to-wav` | Conversions (`BT_LEVEL=0`...`8` for FLAC, 8 by default) |
+| `mp3-320`, `mp3-v0` | MP3 copies (`BT_MP3_DIR` for another folder) |
 | `fix-sbe` | SBE fix |
 
 ## Building from source
@@ -80,7 +80,7 @@ With a stable Rust toolchain (https://rustup.rs) and a C compiler (for LAME):
 cargo build --release
 ```
 
-The program is `target/release/bootleg-helper`. On Linux, building LAME also needs
+The program is `target/release/bootleg-toolbox`. On Linux, building LAME also needs
 `make`; no other development package is required (the X11, Wayland and OpenGL libraries
 are loaded at run time).
 
@@ -102,5 +102,5 @@ version 3 of the License, or (at your option) any later version. See [LICENSE](L
 It includes LAME (LGPL) and other open-source components: see
 [THIRD-PARTY.md](THIRD-PARTY.md).
 
-Trader's Little Helper is a separate, closed-source freeware program; Bootleg Helper
+Trader's Little Helper is a separate, closed-source freeware program; Bootleg Toolbox
 shares no code with it.

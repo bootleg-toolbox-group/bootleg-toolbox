@@ -5,8 +5,8 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         let mut res = winresource::WindowsResource::new();
         res.set_icon("assets/icon.ico");
-        res.set("ProductName", "Bootleg Helper");
-        res.set("FileDescription", "Bootleg Helper");
+        res.set("ProductName", "Bootleg Toolbox");
+        res.set("FileDescription", "Bootleg Toolbox");
         res.set("LegalCopyright", "Rattlehead80. Free software, GNU GPL v3 or later.");
         if let Err(e) = res.compile() {
             println!("cargo:warning=no icon in the .exe: {e}");

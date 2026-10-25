@@ -17,7 +17,7 @@ use sha1::Sha1;
 use crate::audio::{self, hex, AudioInfo, Format, ZERO_MD5};
 use crate::files::{self, ext_lower, file_name, rel_posix, Show};
 
-pub const APP_NAME: &str = "Bootleg Helper";
+pub const APP_NAME: &str = "Bootleg Toolbox";
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -153,8 +153,10 @@ pub struct Options {
     pub log_open: bool,
     /// The main window stays above the other windows.
     pub always_on_top: bool,
-    /// "Open in Bootleg Helper" in the file manager's right-click menu.
+    /// "Open in Bootleg Toolbox" in the file manager's right-click menu.
     pub shell_integration: bool,
+    /// The entries of the former name (Bootleg Helper) have been looked for and removed.
+    pub legacy_cleaned: bool,
     /// Compact view: fewer columns (Format then gives bits and rate), tighter rows.
     pub compact: bool,
     /// Table columns the user chose to hide (by title).
@@ -198,6 +200,7 @@ impl Default for Options {
             compact: false,
             always_on_top: false,
             shell_integration: false,
+            legacy_cleaned: false,
         }
     }
 }
@@ -1145,7 +1148,7 @@ pub fn op_mp3(ctx: &Ctx, shows: &[Show], files: &[PathBuf], mode: crate::encode:
     summary
 }
 
-/// Folders Bootleg Helper writes corrected copies into, inside a show: left out of
+/// Folders Bootleg Toolbox writes corrected copies into, inside a show: left out of
 /// torrents, MP3 copies and the info file search.
 const OUTPUT_DIRS: [&str; 2] = ["SBE-fixed", "WAV-cleaned"];
 

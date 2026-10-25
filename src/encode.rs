@@ -82,7 +82,7 @@ pub fn pcm_to_flac(
             Ok(encoded)
         }
         Err(e) => {
-            if std::env::var_os("BH_KEEP_PART").is_none() {
+            if std::env::var_os("BT_KEEP_PART").is_none() {
                 let _ = fs::remove_file(&part);
             }
             Err(e)

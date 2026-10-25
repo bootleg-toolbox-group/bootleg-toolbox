@@ -13,9 +13,9 @@ cargo clean --release --target x86_64-pc-windows-gnu -p mp3lame-sys >/dev/null 2
 cargo build --release
 cargo build --release --target x86_64-pc-windows-gnu
 mkdir -p dist
-cp target/dist/release/bootleg-helper dist/bootleg-helper
-cp target/dist/x86_64-pc-windows-gnu/release/bootleg-helper.exe dist/bootleg-helper.exe
-for f in dist/bootleg-helper dist/bootleg-helper.exe; do
+cp target/dist/release/bootleg-toolbox dist/bootleg-toolbox
+cp target/dist/x86_64-pc-windows-gnu/release/bootleg-toolbox.exe dist/bootleg-toolbox.exe
+for f in dist/bootleg-toolbox dist/bootleg-toolbox.exe; do
     if strings "$f" | grep -q "$HOME"; then
         echo "warning: $f still contains $HOME" >&2
         exit 1

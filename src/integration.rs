@@ -1,11 +1,11 @@
-//! "Open in Bootleg Helper" in the file manager's right-click menu, for folders and audio
+//! "Open in Bootleg Toolbox" in the file manager's right-click menu, for folders and audio
 //! files, for the current user only (no administrator rights): the registry under HKCU on
 //! Windows; Dolphin, Nautilus and Nemo on Linux. `install` also refreshes the entries when
 //! the program has moved; `remove` takes every one of them away.
 
 use std::path::Path;
 
-const LABEL: &str = "Open in Bootleg Helper";
+const LABEL: &str = "Open in Bootleg Toolbox";
 /// Audio files the entry is offered for, besides folders.
 const AUDIO_EXT: [&str; 7] = ["flac", "wav", "ape", "shn", "wv", "mp3", "mp2"];
 
@@ -14,19 +14,26 @@ mod platform {
     use super::*;
     use std::os::windows::process::CommandExt;
 
-    const KEY: &str = "BootlegHelper";
+    const KEY: &str = "BootlegToolbox";
     /// No console window flashing up for reg.exe.
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-    fn keys() -> Vec<(String, &'static str)> {
+    /// The program's former name (Bootleg Helper, up to version 0.1.3) named its keys so.
+    const LEGACY_KEY: &str = "BootlegHelper";
+
+    fn keys_named(key: &str) -> Vec<(String, &'static str)> {
         let mut keys = vec![
-            (format!(r"HKEY_CURRENT_USER\Software\Classes\Directory\shell\{KEY}"), "%1"),
-            (format!(r"HKEY_CURRENT_USER\Software\Classes\Directory\Background\shell\{KEY}"), "%V"),
+            (format!(r"HKEY_CURRENT_USER\Software\Classes\Directory\shell\{key}"), "%1"),
+            (format!(r"HKEY_CURRENT_USER\Software\Classes\Directory\Background\shell\{key}"), "%V"),
         ];
         for ext in AUDIO_EXT {
-            keys.push((format!(r"HKEY_CURRENT_USER\Software\Classes\SystemFileAssociations\.{ext}\shell\{KEY}"), "%1"));
+            keys.push((format!(r"HKEY_CURRENT_USER\Software\Classes\SystemFileAssociations\.{ext}\shell\{key}"), "%1"));
         }
         keys
+    }
+
+    fn keys() -> Vec<(String, &'static str)> {
+        keys_named(KEY)
     }
 
     /// All the keys in one .reg file, imported by a single reg.exe call.
@@ -36,7 +43,7 @@ mod platform {
         for u in text.encode_utf16() {
             data.extend_from_slice(&u.to_le_bytes());
         }
-        let file = std::env::temp_dir().join(format!("bootleg-helper-{}.reg", std::process::id()));
+        let file = std::env::temp_dir().join(format!("bootleg-toolbox-{}.reg", std::process::id()));
         std::fs::write(&file, data).map_err(|e| e.to_string())?;
         let status = std::process::Command::new("reg")
             .arg("import")
@@ -74,6 +81,23 @@ mod platform {
         import(&lines)?;
         Ok(format!("\"{LABEL}\" removed from the right-click menu"))
     }
+
+    pub fn remove_legacy() -> bool {
+        let keys = keys_named(LEGACY_KEY);
+        let present = std::process::Command::new("reg")
+            .arg("query")
+            .arg(&keys[0].0)
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        if present {
+            let lines: String = keys.into_iter().map(|(key, _)| format!("[-{key}]\r\n\r\n")).collect();
+            let _ = import(&lines);
+        }
+        present
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -97,10 +121,10 @@ mod platform {
     fn files() -> Result<Vec<(&'static str, PathBuf, bool)>, String> {
         let data = data_home()?;
         Ok(vec![
-            ("Dolphin", data.join("kio/servicemenus/bootleg-helper.desktop"), on_path("dolphin")),
-            ("Dolphin (KDE 5)", data.join("kservices5/ServiceMenus/bootleg-helper.desktop"), on_path("dolphin") && on_path("kbuildsycoca5")),
+            ("Dolphin", data.join("kio/servicemenus/bootleg-toolbox.desktop"), on_path("dolphin")),
+            ("Dolphin (KDE 5)", data.join("kservices5/ServiceMenus/bootleg-toolbox.desktop"), on_path("dolphin") && on_path("kbuildsycoca5")),
             ("Nautilus", data.join(format!("nautilus/scripts/{LABEL}")), on_path("nautilus")),
-            ("Nemo", data.join("nemo/actions/bootleg-helper.nemo_action"), on_path("nemo")),
+            ("Nemo", data.join("nemo/actions/bootleg-toolbox.nemo_action"), on_path("nemo")),
         ])
     }
 
@@ -125,17 +149,17 @@ mod platform {
         let mimes = "inode/directory;audio/flac;audio/x-flac;audio/x-wav;audio/wav;audio/x-ape;audio/x-wavpack;audio/x-shorten;audio/mpeg;";
         match manager {
             "Nautilus" => format!(
-                "#!/bin/sh\n# Bootleg Helper: opens the selected folders and files.\nIFS='\n'\nexec '{}' $NAUTILUS_SCRIPT_SELECTED_FILE_PATHS\n",
+                "#!/bin/sh\n# Bootleg Toolbox: opens the selected folders and files.\nIFS='\n'\nexec '{}' $NAUTILUS_SCRIPT_SELECTED_FILE_PATHS\n",
                 exe.display().to_string().replace('\'', "'\\''")
             ),
             "Nemo" => format!(
-                "[Nemo Action]\nName={LABEL}\nComment=Check, convert and fix lossless concert recordings\nExec={} %F\nIcon-Name=bootleg-helper\nSelection=any\nExtensions=dir;{};\n",
+                "[Nemo Action]\nName={LABEL}\nComment=Check, convert and fix lossless concert recordings\nExec={} %F\nIcon-Name=bootleg-toolbox\nSelection=any\nExtensions=dir;{};\n",
                 exec_arg(exe),
                 AUDIO_EXT.join(";")
             ),
             _ => format!(
                 "[Desktop Entry]\nType=Service\nX-KDE-ServiceTypes=KonqPopupMenu/Plugin\nMimeType={mimes}\nActions=open\nX-KDE-Priority=TopLevel\n\n\
-                 [Desktop Action open]\nName={LABEL}\nIcon=bootleg-helper\nExec={} %F\n",
+                 [Desktop Action open]\nName={LABEL}\nIcon=bootleg-toolbox\nExec={} %F\n",
                 exec_arg(exe)
             ),
         }
@@ -161,7 +185,7 @@ mod platform {
         // The icon the entries name, as "Add to the applications menu" installs it.
         let icon_dir = data_home()?.join("icons/hicolor/256x256/apps");
         std::fs::create_dir_all(&icon_dir).map_err(|e| e.to_string())?;
-        std::fs::write(icon_dir.join("bootleg-helper.png"), include_bytes!("../assets/icon.png")).map_err(|e| e.to_string())?;
+        std::fs::write(icon_dir.join("bootleg-toolbox.png"), include_bytes!("../assets/icon.png")).map_err(|e| e.to_string())?;
         if done.is_empty() {
             return Err("no supported file manager found (Dolphin, Nautilus or Nemo)".into());
         }
@@ -176,6 +200,26 @@ mod platform {
         }
         Ok(format!("\"{LABEL}\" removed from the right-click menu"))
     }
+
+    /// The files of the program's former name (Bootleg Helper, up to version 0.1.3).
+    pub fn remove_legacy() -> bool {
+        let Ok(data) = data_home() else { return false };
+        let mut found = false;
+        for file in [
+            "kio/servicemenus/bootleg-helper.desktop",
+            "kservices5/ServiceMenus/bootleg-helper.desktop",
+            "nautilus/scripts/Open in Bootleg Helper",
+            "nemo/actions/bootleg-helper.nemo_action",
+            "applications/bootleg-helper.desktop",
+            "icons/hicolor/256x256/apps/bootleg-helper.png",
+        ] {
+            let path = data.join(file);
+            if path.is_file() && std::fs::remove_file(&path).is_ok() {
+                found = true;
+            }
+        }
+        found
+    }
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]
@@ -187,6 +231,9 @@ mod platform {
     pub fn remove() -> Result<String, String> {
         Ok(String::new())
     }
+    pub fn remove_legacy() -> bool {
+        false
+    }
 }
 
 /// Adds (or refreshes) the right-click entry for this program file where it is now.
@@ -197,4 +244,10 @@ pub fn install() -> Result<String, String> {
 
 pub fn remove() -> Result<String, String> {
     platform::remove()
+}
+
+/// Removes the right-click entries, menu entry and icon left by the program under its former
+/// name (Bootleg Helper); true if there were any.
+pub fn remove_legacy() -> bool {
+    platform::remove_legacy()
 }

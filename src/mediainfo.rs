@@ -245,7 +245,7 @@ pub fn audio_text(show: &Path, files: &[FileInfo], failed: &[(PathBuf, String)])
 }
 
 fn footer(doc: &mut Doc) {
-    doc.text(&format!("\n(Media info, Bootleg Helper {})", crate::ops::APP_VERSION));
+    doc.text(&format!("\n(Media info, Bootleg Toolbox {})", crate::ops::APP_VERSION));
 }
 
 // ---------------------------------------------------------------- MP3 and MP2 files

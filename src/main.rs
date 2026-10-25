@@ -53,26 +53,32 @@ fn attach_console() {
 fn attach_console() {}
 
 /// Text mode, handy for scripting and testing:
-///   bootleg-helper --cli details|verify|create|test|torrent-dime|torrent-ttd|torrent-both|torrent-all|spectrogram|lossless|speed|to-flac|to-wav|mp3-320|mp3-v0|fix-sbe|clean-wav|torrent-check|media-info|shell-menu-add|shell-menu-remove <paths...>
+///   bootleg-toolbox --cli details|verify|create|test|torrent-dime|torrent-ttd|torrent-both|torrent-all|spectrogram|lossless|speed|to-flac|to-wav|mp3-320|mp3-v0|fix-sbe|clean-wav|torrent-check|media-info|shell-menu-add|shell-menu-remove <paths...>
 fn run_cli(args: &[String]) -> i32 {
     let Some(command) = args.first() else {
-        eprintln!("usage: bootleg-helper --cli details|verify|create|test|torrent-dime|torrent-ttd|torrent-both|torrent-all|spectrogram|lossless|speed|to-flac|to-wav|mp3-320|mp3-v0|fix-sbe|clean-wav|torrent-check|media-info|shell-menu-add|shell-menu-remove <paths...>");
+        eprintln!("usage: bootleg-toolbox --cli details|verify|create|test|torrent-dime|torrent-ttd|torrent-both|torrent-all|spectrogram|lossless|speed|to-flac|to-wav|mp3-320|mp3-v0|fix-sbe|clean-wav|torrent-check|media-info|shell-menu-add|shell-menu-remove <paths...>");
         return 2;
     };
-    // Extra trackers for torrent-all: BH_TRACKERS="Name=announce;Other=announce".
-    let custom_trackers: Vec<ops::CustomTracker> = std::env::var("BH_TRACKERS")
+    // Extra trackers for torrent-all: BT_TRACKERS="Name=announce;Other=announce".
+    let custom_trackers: Vec<ops::CustomTracker> = std::env::var("BT_TRACKERS")
         .unwrap_or_default()
         .split(';')
         .filter_map(|t| t.split_once('='))
         .map(|(name, announce)| ops::CustomTracker { name: name.into(), announce: announce.into() })
         .collect();
-    // FLAC level for to-flac: BH_LEVEL (default 8).
-    // Float WAVs that do not hold exact 16/24-bit values: BH_FLOAT=round rounds them to 24 bits.
-    let round_float = std::env::var("BH_FLOAT").is_ok_and(|v| v == "round");
-    let level = std::env::var("BH_LEVEL").ok().and_then(|l| l.parse().ok()).unwrap_or(8);
+    // FLAC level for to-flac: BT_LEVEL (default 8).
+    // Float WAVs that do not hold exact 16/24-bit values: BT_FLOAT=round rounds them to 24 bits.
+    let round_float = std::env::var("BT_FLOAT").is_ok_and(|v| v == "round");
+    let level = std::env::var("BT_LEVEL").ok().and_then(|l| l.parse().ok()).unwrap_or(8);
     // The file manager's right-click entry (the Settings option, for scripts and tests).
     if let "shell-menu-add" | "shell-menu-remove" = command.as_str() {
-        let done = if command == "shell-menu-add" { integration::install() } else { integration::remove() };
+        let done = if command == "shell-menu-add" {
+            integration::install()
+        } else {
+            // The entries of the former name (Bootleg Helper) too.
+            integration::remove_legacy();
+            integration::remove()
+        };
         return match done {
             Ok(text) => {
                 println!("{text}");
@@ -118,16 +124,16 @@ fn run_cli(args: &[String]) -> i32 {
     let paths: Vec<PathBuf> = args[1..].iter().map(PathBuf::from).collect();
     let shows = files::scan_paths(&paths, &Default::default());
     let all: Vec<PathBuf> = shows.iter().flat_map(|s| s.files.clone()).collect();
-    // Folder for mp3-320/mp3-v0: BH_MP3_DIR (default: next to the show).
-    let mp3_dir = std::env::var("BH_MP3_DIR").unwrap_or_default();
+    // Folder for mp3-320/mp3-v0: BT_MP3_DIR (default: next to the show).
+    let mp3_dir = std::env::var("BT_MP3_DIR").unwrap_or_default();
     let mut opt = Options { custom_trackers: custom_trackers.clone(), mp3_dir, ..Options::default() };
-    if std::env::var("BH_OVERWRITE").is_ok() {
+    if std::env::var("BT_OVERWRITE").is_ok() {
         opt.overwrite = true;
     }
-    if std::env::var("BH_SFV").is_ok() {
+    if std::env::var("BT_SFV").is_ok() {
         opt.create_sfv = true;
     }
-    if std::env::var("BH_MD5").is_ok() {
+    if std::env::var("BT_MD5").is_ok() {
         opt.create_md5 = true;
     }
     let (tx, rx) = mpsc::channel();
@@ -144,7 +150,7 @@ fn run_cli(args: &[String]) -> i32 {
             Msg::Status { path, text, level, .. } => println!("  {}[{}] {text}", prefix(level), path.display()),
             Msg::Source { path, text, level, tooltip, report } => {
                 println!("  {}[{}] Source: {text}", prefix(level), path.display());
-                if std::env::var_os("BH_REPORT").is_some() {
+                if std::env::var_os("BT_REPORT").is_some() {
                     println!("{}", report.to_text());
                     continue;
                 }
@@ -154,7 +160,7 @@ fn run_cli(args: &[String]) -> i32 {
             }
             Msg::Speed { path, text, level, report, .. } => {
                 println!("  {}[{}] Speed: {text}", prefix(level), path.display());
-                if std::env::var_os("BH_REPORT").is_some() {
+                if std::env::var_os("BT_REPORT").is_some() {
                     println!("{}", report.to_text());
                 }
             }

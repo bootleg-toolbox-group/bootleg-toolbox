@@ -1,6 +1,6 @@
 # Third-party software
 
-Bootleg Helper is free software under the GNU General Public License v3.0 or later
+Bootleg Toolbox is free software under the GNU General Public License v3.0 or later
 (see [LICENSE](LICENSE)). The executable also contains the following software, under
 licences compatible with the GPL.
 
@@ -10,7 +10,7 @@ LAME 3.100 (https://lame.sourceforge.io/), written in C, is compiled into the ex
 through the `mp3lame-sys` and `mp3lame-encoder` crates. LAME is distributed under the
 GNU Library General Public License (LGPL), version 2 or later; its full source code is the
 `lame-3.100` folder of the `mp3lame-sys` crate (https://crates.io/crates/mp3lame-sys).
-Since Bootleg Helper itself is GPL and its whole source is published, you can rebuild the
+Since Bootleg Toolbox itself is GPL and its whole source is published, you can rebuild the
 program with a modified LAME.
 
 ## Fonts

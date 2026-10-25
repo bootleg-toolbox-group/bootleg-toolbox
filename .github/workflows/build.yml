@@ -56,15 +56,15 @@ jobs:
         run: |
           ./build-dist.sh
           mkdir -p out
-          cp dist/bootleg-helper out/bootleg-helper-linux-x86_64
-          cp dist/bootleg-helper.exe out/bootleg-helper-windows-x86_64.exe
+          cp dist/bootleg-toolbox out/bootleg-toolbox-linux-x86_64
+          cp dist/bootleg-toolbox.exe out/bootleg-toolbox-windows-x86_64.exe
           cd out
-          sha256sum bootleg-helper-linux-x86_64 bootleg-helper-windows-x86_64.exe > SHA256SUMS.txt
+          sha256sum bootleg-toolbox-linux-x86_64 bootleg-toolbox-windows-x86_64.exe > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       - uses: actions/upload-artifact@v7
         with:
-          name: bootleg-helper-${{ github.sha }}
+          name: bootleg-toolbox-${{ github.sha }}
           path: out/
           retention-days: 14
 
@@ -77,7 +77,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: bootleg-helper-${{ github.sha }}
+          name: bootleg-toolbox-${{ github.sha }}
           path: out
 
       - name: Release
@@ -86,7 +86,7 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" out/* \
             --repo "$GITHUB_REPOSITORY" \
-            --title "Bootleg Helper ${GITHUB_REF_NAME#v}" \
-            --notes "Windows: download bootleg-helper-windows-x86_64.exe and run it.
-          Linux: download bootleg-helper-linux-x86_64, make it executable (chmod +x) and run it; Help > Add to the applications menu adds it to your menu.
+            --title "Bootleg Toolbox ${GITHUB_REF_NAME#v}" \
+            --notes "Windows: download bootleg-toolbox-windows-x86_64.exe and run it.
+          Linux: download bootleg-toolbox-linux-x86_64, make it executable (chmod +x) and run it; Help > Add to the applications menu adds it to your menu.
           SHA256SUMS.txt lists the checksums of both files."

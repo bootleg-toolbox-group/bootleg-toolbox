@@ -38,7 +38,7 @@ const COMPONENTS: &[(&str, &str, &str)] = &[
     ("serde", "settings", "MIT or Apache-2.0"),
     ("zbus", "desktop services (Linux)", "MIT"),
     ("Hack, Ubuntu, Noto Emoji fonts", "interface fonts (from egui)", "MIT / UFL / OFL"),
-    ("Shorten decoder", "SHN decoding (written for Bootleg Helper)", "GPL-3.0"),
+    ("Shorten decoder", "SHN decoding (written for Bootleg Toolbox)", "GPL-3.0"),
 ];
 
 const DVD_TIP: &str = "Pick a DVD folder (VIDEO_TS, or the folder above it) for a technical summary: video standard, resolution, aspect ratio, bit rates, audio tracks, subtitles, titles and chapters. Dropping a DVD folder on the window does the same.";
@@ -61,6 +61,16 @@ struct InfoChoice {
     chosen: usize,
 }
 
+/// Linux: whether the former name (Bootleg Helper) had an applications menu entry.
+#[cfg(target_os = "linux")]
+fn legacy_menu_entry() -> bool {
+    std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .is_some_and(|d| d.join("applications/bootleg-helper.desktop").is_file())
+}
+
 /// Linux: a menu entry (~/.local/share/applications) and the icon (hicolor theme) for this
 /// executable, for the current user. Without it, the desktop shows a generic icon.
 #[cfg(target_os = "linux")]
@@ -76,7 +86,7 @@ fn install_desktop_entry() -> Result<String, String> {
     for dir in [&icon_dir, &apps_dir] {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
-    std::fs::write(icon_dir.join("bootleg-helper.png"), include_bytes!("../assets/icon.png")).map_err(|e| e.to_string())?;
+    std::fs::write(icon_dir.join("bootleg-toolbox.png"), include_bytes!("../assets/icon.png")).map_err(|e| e.to_string())?;
     // Exec: the path quoted, with the characters the specification asks to escape.
     let path = exe.to_string_lossy();
     let mut quoted = String::from("\"");
@@ -93,11 +103,11 @@ fn install_desktop_entry() -> Result<String, String> {
     let entry = format!(
         "[Desktop Entry]\nType=Application\nName={APP_NAME}\nGenericName=Lossless concert recordings helper\n\
          Comment=Checksums, decode tests, torrents, conversions and SBE fixing for lossless concert recordings\n\
-         Exec={} %F\nIcon=bootleg-helper\nTerminal=false\nStartupWMClass=bootleg-helper\n\
+         Exec={} %F\nIcon=bootleg-toolbox\nTerminal=false\nStartupWMClass=bootleg-toolbox\n\
          Categories=AudioVideo;Audio;Utility;\nKeywords=flac;ffp;md5;st5;shn;ape;bootleg;checksum;torrent;sbe;\n",
         quoted.replace('\\', "\\\\")
     );
-    let desktop = apps_dir.join("bootleg-helper.desktop");
+    let desktop = apps_dir.join("bootleg-toolbox.desktop");
     std::fs::write(&desktop, entry).map_err(|e| e.to_string())?;
     // Refresh the menus where the tools exist; harmless when they do not.
     for cmd in [vec!["update-desktop-database".to_string(), apps_dir.display().to_string()], vec!["kbuildsycoca6".into()], vec!["kbuildsycoca5".into()]] {
@@ -127,21 +137,35 @@ fn app_icon() -> std::sync::Arc<egui::IconData> {
     .clone()
 }
 
+/// Settings saved under the program's former name (Bootleg Helper) are taken over once.
+fn migrate_settings() {
+    let Some(new) = eframe::storage_dir("bootleg-toolbox").map(|d| d.join("app.ron")) else { return };
+    // Older versions named the folder after the window title ("Bootleg Helper").
+    let old = ["bootleg-helper", "Bootleg Helper"].into_iter().filter_map(eframe::storage_dir).map(|d| d.join("app.ron")).find(|p| p.is_file());
+    if let (Some(old), false) = (old, new.exists()) {
+        if let Some(dir) = new.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::copy(&old, &new);
+    }
+}
+
 pub fn run(paths: Vec<PathBuf>) -> eframe::Result<()> {
+    migrate_settings();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(APP_NAME)
             .with_inner_size([1000.0, 465.0])
             .with_min_inner_size([620.0, 320.0])
             .with_drag_and_drop(true)
-            .with_app_id("bootleg-helper")
+            .with_app_id("bootleg-toolbox")
             .with_icon(app_icon()),
         ..Default::default()
     };
     // winit has no drag and drop on Wayland: go through XWayland when it is there.
-    // BH_WAYLAND=1 keeps the native Wayland window (no drag and drop).
+    // BT_WAYLAND=1 keeps the native Wayland window (no drag and drop).
     #[cfg(target_os = "linux")]
-    let options = if std::env::var_os("DISPLAY").is_some() && std::env::var_os("BH_WAYLAND").is_none() {
+    let options = if std::env::var_os("DISPLAY").is_some() && std::env::var_os("BT_WAYLAND").is_none() {
         eframe::NativeOptions {
             event_loop_builder: Some(Box::new(|builder| {
                 use winit::platform::x11::EventLoopBuilderExtX11;
@@ -481,6 +505,21 @@ impl App {
             style.visuals.widgets.inactive.fg_stroke.color = Color32::from_gray(25);
         });
         app.apply_theme(&cc.egui_ctx);
+        // Once: the entries of the former name go; the menu entry comes back under the new one.
+        if !app.opt.legacy_cleaned {
+            app.opt.legacy_cleaned = true;
+            #[cfg(target_os = "linux")]
+            let had_menu_entry = legacy_menu_entry();
+            if crate::integration::remove_legacy() {
+                app.log.push(("Bootleg Helper is now Bootleg Toolbox: the entries of the old name were removed.".into(), Level::Info));
+                #[cfg(target_os = "linux")]
+                if had_menu_entry {
+                    if let Ok(text) = install_desktop_entry() {
+                        app.log.push((text, Level::Ok));
+                    }
+                }
+            }
+        }
         // Keep the right-click entry pointing at this program file, wherever it now is.
         if app.opt.shell_integration {
             std::thread::spawn(|| {
@@ -1058,7 +1097,7 @@ impl App {
     }
 
     fn save_log(&mut self) {
-        if let Some(path) = rfd::FileDialog::new().set_file_name("bootleg-helper.log").save_file() {
+        if let Some(path) = rfd::FileDialog::new().set_file_name("bootleg-toolbox.log").save_file() {
             let text: String = self.log.iter().map(|(t, _)| format!("{t}\n")).collect();
             if let Err(e) = std::fs::write(&path, text) {
                 self.log(format!("Cannot save the log: {e}"), Level::Error);
@@ -1157,7 +1196,7 @@ impl App {
                     #[cfg(target_os = "linux")]
                     if ui
                         .button("Add to the applications menu")
-                        .on_hover_text("Adds Bootleg Helper, with its icon, to the menu of your desktop, for this program file where it is now. Use it again if you move the program.")
+                        .on_hover_text("Adds Bootleg Toolbox, with its icon, to the menu of your desktop, for this program file where it is now. Use it again if you move the program.")
                         .clicked()
                     {
                         ui.close_menu();
@@ -1968,7 +2007,7 @@ impl App {
                     ui.add(egui::DragValue::new(&mut draft.jobs).range(1..=64));
                 });
                 ui.checkbox(&mut draft.auto_details, "Read file details automatically when adding files");
-                ui.checkbox(&mut draft.shell_integration, "Add \"Open in Bootleg Helper\" to the file manager's right-click menu")
+                ui.checkbox(&mut draft.shell_integration, "Add \"Open in Bootleg Toolbox\" to the file manager's right-click menu")
                     .on_hover_text("For folders and audio files, for your user only (no administrator rights). \
                                     Windows: Explorer (on Windows 11, under Show more options). Linux: Dolphin, Nautilus and Nemo.\n\
                                     Untick it to remove the entry.");
