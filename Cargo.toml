@@ -8,7 +8,11 @@ description = "Checksums, tests, torrents and conversions for lossless concert r
 repository = "https://github.com/bootleg-toolbox-group/bootleg-toolbox"
 
 [dependencies]
-eframe = { version = "0.29", features = ["persistence"] }
+# Same winit as eframe, with its default features (eframe's own defaults are off): picks the
+# X11 backend on Linux (drag and drop).
+winit = "0.30"
+# Without egui's default fonts (Ubuntu and Hack are not under OSI-approved licences): see fonts.rs.
+eframe = { version = "0.29", default-features = false, features = ["accesskit", "glow", "wayland", "x11", "persistence"] }
 egui_extras = "0.29"
 symphonia = { version = "0.5", default-features = false, features = ["flac", "wav", "pcm", "mp2", "mp3"] }
 md-5 = "0.10"
@@ -33,11 +37,10 @@ ape-decoder = "0.3.2"
 wavicle = "0.1.0"
 # MP3 encoding: LAME 3.100 (C, LGPL-3.0), built from source into the executable.
 mp3lame-encoder = "0.2.5"
-ureq = { version = "2", default-features = false, features = ["tls"] }
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "platform-verifier"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 
-# Same winit as eframe, only to pick the X11 backend (drag and drop).
 [target.'cfg(target_os = "linux")'.dependencies]
-winit = { version = "0.30", default-features = false, features = ["x11"] }
 # Same zbus as rfd, to read the desktop's light/dark preference (XDG portal).
 zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
 

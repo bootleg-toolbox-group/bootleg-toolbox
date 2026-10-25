@@ -9,21 +9,32 @@ pub const RELEASES: &str = "https://github.com/bootleg-toolbox-group/bootleg-too
 
 /// A newer version than this one, if there is one ("0.1.5").
 pub fn newer_version() -> Result<Option<String>, String> {
-    let agent = ureq::AgentBuilder::new()
-        .redirects(0)
-        .timeout(Duration::from_secs(15))
-        .user_agent(&format!("bootleg-toolbox/{}", crate::ops::APP_VERSION))
-        .build();
+    // HTTPS through rustls with the ring cryptography, the certificates checked by the
+    // system (Windows certificate store, or the distribution's certificates on Linux).
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let tls = ureq::tls::TlsConfig::builder().root_certs(ureq::tls::RootCerts::PlatformVerifier).build();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .max_redirects(0)
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(15)))
+        .user_agent(format!("bootleg-toolbox/{}", crate::ops::APP_VERSION))
+        .tls_config(tls)
+        .build()
+        .into();
     // BT_RELEASES: another releases page, for tests.
     let releases = std::env::var("BT_RELEASES").unwrap_or_else(|_| RELEASES.to_string());
-    let response = match agent.get(&format!("{releases}/latest")).call() {
-        Ok(r) => r,
-        Err(ureq::Error::Status(404, _)) => return Err("no published release found (is the repository public?)".into()),
-        Err(ureq::Error::Status(code, _)) => return Err(format!("github.com answered {code}")),
-        Err(e) => return Err(format!("cannot reach github.com ({})", e.kind())),
-    };
+    let response = agent.get(&format!("{releases}/latest")).call().map_err(|e| format!("cannot reach github.com ({e})"))?;
+    match response.status().as_u16() {
+        300..=399 => {}
+        404 => return Err("no published release found (is the repository public?)".into()),
+        code => return Err(format!("github.com answered {code}")),
+    }
     // ".../releases/tag/v0.1.5"
-    let location = response.header("location").ok_or("unexpected answer from github.com")?;
+    let location = response
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .ok_or("unexpected answer from github.com")?;
     let tag = location.rsplit('/').next().unwrap_or("");
     let latest = tag.trim_start_matches('v');
     let parse = |v: &str| -> Option<Vec<u32>> { v.split('.').map(|n| n.parse().ok()).collect() };

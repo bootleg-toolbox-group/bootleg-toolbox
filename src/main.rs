@@ -7,6 +7,7 @@ mod dsp;
 mod encode;
 mod dvd;
 mod files;
+mod fonts;
 mod help;
 mod integration;
 mod lossless;

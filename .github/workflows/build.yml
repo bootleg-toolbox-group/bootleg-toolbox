@@ -89,4 +89,6 @@ jobs:
             --title "Bootleg Toolbox ${GITHUB_REF_NAME#v}" \
             --notes "Windows: download bootleg-toolbox-windows-x86_64.exe and run it.
           Linux: download bootleg-toolbox-linux-x86_64, make it executable (chmod +x) and run it; Help > Add to the applications menu adds it to your menu.
-          SHA256SUMS.txt lists the checksums of both files."
+          SHA256SUMS.txt lists the checksums of both files.
+          Windows code signing: free code signing provided by SignPath.io, certificate by SignPath Foundation (application in progress; this release is not signed yet).
+          Code signing policy: https://github.com/${GITHUB_REPOSITORY}#code-signing-policy"

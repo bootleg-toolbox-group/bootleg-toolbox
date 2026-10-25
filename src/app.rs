@@ -38,8 +38,9 @@ const COMPONENTS: &[(&str, &str, &str)] = &[
     ("serde", "settings", "MIT or Apache-2.0"),
     ("zbus", "desktop services (Linux)", "MIT"),
     ("ureq, rustls", "update check (HTTPS)", "MIT or Apache-2.0 / Apache-2.0, ISC or MIT"),
-    ("ring, rustls-webpki, webpki-roots", "encryption, certificates", "Apache-2.0 and ISC / ISC / CDLA-Permissive-2.0"),
-    ("Hack, Ubuntu, Noto Emoji fonts", "interface fonts (from egui)", "MIT / UFL / OFL"),
+    ("ring, rustls-webpki, rustls-platform-verifier", "encryption, certificates checked by the system", "Apache-2.0 and ISC / ISC / MIT or Apache-2.0"),
+    ("Noto Sans, Noto Sans Mono, Noto Emoji", "interface fonts", "OFL-1.1"),
+    ("emoji-icon-font", "interface symbols (from egui)", "MIT"),
     ("Shorten decoder", "SHN decoding (written for Bootleg Toolbox)", "GPL-3.0"),
 ];
 
@@ -486,6 +487,7 @@ impl App {
             newer_version: None,
         };
         // A more modern look: roomier, rounded buttons, a blue tint on hover.
+        cc.egui_ctx.set_fonts(crate::fonts::definitions());
         cc.egui_ctx.all_styles_mut(|style| {
             style.spacing.button_padding = egui::vec2(10.0, 5.0);
             style.spacing.interact_size.y = style.spacing.interact_size.y.max(26.0);

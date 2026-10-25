@@ -56,6 +56,9 @@ repository. On Windows, run `bootleg-toolbox.exe`; on Linux, make the file execu
 (`chmod +x bootleg-toolbox`) and run it. To add it, with its icon, to your desktop's applications
 menu, use **Help > Add to the applications menu** (again if you move the file).
 
+Each release lists the SHA-256 checksums of both files. Windows executables are to be
+code-signed through SignPath: see the [code signing policy](#code-signing-policy).
+
 ## Usage
 
 Drag folders or files onto the window (hold Ctrl to add to the list instead of replacing
@@ -110,6 +113,29 @@ To build the Windows executable from Linux, with the MinGW-w64 cross compiler in
 rustup target add x86_64-pc-windows-gnu
 cargo build --release --target x86_64-pc-windows-gnu
 ```
+
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by
+[SignPath Foundation](https://signpath.org/). The application to the SignPath Foundation
+is in progress: until it is accepted, the Windows executables are not signed.
+
+- Only executables built by GitHub Actions from this repository, by the
+  [build workflow](.github/workflows/build.yml), are submitted for signing; nothing built
+  on a personal computer is ever signed.
+- Every signing request is approved by hand, release by release.
+- Team roles:
+  - Committers and reviewers: [Rattlehead80](https://github.com/rattlehead80)
+  - Approvers: [Rattlehead80](https://github.com/rattlehead80)
+
+### Privacy
+
+This program will not transfer any information to other networked systems unless
+specifically requested by the user or the person installing or operating it.
+
+The only network access is the update check, off by default: when the user asks for it
+(Help > Check for updates, or the Settings option), the program asks github.com for the
+latest release, sending nothing but its name and version.
 
 ## Licence
 

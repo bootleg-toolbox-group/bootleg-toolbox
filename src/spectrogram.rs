@@ -1,16 +1,13 @@
 //! Spectrogram of a whole track, computed and drawn natively: FFT, colours and
 //! legend (frequency, time, dBFS scale) in an RGBA image that can be saved as PNG.
 
-use std::borrow::Cow;
 use std::f32::consts::PI;
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
-use std::sync::OnceLock;
 
 use ab_glyph::{point, Font, FontRef, PxScale, ScaleFont};
-use eframe::egui;
 
 use crate::audio::{self, AudioInfo};
 use crate::dsp::{self, Fft};
@@ -251,23 +248,9 @@ fn clock(seconds: f64) -> String {
     }
 }
 
-/// egui's own proportional font, so the legend needs no font file.
+/// The interface's text font, so the legend needs no font file.
 fn font() -> FontRef<'static> {
-    static BYTES: OnceLock<&'static [u8]> = OnceLock::new();
-    let bytes = BYTES.get_or_init(|| {
-        let mut defs = egui::FontDefinitions::default();
-        let name = defs
-            .families
-            .get(&egui::FontFamily::Proportional)
-            .and_then(|names| names.first().cloned())
-            .unwrap_or_default();
-        match defs.font_data.remove(&name).map(|d| d.font) {
-            Some(Cow::Borrowed(b)) => b,
-            Some(Cow::Owned(v)) => Box::leak(v.into_boxed_slice()),
-            None => &[],
-        }
-    });
-    FontRef::try_from_slice(bytes).expect("egui ships a valid default font")
+    FontRef::try_from_slice(crate::fonts::SANS).expect("the built-in font is valid")
 }
 
 struct Canvas {
