@@ -498,25 +498,59 @@ fn ape_to_vorbis(items: &[(String, String)]) -> Vec<(String, String)> {
 
 /// Monkey's Audio: decoded frame by frame (each frame's CRC is checked), as in a WAV
 /// data chunk (little-endian; files made from AIFF are big-endian and get swapped).
+/// Monkey's Audio frames decode independently, and the stronger modes are slow (about
+/// twice the time of FLAC per frame on one core): the frames of a batch are shared out
+/// between one decoder per thread, then handed to `sink` in order.
 fn decode_ape(path: &Path, cancel: &AtomicBool, mut sink: impl FnMut(&[u8])) -> Result<u64, String> {
-    let mut decoder = open_ape(path)?;
-    let (big_endian, width, channels) = {
-        let i = decoder.info();
-        (i.is_big_endian, (i.bits_per_sample as usize).div_ceil(8), i.channels.max(1) as usize)
+    let first = open_ape(path)?;
+    let (big_endian, width, channels, total) = {
+        let i = first.info();
+        (i.is_big_endian, (i.bits_per_sample as usize).div_ceil(8), i.channels.max(1) as usize, i.total_frames)
     };
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 8).min(total.max(1) as usize);
+    let mut decoders = vec![first];
+    for _ in 1..threads {
+        decoders.push(open_ape(path)?);
+    }
+    let batch = (threads * 2) as u32;
     let mut bytes = 0u64;
-    for frame in decoder.frames() {
+    let mut start = 0u32;
+    while start < total {
         if cancel.load(Ordering::Relaxed) {
             return Err("cancelled".into());
         }
-        let mut pcm = frame.map_err(|e| format!("damaged data: {e}"))?;
-        if big_endian && width > 1 {
-            for sample in pcm.chunks_exact_mut(width) {
-                sample.reverse();
-            }
+        let end = (start + batch).min(total);
+        let decoded: Vec<Vec<(u32, Result<Vec<u8>, String>)>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = decoders
+                .iter_mut()
+                .enumerate()
+                .map(|(t, decoder)| {
+                    scope.spawn(move || {
+                        (start + t as u32..end)
+                            .step_by(threads)
+                            .map(|f| (f, decoder.decode_frame(f).map_err(|e| format!("damaged data: {e}"))))
+                            .collect()
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap_or_default()).collect()
+        });
+        let mut frames: Vec<(u32, Result<Vec<u8>, String>)> = decoded.into_iter().flatten().collect();
+        frames.sort_by_key(|(f, _)| *f);
+        if frames.len() != (end - start) as usize {
+            return Err("damaged data: a frame could not be decoded".into());
         }
-        bytes += pcm.len() as u64;
-        sink(&pcm);
+        for (_, frame) in frames {
+            let mut pcm = frame?;
+            if big_endian && width > 1 {
+                for sample in pcm.chunks_exact_mut(width) {
+                    sample.reverse();
+                }
+            }
+            bytes += pcm.len() as u64;
+            sink(&pcm);
+        }
+        start = end;
     }
     Ok(bytes / (width * channels) as u64)
 }

@@ -17,6 +17,30 @@ use crate::ops::{self, Level, Msg, Op, Options, Target, ThemeChoice, Tracker, AP
 
 const AUTO_DETAILS_LIMIT: usize = 3000;
 
+/// The main components built into the program (About window); THIRD-PARTY.md lists them all.
+const COMPONENTS: &[(&str, &str, &str)] = &[
+    ("egui, eframe, egui_extras", "user interface", "MIT or Apache-2.0"),
+    ("winit", "windows and input", "Apache-2.0"),
+    ("Symphonia", "FLAC and WAV decoding", "MPL-2.0"),
+    ("flacenc", "FLAC encoding", "Apache-2.0"),
+    ("ape-decoder", "Monkey's Audio (APE) decoding", "MIT or Apache-2.0"),
+    ("wavicle", "WavPack decoding", "MIT or Apache-2.0"),
+    ("LAME 3.100", "MP3 encoding (lame.sourceforge.io)", "LGPL"),
+    ("mp3lame-encoder", "link to LAME", "LGPL-3.0"),
+    ("rayon", "parallel processing", "MIT or Apache-2.0"),
+    ("md-5, sha1", "checksums, torrents", "MIT or Apache-2.0"),
+    ("regex", "file name patterns", "MIT or Apache-2.0"),
+    ("rfd", "file and folder dialogs", "MIT"),
+    ("trash", "moving files to the trash", "MIT"),
+    ("open", "opening folders", "MIT"),
+    ("arboard", "clipboard (images)", "MIT or Apache-2.0"),
+    ("ab_glyph, png", "spectrogram text and images", "Apache-2.0 / MIT or Apache-2.0"),
+    ("serde", "settings", "MIT or Apache-2.0"),
+    ("zbus", "desktop services (Linux)", "MIT"),
+    ("Hack, Ubuntu, Noto Emoji fonts", "interface fonts (from egui)", "MIT / UFL / OFL"),
+    ("Shorten decoder", "SHN decoding (written for Bootleg Helper)", "GPL-3.0"),
+];
+
 const INFO_TIP: &str = "Copy the show's info file (.txt or .nfo, whatever its name) to the clipboard, for the upload forms. With several text files, a window lets you pick the right one.";
 
 /// The text files that may be a show's info file, the most likely first.
@@ -962,7 +986,7 @@ impl App {
         let mut menu_open = false;
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
-                ui.menu_button("File", |ui| {
+                ui.menu_button("File", |ui| fit_below(ui, |ui| {
                     menu_open = true;
                     if ui.add_enabled(!busy, egui::Button::new("Add folder...")).clicked() {
                         ui.close_menu();
@@ -997,8 +1021,8 @@ impl App {
                     if ui.button("Quit").clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
-                });
-                ui.menu_button("Tools", |ui| {
+                }));
+                ui.menu_button("Tools", |ui| fit_below(ui, |ui| {
                     menu_open = true;
                     ops_menu(ui, busy || !has, self.opt.flac_level, &tracker_entries(&self.opt), actions);
                     ui.separator();
@@ -1006,11 +1030,11 @@ impl App {
                         ui.close_menu();
                         self.stop();
                     }
-                });
+                }));
                 if ui.add_enabled(!busy, egui::Button::new("Settings").frame(false)).clicked() {
                     self.settings = Some(self.opt.clone());
                 }
-                ui.menu_button("View", |ui| {
+                ui.menu_button("View", |ui| fit_below(ui, |ui| {
                     menu_open = true;
                     let cols = self.visible_columns();
                     columns_menu(ui, &cols, actions);
@@ -1034,8 +1058,8 @@ impl App {
                             actions.push(Action::Theme(choice));
                         }
                     }
-                });
-                ui.menu_button("Help", |ui| {
+                }));
+                ui.menu_button("Help", |ui| fit_below(ui, |ui| {
                     menu_open = true;
                     #[cfg(target_os = "linux")]
                     if ui
@@ -1053,7 +1077,7 @@ impl App {
                         ui.close_menu();
                         self.about = true;
                     }
-                });
+                }));
             });
         });
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
@@ -1061,7 +1085,7 @@ impl App {
             ui.horizontal(|ui| {
                 // Grouped in a few menus, as compact as Trader's Little Helper; shortcuts unchanged.
                 ui.add_enabled_ui(!busy, |ui| {
-                    ui.menu_button("📂 Add ⏷", |ui| {
+                    ui.menu_button("📂 Add ⏷", |ui| fit_below(ui, |ui| {
                         menu_open = true;
                         if ui.button("Add folder...").clicked() {
                             ui.close_menu();
@@ -1080,14 +1104,14 @@ impl App {
                             ui.close_menu();
                             self.clear_list();
                         }
-                    })
+                    }))
                     .response
                     .on_hover_text("Add show folders or audio files (or drag and drop them onto the list)");
                 });
                 let on = !busy && has;
                 let kinds = self.checksum_kinds();
                 ui.add_enabled_ui(on, |ui| {
-                    ui.menu_button("✔ Check ⏷", |ui| {
+                    ui.menu_button("✔ Check ⏷", |ui| fit_below(ui, |ui| {
                         menu_open = true;
                         let items: [(&str, &str, Op, String); 6] = [
                             ("🛡 Verify checksums", "F5", Op::Verify, format!("Check the files of {scope} against their .ffp, .md5 and .st5 files.\nAn FFP line only compares the MD5 stored in the FLAC header: use Decode test to find damaged audio.")),
@@ -1106,10 +1130,10 @@ impl App {
                                 actions.push(Action::Run(op));
                             }
                         }
-                    })
+                    }))
                     .response
                     .on_hover_text(format!("Verify, test and analyse {scope}"));
-                    ui.menu_button("✚ Create ⏷", |ui| {
+                    ui.menu_button("✚ Create ⏷", |ui| fit_below(ui, |ui| {
                         menu_open = true;
                         if ui
                             .add(egui::Button::new("✚ Create checksums").shortcut_text("F6"))
@@ -1131,14 +1155,14 @@ impl App {
                             ui.close_menu();
                             actions.push(Action::CopyInfo);
                         }
-                    })
+                    }))
                     .response
                     .on_hover_text(format!("Create checksum files ({kinds}) for {scope}"));
                 });
                 ui.separator();
                 ui.add_enabled_ui(on, |ui| {
                     let level = self.opt.flac_level;
-                    ui.menu_button("🎵 Convert ⏷", |ui| {
+                    ui.menu_button("🎵 Convert ⏷", |ui| fit_below(ui, |ui| {
                         menu_open = true;
                         ui.label(RichText::new("To FLAC (verified)").strong());
                         for l in 0..=8u8 {
@@ -1165,17 +1189,17 @@ impl App {
                         mp3_buttons(ui, false, actions);
                         ui.separator();
                         sbe_button(ui, false, actions);
-                    })
+                    }))
                     .response
                     .on_hover_text(format!("Convert {scope} to FLAC (each file is decoded again and checked) or to WAV, make an MP3 copy of the shows in a separate folder, or fix SBEs. The originals are kept."));
                 });
                 ui.separator();
                 let trackers = tracker_entries(&self.opt);
                 ui.add_enabled_ui(on, |ui| {
-                    let torrent = ui.menu_button("🌐 Torrent ⏷", |ui| {
+                    let torrent = ui.menu_button("🌐 Torrent ⏷", |ui| fit_below(ui, |ui| {
                         menu_open = true;
                         torrent_menu(ui, &trackers, actions)
-                    });
+                    }));
                     torrent.response.on_hover_text(format!("Create torrents for the shows of {scope}"));
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1198,7 +1222,10 @@ impl App {
                 if let Some(r) = &self.running {
                     let fraction = if r.total > 0 { r.done as f32 / r.total as f32 } else { 0.0 };
                     ui.add(egui::ProgressBar::new(fraction).desired_width(220.0).text(format!("{}/{}", r.done, r.total)));
-                    ui.label(format!("{}...", r.label));
+                    // A vivid colour, so that a running operation cannot be missed.
+                    let busy = if DARK_THEME.load(Ordering::Relaxed) { Color32::from_rgb(196, 128, 255) } else { Color32::from_rgb(128, 36, 204) };
+                    ui.add(egui::Spinner::new().color(busy));
+                    ui.label(RichText::new(format!("{}...", r.label)).color(busy).strong());
                 } else if let Some((text, when)) = &self.flash {
                     if when.elapsed() < Duration::from_secs(15) {
                         ui.label(text);
@@ -1370,9 +1397,10 @@ impl App {
                             if response.secondary_clicked() {
                                 actions.push(Action::RightClick(index));
                             }
+                            // A show opens its folder; a file opens its folder with the file selected.
                             let folder = match r {
                                 Row::Show(si) => self.shows[si].root.clone(),
-                                Row::File(si, fi) => self.shows[si].files[fi].parent().map(Path::to_path_buf).unwrap_or_default(),
+                                Row::File(si, fi) => self.shows[si].files[fi].clone(),
                             };
                             let busy = self.running.is_some();
                             let flac_level = self.opt.flac_level;
@@ -1380,8 +1408,13 @@ impl App {
                             let has_lossless = self.reports.contains_key(&(ReportKind::Lossless, path.clone()));
                             let has_speed = self.reports.contains_key(&(ReportKind::Speed, path.clone()));
                             // Set from inside: egui 0.29 only returns Some when the menu closes.
-                            response.context_menu(|ui| {
+                            response.context_menu(|ui| fit_window(ui, |ui| {
                                 menu_open = true;
+                                if ui.button("📁 Open folder").on_hover_text("Open the folder in the file manager (for a file, with the file selected)").clicked() {
+                                    ui.close_menu();
+                                    actions.push(Action::OpenFolder(folder.clone()));
+                                }
+                                ui.separator();
                                 ops_menu(ui, busy, flac_level, &trackers, actions);
                                 ui.separator();
                                 for (kind, has, text, first) in [
@@ -1393,15 +1426,11 @@ impl App {
                                         actions.push(Action::OpenReport(kind, path.clone()));
                                     }
                                 }
-                                if ui.button("📁 Open folder").clicked() {
-                                    ui.close_menu();
-                                    actions.push(Action::OpenFolder(folder.clone()));
-                                }
                                 if ui.add_enabled(!busy, egui::Button::new("Remove from list")).clicked() {
                                     ui.close_menu();
                                     actions.push(Action::Remove);
                                 }
-                            });
+                            }));
                         });
                         // Pointer above or below the rows while dragging: the selection reaches
                         // the first or last row shown (which moves as the list scrolls).
@@ -1617,9 +1646,9 @@ impl App {
                         self.anchor = Some(index);
                     }
                 }
-                Action::OpenFolder(dir) => {
-                    if let Err(e) = open::that_detached(&dir) {
-                        self.log(format!("Cannot open {}: {e}", dir.display()), Level::Error);
+                Action::OpenFolder(path) => {
+                    if let Err(e) = show_in_folder(&path) {
+                        self.log(format!("Cannot open {}: {e}", path.display()), Level::Error);
                     }
                 }
                 Action::CopyFfp => self.copy_ffp(ctx),
@@ -1899,9 +1928,21 @@ impl App {
             ui.label("Checksums, decode tests, torrents, conversions (FLAC, WAV, MP3) and SBE fixing for lossless concert recordings.");
             ui.label("A single program with no external tool.");
             ui.add_space(6.0);
-            ui.label("Copyright (C) 2026 Rattlehead80");
-            ui.label("Free software under the GNU General Public License v3.0 or later, with no warranty.");
-            ui.label("MP3 encoding by LAME (lame.sourceforge.io, LGPL). Other components and their licences: THIRD-PARTY.md in the source.");
+            ui.label("By Rattlehead80. Free software under the GNU General Public License v3.0 or later, with no warranty.");
+            ui.add_space(8.0);
+            ui.label(RichText::new("Built with these open-source components").strong());
+            egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                egui::Grid::new("about_components").num_columns(3).striped(true).spacing([14.0, 4.0]).show(ui, |ui| {
+                    for (name, role, licence) in COMPONENTS {
+                        ui.label(*name);
+                        ui.label(*role);
+                        ui.label(RichText::new(*licence).weak());
+                        ui.end_row();
+                    }
+                });
+            });
+            ui.add_space(4.0);
+            ui.label(RichText::new("With the libraries these rely on: the full list and the licence texts are in THIRD-PARTY.md, in the source code.").weak());
         });
         self.about = open;
     }
@@ -2161,6 +2202,74 @@ fn tracker_entries(opt: &Options) -> Vec<(String, &'static str, Vec<Tracker>)> {
 fn set_window_level(ctx: &egui::Context, on_top: bool) {
     let level = if on_top { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal };
     ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
+}
+
+/// The content of a right-click menu, scrolling when it is taller than the window (egui
+/// would cut it off).
+fn fit_window<R>(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let room = (ui.ctx().screen_rect().height() - 24.0).max(80.0);
+    egui::ScrollArea::vertical().max_height(room).auto_shrink([true, true]).show(ui, add_contents).inner
+}
+
+/// Opens a folder in the file manager; for a file, its folder with the file selected
+/// (Explorer on Windows, the freedesktop FileManager1 service on Linux), or just its folder
+/// when the file manager cannot do that.
+fn show_in_folder(path: &Path) -> std::io::Result<()> {
+    if path.is_file() {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // Explorer wants the path quoted inside the argument: /select,"C:\a b\c.flac"
+            if std::process::Command::new("explorer").raw_arg(format!("/select,\"{}\"", path.display())).spawn().is_ok() {
+                return Ok(());
+            }
+        }
+        #[cfg(target_os = "linux")]
+        if reveal_freedesktop(path) {
+            return Ok(());
+        }
+    }
+    let dir = if path.is_file() { path.parent().unwrap_or(path) } else { path };
+    open::that_detached(dir)
+}
+
+/// org.freedesktop.FileManager1.ShowItems (Dolphin, Nautilus, Nemo...), within a second.
+#[cfg(target_os = "linux")]
+fn reveal_freedesktop(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let mut uri = String::from("file://");
+    for &b in path.as_os_str().as_bytes() {
+        if b.is_ascii_alphanumeric() || b"/-_.~".contains(&b) {
+            uri.push(b as char);
+        } else {
+            uri.push_str(&format!("%{b:02X}"));
+        }
+    }
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let call = || -> zbus::Result<()> {
+            let connection = zbus::blocking::Connection::session()?;
+            connection.call_method(
+                Some("org.freedesktop.FileManager1"),
+                "/org/freedesktop/FileManager1",
+                Some("org.freedesktop.FileManager1"),
+                "ShowItems",
+                &(vec![uri.as_str()], ""),
+            )?;
+            Ok(())
+        };
+        let _ = tx.send(call().is_ok());
+    });
+    rx.recv_timeout(Duration::from_secs(1)).unwrap_or(false)
+}
+
+/// The content of a drop-down menu, scrolling when it is taller than the room left under
+/// it: otherwise egui moves the whole menu up, over the menu bar and the toolbar.
+fn fit_below<R>(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let id = ui.id().with("menu_top");
+    let top = ui.ctx().memory_mut(|m| *m.data.get_temp_mut_or_insert_with(id, || ui.max_rect().top()));
+    let room = (ui.ctx().screen_rect().bottom() - top - 16.0).max(80.0);
+    egui::ScrollArea::vertical().max_height(room).auto_shrink([true, true]).show(ui, add_contents).inner
 }
 
 fn mp3_buttons(ui: &mut egui::Ui, disabled: bool, actions: &mut Vec<Action>) {

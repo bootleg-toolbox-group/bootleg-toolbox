@@ -7,7 +7,7 @@ fn main() {
         res.set_icon("assets/icon.ico");
         res.set("ProductName", "Bootleg Helper");
         res.set("FileDescription", "Bootleg Helper");
-        res.set("LegalCopyright", "Copyright (C) 2026 Rattlehead80. GPL-3.0-or-later.");
+        res.set("LegalCopyright", "Rattlehead80. Free software, GNU GPL v3 or later.");
         if let Err(e) = res.compile() {
             println!("cargo:warning=no icon in the .exe: {e}");
         }
