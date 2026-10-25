@@ -568,6 +568,7 @@ dependencies = [
  "ab_glyph",
  "ape-decoder",
  "arboard",
+ "crc32fast",
  "eframe",
  "egui_extras",
  "flacenc",

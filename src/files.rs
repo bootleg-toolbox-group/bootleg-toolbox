@@ -10,7 +10,7 @@ use regex::Regex;
 
 use crate::audio::Format;
 
-pub const CHECKSUM_EXT: [&str; 3] = ["ffp", "md5", "st5"];
+pub const CHECKSUM_EXT: [&str; 4] = ["ffp", "md5", "st5", "sfv"];
 
 #[derive(Clone, Debug)]
 pub struct Show {
@@ -229,7 +229,15 @@ pub fn parse_checksum_file(path: &Path) -> std::io::Result<(String, Vec<(String,
         if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
             continue;
         }
-        if kind == "ffp" {
+        if kind == "sfv" {
+            // "name with spaces.flac 1A2B3C4D": the CRC32 is the last word.
+            if let Some((name, crc)) = line.rsplit_once(char::is_whitespace) {
+                let crc = crc.trim().to_ascii_lowercase();
+                if crc.len() == 8 && crc.chars().all(|c| c.is_ascii_hexdigit()) && !name.trim().is_empty() {
+                    entries.push((name.trim().to_string(), crc));
+                }
+            }
+        } else if kind == "ffp" {
             if let Some((name, digest)) = line.rsplit_once(':') {
                 let digest = digest.trim().to_ascii_lowercase();
                 if is_md5_hex(&digest) {
@@ -297,6 +305,18 @@ mod tests {
         assert_eq!(resolve_entry(&dir, "./CD1/04 - Chatter.flac").unwrap(), dir.join("CD1").join("04 - Chatter.flac"));
         assert_eq!(resolve_entry(&dir, "elsewhere/04 - CHATTER.flac").unwrap(), dir.join("CD1").join("04 - Chatter.flac"));
         assert!(resolve_entry(&dir, "05.flac").is_none());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn sfv_lines() {
+        let dir = std::env::temp_dir().join(format!("bh-sfv-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let sfv = dir.join("set.sfv");
+        fs::write(&sfv, "; made by some tool\r\n;  12345  file.flac\r\nCD1\\01 - A b.flac 1a2B3c4D\r\nbad line\r\n02.flac\tDEADBEEF\r\n").unwrap();
+        let (kind, entries) = parse_checksum_file(&sfv).unwrap();
+        assert_eq!(kind, "sfv");
+        assert_eq!(entries, vec![("CD1\\01 - A b.flac".to_string(), "1a2b3c4d".to_string()), ("02.flac".to_string(), "deadbeef".to_string())]);
         fs::remove_dir_all(&dir).unwrap();
     }
 

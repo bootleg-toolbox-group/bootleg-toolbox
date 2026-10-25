@@ -482,7 +482,7 @@ impl App {
 
     /// "FFP and ST5 files", from the Settings.
     fn checksum_kinds(&self) -> String {
-        let kinds: Vec<&str> = [(self.opt.create_ffp, "FFP"), (self.opt.create_md5, "MD5"), (self.opt.create_st5, "ST5")]
+        let kinds: Vec<&str> = [(self.opt.create_ffp, "FFP"), (self.opt.create_md5, "MD5"), (self.opt.create_st5, "ST5"), (self.opt.create_sfv, "SFV")]
             .into_iter()
             .filter_map(|(on, kind)| on.then_some(kind))
             .collect();
@@ -1125,7 +1125,7 @@ impl App {
                     ui.menu_button("✔ Check ⏷", |ui| fit_below(ui, |ui| {
                         menu_open = true;
                         let items: [(&str, &str, Op, String); 6] = [
-                            ("🛡 Verify checksums", "F5", Op::Verify, format!("Check the files of {scope} against their .ffp, .md5 and .st5 files.\nAn FFP line only compares the MD5 stored in the FLAC header: use Decode test to find damaged audio.")),
+                            ("🛡 Verify checksums", "F5", Op::Verify, format!("Check the files of {scope} against their .ffp, .md5, .st5 and .sfv files.\nAn FFP line only compares the MD5 stored in the FLAC header: use Decode test to find damaged audio.")),
                             ("✔ Decode test", "F7", Op::Test, format!("Decode every file of {scope} completely to find damaged or truncated audio; FLAC files are also checked against their MD5 signature.\nNeeds no checksum file.")),
                             ("🔍 Lossless?", "Ctrl+L", Op::Lossless, format!("Analyse the spectrum of every file of {scope} to find lossy (MP3/AAC) sources, FM broadcasts, upsampled files and fake 24-bit.\nThe verdict goes to the Source column; click it for the full analysis.")),
                             ("⏱ Speed?", "Ctrl+P", Op::Speed, format!("Estimate whether the tape of {scope} runs too fast or too slow, and the correction to apply.\nThe verdict goes to the Speed column; click it for the full analysis.")),
@@ -1785,85 +1785,96 @@ impl App {
         let mut open = true;
         let mut save = false;
         let mut cancel = false;
-        egui::Window::new("Settings").collapsible(false).resizable(false).open(&mut open).show(ctx, |ui| {
-            ui.heading("Checksum files to create");
-            ui.checkbox(&mut draft.create_ffp, "FFP (FLAC fingerprints)");
-            ui.checkbox(&mut draft.create_md5, "MD5 (whole files)");
-            ui.checkbox(&mut draft.create_st5, "ST5 (audio data fingerprints, shntool format)");
-            ui.checkbox(&mut draft.overwrite, "Overwrite existing checksum files");
-            ui.checkbox(&mut draft.crlf, "Windows line endings (CRLF)");
-            ui.separator();
-            ui.heading("MP3 copies");
-            egui::Grid::new("mp3_grid").num_columns(2).show(ui, |ui| {
-                ui.label("Save MP3 copies in");
-                ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut draft.mp3_dir).hint_text("Next to the show folder").desired_width(320.0));
-                    if ui.button("...").clicked() {
-                        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                            draft.mp3_dir = dir.display().to_string();
-                        }
-                    }
-                });
-                ui.end_row();
-            });
-            ui.separator();
-            ui.heading("Torrents");
-            egui::Grid::new("torrent_grid").num_columns(2).show(ui, |ui| {
-                ui.label("DIME announce URL");
-                ui.add(egui::TextEdit::singleline(&mut draft.announce_dime).desired_width(380.0));
-                ui.end_row();
-                ui.label("The Traders' Den announce URL");
-                ui.add(egui::TextEdit::singleline(&mut draft.announce_ttd).desired_width(380.0));
-                ui.end_row();
-                ui.label("Save torrents in");
-                ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut draft.torrent_dir).hint_text("Next to the show folder").desired_width(320.0));
-                    if ui.button("...").clicked() {
-                        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                            draft.torrent_dir = dir.display().to_string();
-                        }
-                    }
-                });
-                ui.end_row();
-            });
-            ui.add_space(4.0);
-            ui.label(RichText::new("Other trackers").strong())
-                .on_hover_text("Each one gets its own torrent, named \"<show> [Name].torrent\", and its entry in the Torrent menus.");
-            let mut remove = None;
-            // Sizes are forced: inside a grid, text fields would otherwise shrink to a few letters.
-            let field_height = ui.spacing().interact_size.y;
-            egui::Grid::new("custom_trackers").num_columns(2).show(ui, |ui| {
-                for (i, t) in draft.custom_trackers.iter_mut().enumerate() {
-                    ui.add_sized([220.0, field_height], egui::TextEdit::singleline(&mut t.name).hint_text("Tracker name"));
+        // The settings scroll when the application window is too small for them; the buttons
+        // stay right under them, always visible.
+        let room = (ctx.screen_rect().height() - 130.0).max(120.0);
+        egui::Window::new("Settings")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .open(&mut open)
+            .show(ctx, |ui| {
+            egui::ScrollArea::vertical().max_height(room).auto_shrink([true, true]).show(ui, |ui| {
+                ui.heading("Checksum files to create");
+                ui.checkbox(&mut draft.create_ffp, "FFP (FLAC fingerprints)");
+                ui.checkbox(&mut draft.create_md5, "MD5 (whole files)");
+                ui.checkbox(&mut draft.create_st5, "ST5 (audio data fingerprints, shntool format)");
+                ui.checkbox(&mut draft.create_sfv, "SFV (CRC32 of whole files, found on older sets)");
+                ui.checkbox(&mut draft.overwrite, "Overwrite existing checksum files");
+                ui.checkbox(&mut draft.crlf, "Windows line endings (CRLF)");
+                ui.separator();
+                ui.heading("MP3 copies");
+                egui::Grid::new("mp3_grid").num_columns(2).show(ui, |ui| {
+                    ui.label("Save MP3 copies in");
                     ui.horizontal(|ui| {
-                        ui.add_sized([340.0, field_height], egui::TextEdit::singleline(&mut t.announce).hint_text("Tracker announce URL"));
-                        if ui.button("🗑").on_hover_text("Remove this tracker").clicked() {
-                            remove = Some(i);
+                        ui.add(egui::TextEdit::singleline(&mut draft.mp3_dir).hint_text("Next to the show folder").desired_width(320.0));
+                        if ui.button("...").clicked() {
+                            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                                draft.mp3_dir = dir.display().to_string();
+                            }
                         }
                     });
                     ui.end_row();
+                });
+                ui.separator();
+                ui.heading("Torrents");
+                egui::Grid::new("torrent_grid").num_columns(2).show(ui, |ui| {
+                    ui.label("DIME announce URL");
+                    ui.add(egui::TextEdit::singleline(&mut draft.announce_dime).desired_width(380.0));
+                    ui.end_row();
+                    ui.label("The Traders' Den announce URL");
+                    ui.add(egui::TextEdit::singleline(&mut draft.announce_ttd).desired_width(380.0));
+                    ui.end_row();
+                    ui.label("Save torrents in");
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut draft.torrent_dir).hint_text("Next to the show folder").desired_width(320.0));
+                        if ui.button("...").clicked() {
+                            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                                draft.torrent_dir = dir.display().to_string();
+                            }
+                        }
+                    });
+                    ui.end_row();
+                });
+                ui.add_space(4.0);
+                ui.label(RichText::new("Other trackers").strong())
+                    .on_hover_text("Each one gets its own torrent, named \"<show> [Name].torrent\", and its entry in the Torrent menus.");
+                let mut remove = None;
+                // Sizes are forced: inside a grid, text fields would otherwise shrink to a few letters.
+                let field_height = ui.spacing().interact_size.y;
+                egui::Grid::new("custom_trackers").num_columns(2).show(ui, |ui| {
+                    for (i, t) in draft.custom_trackers.iter_mut().enumerate() {
+                        ui.add_sized([220.0, field_height], egui::TextEdit::singleline(&mut t.name).hint_text("Tracker name"));
+                        ui.horizontal(|ui| {
+                            ui.add_sized([340.0, field_height], egui::TextEdit::singleline(&mut t.announce).hint_text("Tracker announce URL"));
+                            if ui.button("🗑").on_hover_text("Remove this tracker").clicked() {
+                                remove = Some(i);
+                            }
+                        });
+                        ui.end_row();
+                    }
+                });
+                if let Some(i) = remove {
+                    draft.custom_trackers.remove(i);
                 }
-            });
-            if let Some(i) = remove {
-                draft.custom_trackers.remove(i);
-            }
-            if ui.button("+ Add a tracker").clicked() {
-                draft.custom_trackers.push(ops::CustomTracker::default());
-            }
-            ui.add_space(4.0);
-            ui.checkbox(&mut draft.torrent_private, "Private torrent (no DHT or peer exchange)");
-            ui.checkbox(&mut draft.torrent_source, "Tag each torrent with its site, so the same show can be seeded on several sites at once");
-            ui.separator();
-            ui.horizontal(|ui| {
-                ui.label("Files processed in parallel");
-                ui.add(egui::DragValue::new(&mut draft.jobs).range(1..=64));
-            });
-            ui.checkbox(&mut draft.auto_details, "Read file details automatically when adding files");
-            ui.horizontal(|ui| {
-                ui.label("Appearance");
-                ui.radio_value(&mut draft.theme, ThemeChoice::System, "Follow the system");
-                ui.radio_value(&mut draft.theme, ThemeChoice::Light, "Light");
-                ui.radio_value(&mut draft.theme, ThemeChoice::Dark, "Dark");
+                if ui.button("+ Add a tracker").clicked() {
+                    draft.custom_trackers.push(ops::CustomTracker::default());
+                }
+                ui.add_space(4.0);
+                ui.checkbox(&mut draft.torrent_private, "Private torrent (no DHT or peer exchange)");
+                ui.checkbox(&mut draft.torrent_source, "Tag each torrent with its site, so the same show can be seeded on several sites at once");
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("Files processed in parallel");
+                    ui.add(egui::DragValue::new(&mut draft.jobs).range(1..=64));
+                });
+                ui.checkbox(&mut draft.auto_details, "Read file details automatically when adding files");
+                ui.horizontal(|ui| {
+                    ui.label("Appearance");
+                    ui.radio_value(&mut draft.theme, ThemeChoice::System, "Follow the system");
+                    ui.radio_value(&mut draft.theme, ThemeChoice::Light, "Light");
+                    ui.radio_value(&mut draft.theme, ThemeChoice::Dark, "Dark");
+                });
             });
             ui.separator();
             ui.horizontal(|ui| {
@@ -1878,6 +1889,7 @@ impl App {
                 }
             });
         });
+        cancel |= ctx.input(|i| i.key_pressed(Key::Escape));
         if save {
             if draft.announce_dime.trim().is_empty() {
                 draft.announce_dime = Tracker::Dime.default_announce().into();

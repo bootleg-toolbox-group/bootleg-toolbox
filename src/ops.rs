@@ -125,6 +125,8 @@ pub struct Options {
     pub create_ffp: bool,
     pub create_md5: bool,
     pub create_st5: bool,
+    /// SFV: CRC32 of whole files, found on older sets.
+    pub create_sfv: bool,
     pub overwrite: bool,
     pub crlf: bool,
     pub jobs: usize,
@@ -170,6 +172,7 @@ impl Default for Options {
             create_ffp: true,
             create_md5: false,
             create_st5: true,
+            create_sfv: false,
             overwrite: false,
             crlf: cfg!(windows),
             jobs: cpus.clamp(1, 8),
@@ -613,7 +616,7 @@ pub fn op_verify(ctx: &Ctx, shows: &[Show]) -> String {
     for show in shows {
         let checksum_files: Vec<PathBuf> = files::all_files(&show.root, true).into_iter().filter(|p| files::is_checksum_file(p)).collect();
         if checksum_files.is_empty() {
-            ctx.log(format!("{}: no checksum file (.ffp, .md5, .st5) found", file_name(&show.root)), Level::Warn);
+            ctx.log(format!("{}: no checksum file (.ffp, .md5, .st5, .sfv) found", file_name(&show.root)), Level::Warn);
             ctx.status(&show.root, "No checksum file", Level::Warn, "");
             for f in &show.files {
                 ctx.status(f, "No checksum file", Level::Warn, "");
@@ -673,6 +676,8 @@ pub fn op_verify(ctx: &Ctx, shows: &[Show]) -> String {
             hex(&md5)
         } else if job.kind == "ffp" || job.kind == "st5" {
             st5_digest(target, &ctx.cancel)?
+        } else if job.kind == "sfv" {
+            format!("{:08x}", audio::file_crc32(target, &ctx.cancel)?)
         } else {
             hex(&audio::file_md5(target, &ctx.cancel)?)
         };
@@ -722,6 +727,7 @@ pub fn op_create(ctx: &Ctx, shows: &[Show]) -> String {
     if ctx.opt.create_ffp { kinds.push("ffp"); }
     if ctx.opt.create_md5 { kinds.push("md5"); }
     if ctx.opt.create_st5 { kinds.push("st5"); }
+    if ctx.opt.create_sfv { kinds.push("sfv"); }
     if kinds.is_empty() {
         ctx.log("No checksum type selected in Settings.", Level::Warn);
         return "Nothing to do.".into();
@@ -767,6 +773,7 @@ pub fn create_checksums(ctx: &Ctx, shows: &[Show], kinds: &[&'static str]) -> St
             Ok(hex(&md5))
         }
         "st5" => st5_digest(path, &ctx.cancel),
+        "sfv" => Ok(format!("{:08x}", audio::file_crc32(path, &ctx.cancel)?)),
         _ => Ok(hex(&audio::file_md5(path, &ctx.cancel)?)),
     });
     if ctx.cancelled() {
@@ -787,6 +794,7 @@ pub fn create_checksums(ctx: &Ctx, shows: &[Show], kinds: &[&'static str]) -> St
                     lines.push(match *kind {
                         "ffp" => format!("{rel}:{d}"),
                         "st5" => format!("{d}  [shntool]  {rel}"),
+                        "sfv" => format!("{rel} {}", d.to_uppercase()),
                         _ => format!("{d}  {rel}"),
                     });
                 }
@@ -1764,7 +1772,7 @@ pub fn ffp_from_headers(show: &Show) -> Result<(String, usize, usize), String> {
 }
 
 /// Words in the name of text files that are not the info file of a show.
-const NOT_INFO: [&str; 7] = ["ffp", "md5", "st5", "checksum", "fingerprint", "audiochecker", "aucdtect"];
+const NOT_INFO: [&str; 8] = ["ffp", "md5", "st5", "sfv", "checksum", "fingerprint", "audiochecker", "aucdtect"];
 
 /// The text files that may be the info file of a show, the most likely first: those of
 /// the show folder (or, when it has none, of its sub-folders), ranked by name (the name of

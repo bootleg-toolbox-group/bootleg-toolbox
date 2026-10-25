@@ -564,9 +564,9 @@ pub fn pcm_md5(path: &Path, cancel: &AtomicBool) -> Result<([u8; 16], u64), Stri
 }
 
 /// MD5 of the whole file (classic .md5 files).
-pub fn file_md5(path: &Path, cancel: &AtomicBool) -> Result<[u8; 16], String> {
+/// Reads a whole file through `each`, in 1 MiB chunks.
+fn read_file(path: &Path, cancel: &AtomicBool, mut each: impl FnMut(&[u8])) -> Result<(), String> {
     let mut f = File::open(path).map_err(io_err)?;
-    let mut hasher = Md5::new();
     let mut buf = vec![0u8; 1 << 20];
     loop {
         if cancel.load(Ordering::Relaxed) {
@@ -574,11 +574,23 @@ pub fn file_md5(path: &Path, cancel: &AtomicBool) -> Result<[u8; 16], String> {
         }
         let n = f.read(&mut buf).map_err(io_err)?;
         if n == 0 {
-            break;
+            return Ok(());
         }
-        hasher.update(&buf[..n]);
+        each(&buf[..n]);
     }
+}
+
+pub fn file_md5(path: &Path, cancel: &AtomicBool) -> Result<[u8; 16], String> {
+    let mut hasher = Md5::new();
+    read_file(path, cancel, |chunk| hasher.update(chunk))?;
     Ok(hasher.finalize().into())
+}
+
+/// CRC32 of the whole file, as SFV files store it.
+pub fn file_crc32(path: &Path, cancel: &AtomicBool) -> Result<u32, String> {
+    let mut hasher = crc32fast::Hasher::new();
+    read_file(path, cancel, |chunk| hasher.update(chunk))?;
+    Ok(hasher.finalize())
 }
 
 #[cfg(test)]
