@@ -151,6 +151,8 @@ pub struct Options {
     pub log_open: bool,
     /// The main window stays above the other windows.
     pub always_on_top: bool,
+    /// "Open in Bootleg Helper" in the file manager's right-click menu.
+    pub shell_integration: bool,
     /// Compact view: fewer columns (Format then gives bits and rate), tighter rows.
     pub compact: bool,
     /// Table columns the user chose to hide (by title).
@@ -193,6 +195,7 @@ impl Default for Options {
             log_open: false,
             compact: false,
             always_on_top: false,
+            shell_integration: false,
         }
     }
 }

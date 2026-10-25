@@ -6,6 +6,7 @@ mod audio;
 mod dsp;
 mod encode;
 mod files;
+mod integration;
 mod lossless;
 mod ops;
 mod report;
@@ -50,10 +51,10 @@ fn attach_console() {
 fn attach_console() {}
 
 /// Text mode, handy for scripting and testing:
-///   bootleg-helper --cli details|verify|create|test|torrent-dime|torrent-ttd|torrent-both|torrent-all|spectrogram|lossless|speed|to-flac|to-wav|mp3-320|mp3-v0|fix-sbe|clean-wav|torrent-check <paths...>
+///   bootleg-helper --cli details|verify|create|test|torrent-dime|torrent-ttd|torrent-both|torrent-all|spectrogram|lossless|speed|to-flac|to-wav|mp3-320|mp3-v0|fix-sbe|clean-wav|torrent-check|shell-menu-add|shell-menu-remove <paths...>
 fn run_cli(args: &[String]) -> i32 {
     let Some(command) = args.first() else {
-        eprintln!("usage: bootleg-helper --cli details|verify|create|test|torrent-dime|torrent-ttd|torrent-both|torrent-all|spectrogram|lossless|speed|to-flac|to-wav|mp3-320|mp3-v0|fix-sbe|clean-wav|torrent-check <paths...>");
+        eprintln!("usage: bootleg-helper --cli details|verify|create|test|torrent-dime|torrent-ttd|torrent-both|torrent-all|spectrogram|lossless|speed|to-flac|to-wav|mp3-320|mp3-v0|fix-sbe|clean-wav|torrent-check|shell-menu-add|shell-menu-remove <paths...>");
         return 2;
     };
     // Extra trackers for torrent-all: BH_TRACKERS="Name=announce;Other=announce".
@@ -67,6 +68,20 @@ fn run_cli(args: &[String]) -> i32 {
     // Float WAVs that do not hold exact 16/24-bit values: BH_FLOAT=round rounds them to 24 bits.
     let round_float = std::env::var("BH_FLOAT").is_ok_and(|v| v == "round");
     let level = std::env::var("BH_LEVEL").ok().and_then(|l| l.parse().ok()).unwrap_or(8);
+    // The file manager's right-click entry (the Settings option, for scripts and tests).
+    if let "shell-menu-add" | "shell-menu-remove" = command.as_str() {
+        let done = if command == "shell-menu-add" { integration::install() } else { integration::remove() };
+        return match done {
+            Ok(text) => {
+                println!("{text}");
+                0
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
+        };
+    }
     let op = match command.as_str() {
         "details" => Op::Details { verbose: true },
         "verify" => Op::Verify,

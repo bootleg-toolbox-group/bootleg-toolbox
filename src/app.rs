@@ -465,6 +465,12 @@ impl App {
             style.visuals.widgets.inactive.fg_stroke.color = Color32::from_gray(25);
         });
         app.apply_theme(&cc.egui_ctx);
+        // Keep the right-click entry pointing at this program file, wherever it now is.
+        if app.opt.shell_integration {
+            std::thread::spawn(|| {
+                let _ = crate::integration::install();
+            });
+        }
         if !paths.is_empty() {
             app.add_paths(paths, false);
         }
@@ -1880,6 +1886,10 @@ impl App {
                     ui.add(egui::DragValue::new(&mut draft.jobs).range(1..=64));
                 });
                 ui.checkbox(&mut draft.auto_details, "Read file details automatically when adding files");
+                ui.checkbox(&mut draft.shell_integration, "Add \"Open in Bootleg Helper\" to the file manager's right-click menu")
+                    .on_hover_text("For folders and audio files, for your user only (no administrator rights). \
+                                    Windows: Explorer (on Windows 11, under Show more options). Linux: Dolphin, Nautilus and Nemo.\n\
+                                    Untick it to remove the entry.");
                 ui.horizontal(|ui| {
                     ui.label("Appearance");
                     ui.radio_value(&mut draft.theme, ThemeChoice::System, "Follow the system");
@@ -1909,6 +1919,16 @@ impl App {
                 draft.announce_ttd = Tracker::Ttd.default_announce().into();
             }
             draft.custom_trackers.retain(|t| !t.name.trim().is_empty() || !t.announce.trim().is_empty());
+            if draft.shell_integration != self.opt.shell_integration {
+                let done = if draft.shell_integration { crate::integration::install() } else { crate::integration::remove() };
+                match done {
+                    Ok(text) => self.log(text, Level::Ok),
+                    Err(e) => {
+                        self.log(format!("Right-click menu entry: {e}"), Level::Error);
+                        draft.shell_integration = !draft.shell_integration;
+                    }
+                }
+            }
             self.opt = draft;
             self.apply_theme(ctx);
         } else if open && !cancel {
