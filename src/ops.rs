@@ -378,7 +378,8 @@ fn plural(count: usize, singular: &str, many: &str) -> String {
 
 // ---------------------------------------------------------------- Details
 
-const PROBLEMS: [(&str, &str, &str, &str); 4] = [
+const PROBLEMS: [(&str, &str, &str, &str); 5] = [
+    ("lossy", "Lossy file (MP3/MP2): not for lossless trading", "lossy track", "lossy tracks"),
     ("empty", "Empty or truncated: no audio samples", "empty track", "empty tracks"),
     ("gap", "Gap risk if burned: SBE before the last track", "track with gap risk", "tracks with gap risk"),
     ("no_md5", "No MD5 in header: FFP will be zeros, re-encode", "track without MD5", "tracks without MD5"),
@@ -391,6 +392,9 @@ fn problem(key: &str) -> (&'static str, &'static str, &'static str) {
 }
 
 pub fn quality_label(info: &AudioInfo) -> String {
+    if info.format.lossy() {
+        return format!("{} {} kHz (lossy)", info.format.name(), audio::trim_float(info.rate as f64 / 1000.0));
+    }
     let mut label = if info.is_cd() {
         "CD-ready".to_string()
     } else {
@@ -421,7 +425,14 @@ pub fn describe_details(info: &AudioInfo, last_of_disc: bool) -> (String, String
     let mut checks: Vec<(Option<bool>, String)> = Vec::new();
     let mut problems = Vec::new();
     checks.push((Some(true), format!("Header readable ({} file)", info.format.name())));
-    let quality = format!("{}-bit, {}, {}", info.bits, info.rate_label(), channel_name(info.channels));
+    let quality = if info.format.lossy() {
+        format!("{} (lossy), {}, {}", info.format.name(), info.rate_label(), channel_name(info.channels))
+    } else {
+        format!("{}-bit, {}, {}", info.bits, info.rate_label(), channel_name(info.channels))
+    };
+    if info.format.lossy() {
+        problems.push("lossy");
+    }
     checks.push((
         Some(true),
         if info.is_cd() { format!("CD audio format: {quality}") } else { format!("Audio format: {quality} (not the CD audio format)") },
@@ -973,7 +984,11 @@ pub fn op_convert(ctx: &Ctx, files: &[PathBuf], target: Target, level: u8, round
             ctx.status(path, format!("Skipped: {} already exists", file_name(&out)), Level::Warn, "");
             return Ok(None);
         }
-        let float = target == Target::Flac && audio::probe(path)?.float;
+        let info = audio::probe(path)?;
+        if target == Target::Flac && info.format.lossy() {
+            return Err(format!("{} is lossy: a FLAC made from it would be a fake lossless file", info.format.name()));
+        }
+        let float = target == Target::Flac && info.float;
         if float {
             let done = crate::encode::float_to_flac(path, &out, level, &audio::source_tags(path), round_float, &ctx.cancel)?;
             ctx.rescan.store(true, Ordering::SeqCst);
@@ -1030,6 +1045,10 @@ pub fn op_mp3(ctx: &Ctx, shows: &[Show], files: &[PathBuf], mode: crate::encode:
         let parent = if base.is_empty() { show.root.parent().map(Path::to_path_buf).unwrap_or_default() } else { PathBuf::from(base) };
         let out_root = parent.join(format!("{} [{tag}]", file_name(&show.root)));
         for f in show.files.iter().filter(|f| selected.contains(f)) {
+            if Format::from_path(f).is_some_and(Format::lossy) {
+                ctx.status(f, "Already lossy: no MP3 copy made", Level::Info, "");
+                continue;
+            }
             let out = out_root.join(f.strip_prefix(&show.root).unwrap_or(f)).with_extension("mp3");
             // "01.flac" and "01.wav" side by side would both make "01.mp3": the first one wins.
             if let Some(first) = taken.get(&out) {

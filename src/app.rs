@@ -1007,7 +1007,7 @@ impl App {
                     }
                     if ui.add_enabled(!busy, egui::Button::new("Add files...")).clicked() {
                         ui.close_menu();
-                        if let Some(files) = rfd::FileDialog::new().add_filter("Lossless audio", &["flac", "wav", "ape", "shn", "wv"]).pick_files() {
+                        if let Some(files) = rfd::FileDialog::new().add_filter("Audio", &["flac", "wav", "ape", "shn", "wv", "mp3", "mp2"]).pick_files() {
                             self.add_paths(files, true);
                         }
                     }
@@ -1106,7 +1106,7 @@ impl App {
                         }
                         if ui.button("Add files...").clicked() {
                             ui.close_menu();
-                            if let Some(files) = rfd::FileDialog::new().add_filter("Lossless audio", &["flac", "wav", "ape", "shn", "wv"]).pick_files() {
+                            if let Some(files) = rfd::FileDialog::new().add_filter("Audio", &["flac", "wav", "ape", "shn", "wv", "mp3", "mp2"]).pick_files() {
                                 self.add_paths(files, true);
                             }
                         }
@@ -1582,7 +1582,9 @@ impl App {
                 }
                 Col::Length => responses.push(row.col(|ui| { ui.label(info.map(|i| i.length()).unwrap_or_default()); }).1),
                 Col::Rate => responses.push(row.col(|ui| { ui.label(info.map(|i| i.rate_label()).unwrap_or_default()); }).1),
-                Col::Bits => responses.push(row.col(|ui| { ui.label(info.map(|i| i.bits.to_string()).unwrap_or_default()); }).1),
+                Col::Bits => responses.push(row.col(|ui| {
+                    ui.label(info.map(|i| if i.format.lossy() { "-".to_string() } else { i.bits.to_string() }).unwrap_or_default());
+                }).1),
                 Col::Ch => responses.push(row.col(|ui| { ui.label(info.map(|i| i.channels.to_string()).unwrap_or_default()); }).1),
                 Col::Sbe => responses.push(row.col(|ui| {
                     if let Some(i) = info {

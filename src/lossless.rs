@@ -54,7 +54,38 @@ fn round_py(x: f64) -> usize {
     x.round_ties_even().max(0.0) as usize
 }
 
+/// The verdict for a file. An MP3 or MP2 file is lossy by its format, whatever its spectrum
+/// shows: the measures then only tell how much was cut.
 pub fn analyse(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<Verdict, String> {
+    let mut verdict = analyse_signal(path, info, cancel)?;
+    if info.format.lossy() {
+        let name = info.format.name();
+        verdict.label = format!("Lossy ({name})");
+        verdict.level = Level::Error;
+        // The measured figures only ("cut 12.6 kHz, holes 4 dB"): the analysis's own doubts
+        // about the origin no longer apply.
+        let facts = &verdict.report.key_facts;
+        verdict.sentence = if facts.is_empty() {
+            format!("{name} file: lossy by its format")
+        } else {
+            format!("{name} file: lossy by its format (measured: {facts})")
+        };
+        verdict.report.label = verdict.label.clone();
+        verdict.report.level = Level::Error;
+        verdict.report.sentence = verdict.sentence.clone();
+        verdict.report.reasoning.insert(
+            0,
+            format!(
+                "The file is an {name}: this format always discards part of the sound when it is made, so it is lossy whatever \
+                 its spectrum shows. The measures below only tell how much was cut (an MP3 at 320 kbps usually keeps up to \
+                 about 20 kHz, at 128 kbps about 16 kHz)."
+            ),
+        );
+    }
+    Ok(verdict)
+}
+
+fn analyse_signal(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<Verdict, String> {
     let rate = info.rate as f64;
     if rate <= 0.0 {
         return Err("invalid sample rate".into());

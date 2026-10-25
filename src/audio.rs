@@ -26,6 +26,9 @@ pub enum Format {
     Ape,
     Shn,
     WavPack,
+    /// Lossy: read for checks and analyses, never converted to FLAC.
+    Mp3,
+    Mp2,
 }
 
 impl Format {
@@ -37,6 +40,8 @@ impl Format {
             "ape" => Some(Format::Ape),
             "shn" => Some(Format::Shn),
             "wv" => Some(Format::WavPack),
+            "mp3" => Some(Format::Mp3),
+            "mp2" => Some(Format::Mp2),
             _ => None,
         }
     }
@@ -48,12 +53,18 @@ impl Format {
             Format::Ape => "APE",
             Format::Shn => "SHN",
             Format::WavPack => "WV",
+            Format::Mp3 => "MP3",
+            Format::Mp2 => "MP2",
         }
     }
 
     /// Formats this version can decode.
     pub fn supported(self) -> bool {
-        matches!(self, Format::Flac | Format::Wav | Format::Shn | Format::Ape | Format::WavPack)
+        matches!(self, Format::Flac | Format::Wav | Format::Shn | Format::Ape | Format::WavPack | Format::Mp3 | Format::Mp2)
+    }
+
+    pub fn lossy(self) -> bool {
+        matches!(self, Format::Mp3 | Format::Mp2)
     }
 }
 
@@ -72,7 +83,7 @@ pub struct AudioInfo {
 
 impl AudioInfo {
     pub fn is_cd(&self) -> bool {
-        self.rate == 44100 && self.bits == 16 && self.channels == 2
+        !self.format.lossy() && self.rate == 44100 && self.bits == 16 && self.channels == 2
     }
 
     /// Some(true/false) for CD audio, None when the notion does not apply.
@@ -114,6 +125,9 @@ impl AudioInfo {
 
     /// "FLAC 16/44.1"
     pub fn label(&self) -> String {
+        if self.format.lossy() {
+            return format!("{} {}", self.format.name(), trim_float(self.rate as f64 / 1000.0));
+        }
         let float = if self.float { " float" } else { "" };
         format!("{} {}{float}/{}", self.format.name(), self.bits, trim_float(self.rate as f64 / 1000.0))
     }
@@ -160,6 +174,7 @@ pub fn probe_as(path: &Path, format: Option<Format>) -> Result<AudioInfo, String
             float: false,
         }),
         Some(Format::Wav) => probe_wav(path).map(|(info, _, _)| info),
+        Some(f @ (Format::Mp3 | Format::Mp2)) => probe_mpa(path, f),
         Some(Format::Ape) => {
             let decoder = open_ape(path)?;
             let i = decoder.info();
@@ -330,6 +345,7 @@ pub fn read_pcm_as(
         Some(Format::Shn) => crate::shn::decode(path, cancel, sink),
         Some(Format::Ape) => decode_ape(path, cancel, sink),
         Some(Format::WavPack) => crate::wv::decode(path, cancel, sink),
+        Some(f @ (Format::Mp3 | Format::Mp2)) => decode_mpa(path, f, cancel, sink),
         None => Err("not an audio file".into()),
     }
 }
@@ -380,6 +396,82 @@ fn decode_flac(path: &Path, cancel: &AtomicBool, mut sink: impl FnMut(&[u8])) ->
             out.extend_from_slice(&v.to_le_bytes()[..width]);
         }
         frames += (buf.samples().len() / spec.channels.count()) as u64;
+        sink(&out);
+    }
+    Ok(frames)
+}
+
+/// An MPEG audio (MP3, MP2) stream, gapless: the encoder delay and padding the LAME
+/// header records are left out, as players do.
+fn open_mpa(path: &Path, format: Format) -> Result<Box<dyn symphonia::core::formats::FormatReader>, String> {
+    let file = File::open(path).map_err(io_err)?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    hint.with_extension(if format == Format::Mp2 { "mp2" } else { "mp3" });
+    let options = FormatOptions { enable_gapless: true, ..Default::default() };
+    symphonia::default::get_probe()
+        .format(&hint, mss, &options, &MetadataOptions::default())
+        .map(|p| p.format)
+        .map_err(|e| format!("cannot open {} stream: {e}", format.name()))
+}
+
+/// Format and length of an MP3/MP2 file. Decoded as 16-bit samples, like CD audio; the
+/// length comes from the LAME/Xing header, or by counting the frames when there is none.
+fn probe_mpa(path: &Path, format: Format) -> Result<AudioInfo, String> {
+    let mut reader = open_mpa(path, format)?;
+    let track = reader.default_track().ok_or("no audio track")?.clone();
+    let p = &track.codec_params;
+    let rate = p.sample_rate.ok_or("unknown sample rate")?;
+    let channels = p.channels.map(|c| c.count() as u32).unwrap_or(2);
+    let samples = match p.n_frames {
+        Some(n) => n,
+        None => {
+            let mut n = 0u64;
+            while let Ok(packet) = reader.next_packet() {
+                if packet.track_id() == track.id {
+                    n += packet.dur;
+                }
+            }
+            n
+        }
+    };
+    Ok(AudioInfo { format, rate, bits: 16, channels, samples, md5: None, float: false })
+}
+
+fn decode_mpa(path: &Path, format: Format, cancel: &AtomicBool, mut sink: impl FnMut(&[u8])) -> Result<u64, String> {
+    let mut reader = open_mpa(path, format)?;
+    let track = reader.default_track().ok_or("no audio track")?.clone();
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&track.codec_params, &DecoderOptions { verify: false })
+        .map_err(|e| format!("cannot create decoder: {e}"))?;
+    let mut frames = 0u64;
+    let mut out: Vec<u8> = Vec::with_capacity(1 << 14);
+    let mut sample_buf: Option<SampleBuffer<i16>> = None;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("cancelled".into());
+        }
+        let packet = match reader.next_packet() {
+            Ok(p) => p,
+            Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(format!("read error: {e}")),
+        };
+        if packet.track_id() != track.id {
+            continue;
+        }
+        let decoded = decoder.decode(&packet).map_err(|e| format!("decoding error: {e}"))?;
+        let spec = *decoded.spec();
+        let channels = spec.channels.count();
+        if sample_buf.as_ref().map_or(true, |b| b.capacity() < decoded.capacity() * channels) {
+            sample_buf = Some(SampleBuffer::<i16>::new(decoded.capacity() as u64, spec));
+        }
+        let buf = sample_buf.as_mut().unwrap();
+        buf.copy_interleaved_ref(decoded);
+        out.clear();
+        for &s in buf.samples() {
+            out.extend_from_slice(&s.to_le_bytes());
+        }
+        frames += (buf.samples().len() / channels) as u64;
         sink(&out);
     }
     Ok(frames)
