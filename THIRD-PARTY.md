@@ -27,6 +27,38 @@ built from a modified copy in [vendor/ape-decoder](vendor/ape-decoder), with its
 files. The change adds the value coding of Monkey's Audio 3.95 to 3.98 files, which the
 original decodes as if they were 3.99 and later; it is listed in its CHANGELOG.md.
 
+## MP3 transcoding detector (Lossless?)
+
+The search for MP3 coding traces in `src/mp3trace.rs` is a Rust port of the MP3 detector of
+Olivier Derrien (CNRS/PRISM, Marseille, 2018), https://github.com/craft-and-code/lac-transcoded,
+described in O. Derrien, "Detection of genuine lossless audio files. Application to the
+MPEG-AAC codec", Journal of the Audio Engineering Society 67(3), 2019. The tables (polyphase
+window, scale factor bands, aliasing butterflies) come from that code. Licence:
+
+```
+MIT License
+
+Copyright (c) 2018 Olivier Derrien
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ## Rust crates
 
 Crates built into the Windows and Linux executables (build tools included), by licence.

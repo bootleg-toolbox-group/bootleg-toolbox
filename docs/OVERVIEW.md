@@ -181,8 +181,11 @@ MP3 and MP2 files, and AAC in M4A or MKA files, can be added like any other show
 
 Lossless? looks at the spectrum of every track to tell whether a lossless file really comes from a lossless source.
 
-- **Verdicts:** Lossless; Lossy (an MP3 or AAC wall, with the bitrate it matches); Lossless (upsampled); Lossless (16-bit in 24); FM (15 kHz) for radio broadcasts; Lossy upstream, for a lossless capture of a stream that was already compressed (a station's digital link, an internet stream).
-- **Measures behind each verdict:** the cutoff frequency and the drop above it, the "encoder holes" lossy codecs leave just below their cutoff, the noise floor above the cutoff, the FM pilot tone at 19 kHz (and a shifted pilot when the tape speed is off), the TV line whistle at 15,625 or 15,734 Hz, and stereo width.
+- **Verdicts:** Lossless; Lossy (an MP3 or AAC wall, with the bitrate it matches); Lossy (MP3 traces); Lossy (lossyWAV); Lossless (upsampled); Lossless (16-bit in 24); FM (15 kHz) for radio broadcasts; Lossy upstream, for a lossless capture of a stream that was already compressed (a station's digital link, an internet stream).
+- **Measures behind each verdict:** the cutoff frequency, the drop above it and the steepness of its edge (in dB per octave), the "encoder holes" lossy codecs leave just below their cutoff, the noise floor above the cutoff, the FM pilot tone at 19 kHz (and a shifted pilot when the tape speed is off), the TV line whistle at 15,625 or 15,734 Hz, and stereo width.
+- **MP3 coding traces, even at 320 kbps:** the sound is analysed again with an MP3 encoder's own filter bank, at every possible position; a file decoded from an MP3 falls back onto the encoder's rounding grid. It needs no cutoff, so it catches the high-bitrate MP3s a spectrum cannot prove, through a level change, a 24-bit decode or a trimmed start. The method comes from published research (O. Derrien, CNRS, Journal of the Audio Engineering Society, 2019); on our test bank it found every MP3 from 128 kbps to 320 kbps and V0, with a wide margin over genuine files.
+- **lossyWAV:** files processed by lossyWAV (which zeroes the lowest bits of each block to make smaller FLACs) are recognised by their zero bits that change from block to block.
+- **Bits really used:** a 24-bit file made from 16-bit audio is caught even when its level was changed afterwards (its sample values form a comb), not only when its lowest 8 bits are zero.
 - Tuned on 42 real FM shows from 1977 to 2011, and on MP3 and AAC control files.
 - **See more:** a click on any verdict opens the full report: each measure with what is normal, the reasoning step by step, and the conclusion. The report can be copied as text, and the show report links to each track's.
 
@@ -369,7 +372,7 @@ Bootleg Toolbox covers the everyday jobs TLH is used for and adds Linux, WavPack
 | Checksums | CFP, FFP, MD5, SFV, ST5 | FFP, MD5, SFV, ST5; FFP also built from FLAC headers on the fly |
 | Decode test | APE, FLAC, SHN, MKW | Every read format, with truncation detection |
 | SBE | Fix in APE, FLAC, SHN, MKW, WAV, MP3 | Detection per track and per disc; fix with the same audio as shntool, FLAC output |
-| Lossy source check | Tests WAV files for an MP3 source (auCDtect) | Lossless? spectral analysis on every format, with FM, upsampling, fake 24-bit and "lossy upstream" verdicts and a full report |
+| Lossy source check | Tests WAV files for an MP3 source (auCDtect) | Lossless? spectral analysis on every format, MP3 coding traces up to 320 kbps, lossyWAV, with FM, upsampling, fake 24-bit and "lossy upstream" verdicts and a full report |
 | Tape speed check | No | Speed? (pilot tone, A440 tuning, mains hum) |
 | Spectrograms | No | Yes, with PNG export |
 | Torrents | Create, show contents, hash-check against local files | Create, one per tracker with its own source field; extra trackers; hash-check naming the damaged, missing and extra files |

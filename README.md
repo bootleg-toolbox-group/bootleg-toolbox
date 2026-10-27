@@ -32,8 +32,10 @@ ffmpeg or LAME. Every decoder and encoder is built in.
 - **SBE fix**, disc by disc: the same audio as `shntool fix`, written as FLAC copies in an
   `SBE-fixed` folder.
 - **Lossless?**: a spectral analysis that spots lossy sources (MP3/AAC transcodes),
-  upsampled audio, 16-bit audio in 24-bit files and FM broadcasts, with a full report of
-  the measurements and the reasoning.
+  upsampled audio, 16-bit audio in 24-bit files (also after a level change), lossyWAV
+  files and FM broadcasts, plus a search for MP3 coding traces in the encoder's own filter
+  bank that catches MP3s up to 320 kbps; with a full report of the measurements and the
+  reasoning.
 - **Speed?**: estimates whether a tape runs too fast or too slow (FM pilot tone, tuning
   against A440, mains hum), with the correction to apply.
 - **Spectrograms**, to copy or save as PNG.

@@ -122,10 +122,42 @@ fn analyse_signal(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<
     let mut side_power = vec![0f64; bins];
     let mut side_vs_mid: Vec<f64> = Vec::new();
     let width_band = |f: f64| (5000.0..10000.0).contains(&f);
+    // lossyWAV zeroes the lowest bits of whole blocks: the common trailing zero bits of
+    // every block of 128 sample frames (silent blocks left out).
+    let integer = !info.float;
+    const WASTE_BLOCK: usize = 128;
+    let (mut waste_or, mut waste_len) = (0i32, 0usize);
+    let mut wasted = [0u32; 33];
+    // 24-bit made from fewer bits with a level change: only some sample values are used
+    // (a comb); the values around zero are counted.
+    let comb_check = info.bits == 24 && integer;
+    // MP3 traces in the encoder's own filter bank (MP3 sample rates only).
+    let mut mp3 = (matches!(info.rate, 32000 | 44100 | 48000) && channels <= 2 && !info.lossy()).then(|| crate::mp3trace::Collector::new(channels));
+    const SPAN: i32 = 1 << 16;
+    let mut histogram = if comb_check { vec![0u32; 2 * SPAN as usize] } else { Vec::new() };
 
     dsp::for_each_frame(path, info, cancel, |values, bytes| {
         if check_low && !low_bits {
             low_bits = bytes.chunks_exact(width).any(|s| dsp::int_sample(s) & 0xFF != 0);
+        }
+        if integer {
+            for s in bytes.chunks_exact(width) {
+                let v = dsp::int_sample(s);
+                waste_or |= v;
+                if comb_check && (-SPAN..SPAN).contains(&v) {
+                    histogram[(v + SPAN) as usize] += 1;
+                }
+            }
+            waste_len += 1;
+            if waste_len == WASTE_BLOCK {
+                if waste_or != 0 {
+                    wasted[waste_or.trailing_zeros() as usize] += 1;
+                }
+                (waste_or, waste_len) = (0, 0);
+            }
+        }
+        if let Some(m) = mp3.as_mut() {
+            m.push(values);
         }
         let mono = values.iter().sum::<f64>() / channels as f64;
         if mono != 0.0 {
@@ -170,7 +202,24 @@ fn analyse_signal(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<
     })?;
 
     let mut details = Vec::new();
-    let padded = (check_low && !low_bits).then_some("24-bit file holding 16-bit audio: the lowest 8 bits are always zero");
+    let mp3_trace = mp3.and_then(|m| m.detect(info.rate));
+    if let Some(t) = mp3_trace.filter(|t| t.found()) {
+        details.push(format!("MP3 coding traces found ({:.1} % of the bands, {:.0} standard deviations above chance)", t.likelihood * 100.0, t.contrast));
+    }
+    let zero_low = check_low && !low_bits;
+    let waste = wasted_bits(&wasted);
+    let lossywav = waste.as_ref().is_some_and(|w| w.blocks >= 200 && w.share >= 0.3 && w.varying >= 0.2);
+    let comb = if comb_check && !zero_low { comb_bits(&histogram, info.bits) } else { None };
+    // 16-bit audio in a 24-bit file: the lowest 8 bits always zero, or a comb of values
+    // (16-bit audio whose level was changed in a 24-bit editor).
+    let padded: Option<String> = if zero_low {
+        Some("24-bit file holding 16-bit audio: the lowest 8 bits are always zero".into())
+    } else {
+        // Teeth 32 values apart or more: 16-bit audio, even turned down by 18 dB.
+        comb.filter(|c| c.used <= 1.0 / 32.0).map(|c| {
+            format!("24-bit file made from 16-bit audio with a level change: only about 1 sample value in {:.0} is ever used", 1.0 / c.used)
+        })
+    };
     if frames == 0 {
         let mut verdict = Verdict::new("Silent", "Digital silence only, nothing to analyse", Level::Info, details);
         verdict.report = Report {
@@ -276,6 +325,28 @@ fn analyse_signal(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<
                 cutoff = Some((lo..hi).find(|&j| level[j] < middle).map(|j| fb[j]).unwrap_or(fb[bi]));
             }
         }
+    }
+    // How fast the level falls: across the cutoff (3 dB to 20 dB below the level under it),
+    // or, without one, over the treble (10 to 16 kHz). Encoders and digital filters drop
+    // by hundreds of dB per octave; tape, microphones and analog filters by tens.
+    let edge = match (cutoff, best_i) {
+        (Some(_), Some(bi)) => {
+            let below = median(&level[bi - gap - width_bands..bi - gap]);
+            let start = bi - gap - width_bands;
+            let a = (start..nb).find(|&j| level[j] < below - 3.0);
+            let b = a.and_then(|a| (a..nb).find(|&j| level[j] < below - 20.0));
+            a.zip(b).map(|(a, b)| 17.0 / (fb[b] / fb[a].max(1.0)).log2().max(1.0 / 192.0))
+        }
+        _ => match (median_between(9500.0, 10500.0), median_between(15000.0, 16500.0)) {
+            (Some(lo), Some(hi)) if nyquist > 17000.0 => Some((lo - hi) / (15750.0f64 / 10000.0).log2()),
+            _ => None,
+        },
+    };
+    if let Some(e) = edge {
+        details.push(match cutoff {
+            Some(_) => format!("Edge of the lowpass: {e:.0} dB per octave"),
+            None => format!("Treble roll-off (10 to 16 kHz): {e:.0} dB per octave"),
+        });
     }
     match cutoff {
         Some(c) => details.push(format!("Steep lowpass at {:.1} kHz ({:.0} dB drop)", c / 1000.0, best_drop)),
@@ -401,8 +472,13 @@ fn analyse_signal(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<
             }
         }
     }
-    if let Some(p) = padded {
-        details.push(p.into());
+    if let Some(p) = &padded {
+        details.push(p.clone());
+    } else if let Some(c) = comb.filter(|c| c.bits < 23.0) {
+        details.push(format!("About {:.0} bits really used (1 sample value in {:.0} occurs)", c.bits, 1.0 / c.used));
+    }
+    if let Some(w) = waste.as_ref().filter(|_| lossywav) {
+        details.push(format!("lossyWAV: lowest bits zeroed in {:.0} % of the blocks ({:.1} bits on average)", w.share * 100.0, w.mean_bits));
     }
 
     let khz = |c: f64| format!("{:.1}", c / 1000.0);
@@ -412,8 +488,9 @@ fn analyse_signal(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<
             None => "FM broadcast recording (19 kHz pilot tone found): lossless capture of an analog source".into(),
         };
         Verdict::new("FM broadcast", sentence, Level::Ok, details)
-    } else if let Some(c) = cutoff.filter(|c| (14500.0..=15800.0).contains(c)) {
-        // The FM band stops at 15 kHz: the reference could only say "FM or MP3" here.
+    } else if let Some(c) = cutoff.filter(|c| (14500.0..=16000.0).contains(c)) {
+        // The FM band stops at 15 kHz (TV sound and some transmitters a little higher): the
+        // reference could only say "FM or MP3" here.
         if fm_like {
             Verdict::new(
                 FM_15K,
@@ -446,6 +523,18 @@ fn analyse_signal(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<
                 Level::Warn,
                 details,
             )
+        } else if hiss_above && traces.is_some_and(|(_, _, h)| h.is_some_and(|h| h >= 10.0)) {
+            // Hiss up to 19 kHz: no decoder came last. Moderate holes may come from the
+            // station's own digital link.
+            Verdict::new(
+                "15 kHz lowpass",
+                format!(
+                    "FM broadcast likely: lowpass at {} kHz with hiss above it up to 19 kHz, which no lossy file converted back has; but some encoder holes ({holes:.0} dB) hint that the station's digital link was lossy",
+                    khz(c)
+                ),
+                Level::Warn,
+                details,
+            )
         } else {
             Verdict::new(
                 "15 kHz lowpass",
@@ -454,10 +543,20 @@ fn analyse_signal(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<
                 details,
             )
         }
+    } else if let Some(c) = cutoff.filter(|c| (19500.0..21500.0).contains(c) && rate <= 48000.0 && analog_above && holes < 5.0) {
+        // A converter's anti-alias filter: steady hiss goes on above it, no holes.
+        Verdict::new(
+            "Lossless",
+            format!("No sign of lossy encoding: the lowpass at {} kHz is the converter's anti-alias filter (hiss goes on above it, no encoder holes)", khz(c)),
+            Level::Ok,
+            details,
+        )
     } else if let Some(c) = cutoff.filter(|c| *c < 20500.0) {
         // Encoder holes are the encoder's fingerprint. A clean brick wall alone may also be
         // a digital lowpass filter (some remasters): then only a doubt, in orange.
-        if holes >= 15.0 && hiss_above {
+        // Hiss above the cutoff cannot come out of a decoder: with encoder holes, the
+        // coding was upstream of an analog stage (a stream captured through a sound card).
+        if holes >= 8.0 && hiss_above && traces.is_some_and(|(_, _, h)| h.is_none_or(|h| h >= 10.0)) {
             upstream(c, details)
         } else if holes >= 10.0 {
             Verdict::new(
@@ -524,7 +623,7 @@ fn analyse_signal(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<
                 details,
             ),
         }
-    } else if let Some(p) = padded {
+    } else if let Some(p) = &padded {
         Verdict::new(
             LOSSLESS_PADDED,
             format!("Lossless, but not true 24-bit: no sign of lossy encoding; {p}"),
@@ -546,8 +645,36 @@ fn analyse_signal(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<
             details,
         )
     };
+    if (verdict.label.starts_with("Unsure") || verdict.label.starts_with("Lossy?")) && mp3_trace.is_some_and(|t| !t.found()) {
+        verdict.sentence.push_str("; no MP3 coding traces, so not an MP3 converted straight back");
+    }
+    if let Some(t) = mp3_trace.filter(|t| t.found()) {
+        let sentence = format!(
+            "Decoded from an MP3: the file still holds the rounding pattern of an MP3 encoder ({:.1} % of the bands match it, {:.0} standard deviations above chance), which only a lossy file converted back leaves",
+            t.likelihood * 100.0,
+            t.contrast
+        );
+        let label = if verdict.label.starts_with("Lossy ") && !verdict.label.starts_with(LOSSY_UPSTREAM) { verdict.label.clone() } else { "Lossy (MP3 traces)".into() };
+        let mut lossy = Verdict::new(label, sentence, Level::Error, verdict.details.clone());
+        lossy.report = std::mem::take(&mut verdict.report);
+        verdict = lossy;
+    }
+    if lossywav {
+        let w = waste.as_ref().map(|w| (w.share * 100.0, w.mean_bits)).unwrap_or_default();
+        let mut lossy = Verdict::new(
+            "Lossy (lossyWAV)",
+            format!(
+                "Processed by lossyWAV: in {:.0} % of the blocks the lowest bits ({:.1} on average) are zero, block by block, the mark lossyWAV leaves when it discards detail to make smaller FLAC files",
+                w.0, w.1
+            ),
+            Level::Error,
+            verdict.details.clone(),
+        );
+        lossy.report = std::mem::take(&mut verdict.report);
+        verdict = lossy;
+    }
     if padded.is_some() && verdict.label != LOSSLESS_PADDED {
-        verdict.sentence.push_str("; also 16-bit audio padded to 24-bit");
+        verdict.sentence.push_str("; also 16-bit audio in a 24-bit file");
         if verdict.level == Level::Ok {
             verdict.level = Level::Warn;
         }
@@ -568,7 +695,12 @@ fn analyse_signal(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<
         silent_above,
         stereo: dsp::median(&side_vs_mid),
         upsampled,
-        padded: padded.is_some(),
+        padded,
+        comb: comb.map(|c| (c.used, c.bits)),
+        waste: waste.map(|w| (w.share, w.mean_bits)),
+        lossywav,
+        edge,
+        mp3_trace,
     };
     verdict.report = build_report(crate::files::file_name(path), &verdict, &facts);
     Ok(verdict)
@@ -594,7 +726,86 @@ struct Facts {
     /// Difference channel against the sum, 5-10 kHz.
     stereo: Option<f64>,
     upsampled: bool,
-    padded: bool,
+    /// Why the file holds 16-bit audio, when it does.
+    padded: Option<String>,
+    /// 24-bit files: share of the values used around zero, and the bits that gives.
+    comb: Option<(f64, f64)>,
+    /// Share of the blocks with extra zero low bits, and their mean number.
+    waste: Option<(f64, f64)>,
+    lossywav: bool,
+    /// dB per octave across the cutoff, or over 10-16 kHz without one.
+    edge: Option<f64>,
+    /// The MP3 encoder's rounding pattern, looked for in its own filter bank.
+    mp3_trace: Option<crate::mp3trace::Trace>,
+}
+
+/// Blocks whose lowest bits are all zero beyond the file's own resolution (lossyWAV).
+struct Waste {
+    blocks: u32,
+    /// Share of the blocks with extra zero bits, and their mean number in those blocks.
+    share: f64,
+    mean_bits: f64,
+    /// Share of the blocks with another number of zero bits than the most common one:
+    /// lossyWAV changes it with the loudness; a constant number is the file's resolution
+    /// (every sample even after a level change, say), not lossyWAV.
+    varying: f64,
+}
+
+fn wasted_bits(counts: &[u32; 33]) -> Option<Waste> {
+    let blocks: u32 = counts.iter().sum();
+    // The smallest number of zero bits: the file's own resolution (8 for 16-bit in 24).
+    let base = counts.iter().position(|&c| c > 0)?;
+    let extra: u32 = counts[base + 1..].iter().sum();
+    let bits: f64 = counts.iter().enumerate().skip(base + 1).map(|(b, &c)| (b - base) as f64 * c as f64).sum();
+    let mode = counts.iter().copied().max().unwrap_or(0);
+    Some(Waste {
+        blocks,
+        share: extra as f64 / blocks as f64,
+        mean_bits: if extra > 0 { bits / extra as f64 } else { 0.0 },
+        varying: (blocks - mode) as f64 / blocks as f64,
+    })
+}
+
+/// The bits a 24-bit file really uses.
+#[derive(Clone, Copy)]
+struct Comb {
+    /// Share of the sample values around zero that occur.
+    used: f64,
+    bits: f64,
+}
+
+/// Around zero, the share of the sample values that occur, over the widest range where each
+/// is expected about 5 times. Audio made from fewer bits then scaled uses only a comb of
+/// values: 1 in 256 for 16-bit audio, whatever the level change.
+fn comb_bits(histogram: &[u32], bits: u32) -> Option<Comb> {
+    let span = histogram.len() / 2;
+    let mut r = span;
+    while r >= 256 {
+        let slice = &histogram[span - r..span + r];
+        let n: u64 = slice.iter().map(|&c| c as u64).sum();
+        if n >= 5 * slice.len() as u64 {
+            let values: Vec<usize> = (0..slice.len()).filter(|&i| slice[i] > 0).collect();
+            // Too few values to tell (a pure test tone visits only a handful).
+            if values.len() < 64 {
+                return None;
+            }
+            let used = values.len() as f64 / slice.len() as f64;
+            if used < 0.9 {
+                // A comb has regular teeth (a level change spaces them evenly); otherwise the
+                // values are just sparse.
+                let mut gaps: Vec<f64> = values.windows(2).map(|w| (w[1] - w[0]) as f64).collect();
+                gaps.sort_by(f64::total_cmp);
+                let mid = gaps[gaps.len() / 2];
+                let regular = gaps.iter().filter(|&&g| g >= 0.5 * mid && g <= 1.5 * mid).count() as f64 / gaps.len() as f64;
+                if regular < 0.8 {
+                    return None;
+                }
+            }
+            return Some(Comb { used, bits: bits as f64 - (1.0 / used).log2() });
+        }
+        r /= 2;
+    }
+    None
 }
 
 fn build_report(title: String, verdict: &Verdict, f: &Facts) -> Report {
@@ -701,8 +912,49 @@ fn build_report(title: String, verdict: &Verdict, f: &Facts) -> Report {
             if f.upsampled { Level::Warn } else { Level::Ok },
         );
     }
-    if f.padded {
-        add("Bit depth", "the lowest 8 bits are always zero".into(), "A 24-bit file holding 16-bit audio.", Level::Warn);
+    if let Some(t) = f.mp3_trace {
+        add(
+            "MP3 coding traces",
+            if t.found() {
+                format!(
+                    "found: {:.1} % of the bands, {:.0} standard deviations above chance (MP3 granules at sample {}, {} coding)",
+                    t.likelihood * 100.0,
+                    t.contrast,
+                    t.offset,
+                    if t.mid_side { "mid/side" } else { "left/right" }
+                )
+            } else {
+                format!("none ({:.1} % of the bands, {:.0} standard deviations above chance)", t.likelihood * 100.0, t.contrast)
+            },
+            "The sound is analysed again with an MP3 encoder's own filter bank, at every possible position. A file decoded from an MP3 falls back onto the encoder's rounding grid in many bands (3 % and more, far above the other positions), even at 320 kbps; genuine audio stays around 2 %, at no particular position. Resampling or effects after the decoder erase this trace, so its absence does not prove a file lossless.",
+            if t.found() { Level::Error } else { Level::Ok },
+        );
+    }
+    if let Some(e) = f.edge {
+        add(
+            if f.cutoff.is_some() { "Edge of the lowpass" } else { "Treble roll-off" },
+            format!("{e:.0} dB per octave"),
+            "How fast the level falls (across the cutoff, or from 10 to 16 kHz without one). Encoders and digital filters drop by hundreds of dB per octave; tape, microphones and analog filters by tens.",
+            Level::Info,
+        );
+    }
+    if let Some(p) = &f.padded {
+        add("Bit depth", p.clone(), "A 24-bit file holding 16-bit audio.", Level::Warn);
+    } else if let Some((used, bits)) = f.comb {
+        add(
+            "Bits really used",
+            if bits >= 23.0 { "all 24 bits (sample values used evenly)".into() } else { format!("about {bits:.0} (1 sample value in {:.0} occurs)", 1.0 / used) },
+            "A true 24-bit recording uses every sample value near zero. Audio made from fewer bits and then turned up or down uses only a comb of values.",
+            if bits >= 23.0 { Level::Ok } else { Level::Info },
+        );
+    }
+    if let Some((share, bits)) = f.waste.filter(|(share, _)| *share > 0.01) {
+        add(
+            "Zeroed low bits (lossyWAV)",
+            format!("{:.0} % of the blocks ({bits:.1} bits on average)", share * 100.0),
+            "lossyWAV makes FLAC files smaller by zeroing the lowest bits of each block of samples, more in loud blocks: a lossy process. Genuine audio has almost no such blocks.",
+            if f.lossywav { Level::Error } else { Level::Info },
+        );
     }
 
     let reasoning = reasoning(verdict, f);
@@ -800,6 +1052,11 @@ fn reasoning(verdict: &Verdict, f: &Facts) -> Vec<String> {
         r.push(format!("Encoder holes: {holes:.0} dB, not enough to prove an encoder."));
         r.push(if f.silent_above {
             "But above the cutoff (or by 18-19.5 kHz) there is digital silence, which a plain FM capture would not show: an encoder or a digital filter came after the FM stage.".into()
+        } else if above >= 10.0 && f.high_floor.is_some_and(|h| h >= 10.0) {
+            format!(
+                "But hiss goes on above the cutoff ({above:+.0} dB over digital silence) and up to 19 kHz ({:+.0} dB): a lossy file converted back has silence there, so this is an FM capture. Holes deeper than FM alone gives (about 5 dB) may come from the station's own digital link (studio to transmitter).",
+                f.high_floor.unwrap_or(0.0)
+            )
         } else {
             "The floor above the cutoff does not settle the question either way.".into()
         });
@@ -814,7 +1071,7 @@ fn reasoning(verdict: &Verdict, f: &Facts) -> Vec<String> {
         r.push(format!("But this {} kHz file has no real content above about 22-24 kHz: it was upsampled from a 44.1 or 48 kHz source.", crate::audio::trim_float(f.rate / 1000.0)));
     } else if label == LOSSLESS_PADDED {
         r.push("No lowpass from a lossy encoder and no encoder holes: the source is lossless.".into());
-        r.push("But the lowest 8 bits of every sample are zero: 16-bit audio stored in a 24-bit file.".into());
+        r.push(format!("But {}.", f.padded.as_deref().unwrap_or("this is 16-bit audio stored in a 24-bit file")));
     } else if label == "Unclear" {
         r.push(format!("There is almost nothing above 15 kHz ({:.0} dB relative to 1-4 kHz).", f.hf.unwrap_or(0.0)));
         r.push("Encoder traces live up there, so neither lossy nor lossless can be shown. Audience and cassette recordings often look like this; the spectrogram and the lineage are the best clues.".into());
@@ -825,11 +1082,75 @@ fn reasoning(verdict: &Verdict, f: &Facts) -> Vec<String> {
         r.push("No brick-wall lowpass: lossy encoders always cut the top of the spectrum.".into());
         r.push(format!("High frequencies are present ({:.0} dB relative to 1-4 kHz above 15 kHz), so encoder traces would show.", f.hf.unwrap_or(0.0)));
     }
-    if f.padded && label != LOSSLESS_PADDED {
-        r.push("Also: the lowest 8 bits of every sample are zero (16-bit audio in a 24-bit file).".into());
+    if let Some(t) = f.mp3_trace.filter(|t| t.found()) {
+        r.insert(
+            0,
+            format!(
+                "Analysed again with an MP3 encoder's filter bank, the sound falls back onto the encoder's rounding grid in {:.1} % of the bands at one position (sample {}), {:.0} standard deviations above the other positions. Genuine audio shows about 2 % at no particular position: this file was decoded from an MP3 and converted back to a lossless format, whatever its spectrum looks like.",
+                t.likelihood * 100.0,
+                t.offset,
+                t.contrast
+            ),
+        );
+    }
+    if label == "Lossy (lossyWAV)" {
+        r.insert(0, "In most blocks of samples the lowest bits are all zero, and how many changes from block to block with the loudness: that is lossyWAV's mark. It discards the detail it judges inaudible so that FLAC can store the file in fewer bits; the result is lossy even though it is a FLAC file.".into());
+    }
+    if let (Some(p), true) = (&f.padded, label != LOSSLESS_PADDED) {
+        r.push(format!("Also: {p}."));
+    }
+    if (label.starts_with("Lossy?") || label.starts_with("Unsure")) && f.mp3_trace.is_some_and(|t| !t.found()) {
+        r.push("No MP3 coding traces were found. An MP3 converted straight back to a lossless format shows them, even at 320 kbps; an AAC, or audio processed after decoding (resampled, equalised), would not, so the doubt is smaller but remains.".into());
+    }
+    if let Some(e) = f.edge.filter(|_| label.starts_with("Lossy?") || label.starts_with("Unsure")) {
+        r.push(if e < 150.0 {
+            format!("The edge of the lowpass is gentle ({e:.0} dB per octave): more like an analog filter or a converter than an encoder's brick wall.")
+        } else {
+            format!("The edge of the lowpass is sharp ({e:.0} dB per octave), as encoders and digital filters cut.")
+        });
     }
     if let Some(t) = f.line_whistle {
         r.push(format!("A tone at {:.2} kHz is a TV set's line frequency: the show was probably simulcast on TV, or a TV set was near the recorder.", t / 1000.0));
     }
     r
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lossywav_varies_resolution_does_not() {
+        let mut lossy = [0u32; 33];
+        lossy[0] = 50;
+        lossy[2] = 300;
+        lossy[3] = 400;
+        lossy[5] = 250;
+        let w = wasted_bits(&lossy).unwrap();
+        assert!(w.share > 0.9 && w.varying > 0.5);
+        // Every sample even (a level change): one zero bit everywhere, not lossyWAV.
+        let mut even = [0u32; 33];
+        even[1] = 990;
+        even[2] = 10;
+        assert!(wasted_bits(&even).unwrap().varying < 0.2);
+    }
+
+    #[test]
+    fn comb_of_values() {
+        let span = 1usize << 16;
+        // 16-bit audio turned down by 3 dB in a 24-bit file: a value every 181.
+        let mut h = vec![0u32; 2 * span];
+        let mut v = 0.0f64;
+        while v < span as f64 {
+            for x in [span as f64 + v, span as f64 - v] {
+                h[x.round() as usize] += 2000;
+            }
+            v += 181.02;
+        }
+        let c = comb_bits(&h, 24).unwrap();
+        assert!(c.used <= 1.0 / 32.0, "{}", c.used);
+        // Every value used: true 24-bit.
+        let full = vec![7u32; 2 * span];
+        assert!(comb_bits(&full, 24).unwrap().bits > 23.9);
+    }
 }
