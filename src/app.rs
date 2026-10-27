@@ -64,6 +64,24 @@ struct InfoChoice {
     chosen: usize,
 }
 
+const TAG_TIP: &str = "Read the artist, date, place and titles from the show's info file, check and correct them in a window, \
+                       then write them as tags in the FLAC files and, if you like, rename the files. The audio is not touched: \
+                       the FFP and ST5 stay valid; the .md5 and .sfv are brought up to date.";
+
+/// "Tag and rename from info file": what will be written, open for corrections.
+struct TagDialog {
+    show: Show,
+    /// The possible info files and their number of titles, the best first.
+    infos: Vec<(PathBuf, usize)>,
+    info: usize,
+    draft: crate::tagging::Draft,
+    /// The album follows the date and the place until the user edits it.
+    album_auto: bool,
+    update_checksums: bool,
+    /// The show has .md5 or .sfv files.
+    whole_checksums: bool,
+}
+
 /// Linux: whether the former name (Bootleg Helper) had an applications menu entry.
 #[cfg(target_os = "linux")]
 fn legacy_menu_entry() -> bool {
@@ -248,6 +266,7 @@ enum Action {
     OpenFolder(PathBuf),
     CopyFfp,
     CopyInfo,
+    TagInfo,
     /// Pick .torrent files, then check the selection against them.
     TorrentCheck,
     Remove,
@@ -297,6 +316,8 @@ pub struct App {
     help: bool,
     /// "Copy info file" with several text files: the choice window.
     info_choice: Option<InfoChoice>,
+    /// "Tag and rename from info file" window.
+    tag_dialog: Option<TagDialog>,
     /// The saved "Always on top" choice was applied to the window.
     window_level_set: bool,
     title: String,
@@ -467,6 +488,7 @@ impl App {
             about: false,
             help: false,
             info_choice: None,
+            tag_dialog: None,
             window_level_set: false,
             title: String::new(),
             menu_open: false,
@@ -1141,6 +1163,166 @@ impl App {
         }
     }
 
+    fn open_tag_dialog(&mut self) {
+        let (shows, _) = self.selection();
+        if shows.len() != 1 {
+            self.flash("Select a single show to tag it from its info file.");
+            return;
+        }
+        let show = shows[0].clone();
+        let name = file_name(&show.root);
+        let infos = crate::tagging::info_files(&show);
+        if infos.is_empty() {
+            let msg = format!("No info file (.txt or .nfo) in {name}: nothing to read the tags from.");
+            self.log(msg.clone(), Level::Warn);
+            self.flash(msg);
+            return;
+        }
+        match crate::tagging::draft(&show, &infos[0].0) {
+            Ok(draft) => {
+                let whole_checksums = crate::tagging::checksum_files(&show.root).iter().any(|p| matches!(crate::files::ext_lower(p).as_str(), "md5" | "sfv"));
+                self.tag_dialog = Some(TagDialog { show, infos, info: 0, draft, album_auto: true, update_checksums: true, whole_checksums });
+            }
+            Err(e) => self.log(format!("{name}: {e}"), Level::Error),
+        }
+    }
+
+    fn tag_window(&mut self, ctx: &egui::Context) {
+        use crate::tagging::NameScheme;
+        let Some(mut d) = self.tag_dialog.take() else { return };
+        let (mut apply, mut cancel) = (false, false);
+        let mut reload = None;
+        let mut open = true;
+        let mut scheme = self.opt.tag_scheme;
+        let busy = self.running.is_some();
+        let root = d.draft.root.clone();
+        let info_label = |(path, titles): &(PathBuf, usize)| format!("{}   ({} titles)", rel_posix(path, &root), titles);
+        let conflicts = d.draft.name_conflicts(scheme);
+        let files = d.draft.tracks.len();
+        let not_flac = d.draft.tracks.iter().filter(|t| !crate::tagging::taggable(&t.path)).count();
+        egui::Window::new("Tag and rename from info file")
+            .collapsible(false)
+            .default_size([940.0, 560.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label(RichText::new(file_name(&root)).strong());
+                ui.add_space(4.0);
+                egui::Grid::new("tag_fields").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+                    ui.label("Info file");
+                    egui::ComboBox::from_id_salt("tag_info").width(560.0).selected_text(info_label(&d.infos[d.info])).show_ui(ui, |ui| {
+                        for (i, info) in d.infos.iter().enumerate() {
+                            if ui.selectable_label(i == d.info, info_label(info)).clicked() {
+                                reload = Some(i);
+                            }
+                        }
+                    });
+                    ui.end_row();
+                    ui.label("Artist");
+                    ui.add(egui::TextEdit::singleline(&mut d.draft.artist).desired_width(560.0));
+                    ui.end_row();
+                    ui.label("Date");
+                    let date = ui.add(egui::TextEdit::singleline(&mut d.draft.date).hint_text("YYYY-MM-DD").desired_width(120.0));
+                    ui.end_row();
+                    ui.label("Place");
+                    let place = ui.add(egui::TextEdit::singleline(&mut d.draft.place).hint_text("Venue, City, Country").desired_width(560.0));
+                    ui.end_row();
+                    ui.label("Album");
+                    let album = ui.add(egui::TextEdit::singleline(&mut d.draft.album).desired_width(560.0))
+                        .on_hover_text("The date and the place by default (the eTree custom); edit it to write something else.");
+                    ui.end_row();
+                    if album.changed() {
+                        d.album_auto = false;
+                    }
+                    if d.album_auto && (date.changed() || place.changed()) {
+                        d.draft.album = format!("{} {}", d.draft.date.trim(), d.draft.place.trim()).trim().to_string();
+                    }
+                    ui.label("File names");
+                    egui::ComboBox::from_id_salt("tag_scheme").width(240.0).selected_text(scheme.label()).show_ui(ui, |ui| {
+                        for s in NameScheme::ALL {
+                            ui.selectable_value(&mut scheme, s, s.label());
+                        }
+                    });
+                    ui.end_row();
+                });
+                if d.whole_checksums {
+                    ui.checkbox(&mut d.update_checksums, "Update the .md5 and .sfv files (whole-file checksums change with the tags)");
+                }
+                ui.label(RichText::new("The audio is not touched: FFP and ST5 stay valid. Renamed files are renamed in every checksum file.").weak());
+                if d.draft.found != files {
+                    let text = if d.draft.found == 0 {
+                        "No numbered tracklist found in this info file: type the titles below, or choose another file.".to_string()
+                    } else {
+                        format!("The info file lists {} titles for {files} files: check that each title is on the right file.", d.draft.found)
+                    };
+                    ui.label(colored(text, Level::Warn));
+                }
+                if let Some(folder) = d.draft.folder_date.as_ref().filter(|f| **f != d.draft.date.trim()) {
+                    ui.label(colored(format!("The folder name says {folder}: check the date."), Level::Warn));
+                }
+                if !d.draft.extra.is_empty() {
+                    ui.label(colored(format!("Not used (no file left for them): {}", d.draft.extra.join(" / ")), Level::Warn));
+                }
+                if not_flac > 0 {
+                    ui.label(colored(format!("{not_flac} file(s) are not FLAC: they can be renamed, not tagged."), Level::Warn));
+                }
+                for c in &conflicts {
+                    ui.label(colored(format!("Cannot rename: {c}."), Level::Error));
+                }
+                ui.add_space(4.0);
+                egui::TopBottomPanel::bottom("tag_buttons").show_inside(ui, |ui| {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        let ready = conflicts.is_empty() && !busy;
+                        apply |= ui.add_enabled(ready, egui::Button::new(RichText::new("Apply").strong())).clicked();
+                        cancel |= ui.button("Cancel").clicked();
+                        if busy {
+                            ui.label(RichText::new("Wait for the running task to finish.").weak());
+                        }
+                    });
+                });
+                let width = d.draft.width();
+                egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
+                    egui::Grid::new("tag_tracks").num_columns(4).striped(true).spacing([12.0, 4.0]).show(ui, |ui| {
+                        ui.strong("#");
+                        ui.strong("File");
+                        ui.strong("Title");
+                        ui.strong("New name");
+                        ui.end_row();
+                        let artist = d.draft.artist.trim().to_string();
+                        let date = d.draft.date.trim().to_string();
+                        for t in d.draft.tracks.iter_mut() {
+                            ui.label(match t.disc {
+                                Some(disc) => format!("d{disc}t{:02}", t.track),
+                                None => format!("{:02}", t.track),
+                            });
+                            ui.label(rel_posix(&t.path, &root));
+                            ui.add(egui::TextEdit::singleline(&mut t.title).desired_width(320.0));
+                            let new = crate::tagging::new_name(scheme, t, &artist, &date, width).filter(|n| *n != file_name(&t.path));
+                            ui.label(new.unwrap_or_else(|| "(unchanged)".into()));
+                            ui.end_row();
+                        }
+                    });
+                });
+            });
+        self.opt.tag_scheme = scheme;
+        if let Some(i) = reload {
+            match crate::tagging::draft(&d.show, &d.infos[i].0) {
+                Ok(draft) => {
+                    d.draft = draft;
+                    d.info = i;
+                    d.album_auto = true;
+                }
+                Err(e) => self.log(e, Level::Error),
+            }
+        }
+        if apply {
+            let job = d.draft.job(scheme, d.update_checksums || !d.whole_checksums);
+            self.start(Op::Tag(vec![job]), vec![d.show.clone()], d.show.files.clone(), false);
+        } else if open && !cancel {
+            self.tag_dialog = Some(d);
+        }
+    }
+
     fn save_log(&mut self) {
         if let Some(path) = rfd::FileDialog::new().set_file_name("bootleg-toolbox.log").save_file() {
             let text: String = self.log.iter().map(|(t, _)| format!("{t}\n")).collect();
@@ -1400,6 +1582,8 @@ impl App {
                         ui.separator();
                         sbe_button(ui, false, actions);
                         clean_wav_button(ui, false, actions);
+                        ui.separator();
+                        tag_button(ui, false, actions);
                     }))
                     .response
                     .on_hover_text(format!("Convert {scope} to FLAC (each file is decoded again and checked) or to WAV, make an MP3 copy of the shows in a separate folder, or fix SBEs. The originals are kept."));
@@ -1525,7 +1709,7 @@ impl App {
             let dragging = self.drag_select.is_some();
             let compact = self.opt.compact;
             // Same windows taking the keys as for the shortcuts, plus the settings.
-            let keys_taken = ctx.wants_keyboard_input() || self.info_choice.is_some() || self.float_dialog.is_some() || self.settings.is_some();
+            let keys_taken = ctx.wants_keyboard_input() || self.info_choice.is_some() || self.float_dialog.is_some() || self.settings.is_some() || self.tag_dialog.is_some();
             // A little air between columns fitted to their content.
             ui.spacing_mut().item_spacing.x = 16.0;
             egui::ScrollArea::horizontal().show(ui, |ui| {
@@ -1892,6 +2076,7 @@ impl App {
                 }
                 Action::CopyFfp => self.copy_ffp(ctx),
                 Action::CopyInfo => self.copy_info(ctx),
+                Action::TagInfo => self.open_tag_dialog(),
                 Action::TorrentCheck => {
                     let (shows, _) = self.selection();
                     let mut dialog = rfd::FileDialog::new().add_filter("Torrent", &["torrent"]).set_title("Torrent to check against");
@@ -1949,7 +2134,7 @@ impl App {
 
     fn shortcuts(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         // The info file choice window takes the keys (arrows, Enter, Escape).
-        if ctx.wants_keyboard_input() || self.info_choice.is_some() || self.float_dialog.is_some() {
+        if ctx.wants_keyboard_input() || self.info_choice.is_some() || self.float_dialog.is_some() || self.tag_dialog.is_some() {
             return;
         }
         let busy = self.running.is_some();
@@ -2706,6 +2891,14 @@ fn clean_wav_button(ui: &mut egui::Ui, disabled: bool, actions: &mut Vec<Action>
     }
 }
 
+/// "Tag and rename from info file...": opens the window where the tags are checked.
+fn tag_button(ui: &mut egui::Ui, disabled: bool, actions: &mut Vec<Action>) {
+    if ui.add_enabled(!disabled, egui::Button::new("🏷 Tag and rename from info file...")).on_hover_text(TAG_TIP).clicked() {
+        ui.close_menu();
+        actions.push(Action::TagInfo);
+    }
+}
+
 /// "Check against torrent...": every piece of the files hashed again and compared.
 fn torrent_check_button(ui: &mut egui::Ui, disabled: bool, actions: &mut Vec<Action>) {
     let tip = "Check the show against a .torrent file: every piece is hashed again, and damaged, missing or resized files are named. \
@@ -2761,6 +2954,7 @@ fn ops_menu(ui: &mut egui::Ui, disabled: bool, flac_level: u8, trackers: &[(Stri
     mp3_buttons(ui, disabled, actions);
     sbe_button(ui, disabled, actions);
     clean_wav_button(ui, disabled, actions);
+    tag_button(ui, disabled, actions);
     ui.separator();
     if ui.add_enabled(!disabled, egui::Button::new("📊 Spectrogram").shortcut_text("F9")).clicked() {
         ui.close_menu();
@@ -2821,6 +3015,7 @@ impl eframe::App for App {
         self.about_window(ctx);
         self.help_window(ctx);
         self.info_window(ctx);
+        self.tag_window(ctx);
         self.float_window(ctx);
         self.after_flac_window(ctx);
         self.spectrogram_windows(ctx);

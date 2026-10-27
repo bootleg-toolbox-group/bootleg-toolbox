@@ -42,12 +42,19 @@ ffmpeg or LAME. Every decoder and encoder is built in.
 - **Media info**: a MediaInfo-style summary of a show's files or of a DVD (video standard,
   resolution, bit rates, audio tracks marked lossless or lossy, subtitles, titles and
   chapters), as text to copy into a forum post or an info file.
+- **Tag and rename from the info file**: the artist, date, place and titles are read from
+  the show's text file (numbered or plain tracklists, discs and sets, "Artist:" fields),
+  shown in a window to check and correct, then written as FLAC tags; the files can be
+  renamed ("01 - Title", "d1t01 - Title" or eTree style). The audio is not touched, so FFP
+  and ST5 stay valid; `.md5` and `.sfv` lines are computed again, and new names are carried
+  into every checksum file.
 - **Upload helpers**: copy a show's FFP or its info file to the clipboard.
 - **File manager integration** (optional): "Open in Bootleg Toolbox" in the right-click
   menu of Explorer, Dolphin, Nautilus and Nemo.
 
-The original files are never changed: conversions, MP3 copies, SBE fixes and cleaned WAVs
-are written next to them.
+Conversions, MP3 copies, SBE fixes and cleaned WAVs are written next to the originals,
+which are never changed. Only "Tag and rename from info file" changes files in place, after
+you have checked what it will write: tags and names only, never the audio.
 
 The program makes no network connection, unless you ask it to check for a new version
 (Help > Check for updates, or the Settings option, off by default): it then asks
@@ -93,6 +100,7 @@ bootleg-toolbox --cli <command> <folders or files...>
 | `mp3-320`, `mp3-v0` | MP3 copies (`BT_MP3_DIR` for another folder) |
 | `fix-sbe` | SBE fix |
 | `clean-wav` | WAV clean-up |
+| `tag-info` | Tag and rename the FLAC files from the info file (`BT_RENAME=number`, `disc`, `etree` or `keep`; `BT_DRY=1` only prints what it read) |
 | `torrent-check` | Check the `.torrent` files given against their shows |
 | `media-info` | Media info of the shows and of the DVDs (`VIDEO_TS` folders, VOB files) |
 | `check-update` | Look for a newer release |

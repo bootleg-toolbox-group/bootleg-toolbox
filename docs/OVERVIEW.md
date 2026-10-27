@@ -12,13 +12,13 @@ The whole program is **one executable, for Windows and Linux, with nothing else 
 
 Three principles guide it:
 
-- **Your originals are never changed.** Conversions, MP3 copies and SBE fixes are written beside the files, every FLAC is decoded again and checked before it is kept, and nothing goes to the trash unless you ask for it.
+- **Your audio is never changed.** Conversions, MP3 copies and SBE fixes are written beside the files; tagging from the info file changes only tags and names, after you have checked them; every FLAC is decoded again and checked before it is kept, and nothing goes to the trash unless you ask for it.
 - **Say what was found, not just "OK".** Every result tells you what was actually checked: "CD-ready, FFP-ready", "SBE on last track only", "float rounded to 24-bit, largest difference -144.5 dBFS".
 - **Fast on today's computers.** Work runs on all processor cores, and the slow formats (Monkey's Audio) are decoded in parallel.
 
 ## At a glance
 
-Fifteen groups of tasks, all in one window and all from the same right-click menu.
+Sixteen groups of tasks, all in one window and all from the same right-click menu.
 
 | Task | What it does |
 | --- | --- |
@@ -35,6 +35,7 @@ Fifteen groups of tasks, all in one window and all from the same right-click men
 | Lossless? | Spectral analysis that flags MP3/AAC transcodes, upsampling, fake 24-bit and FM broadcasts |
 | Speed? | Estimates whether a tape runs fast or slow, with the correction to apply |
 | Spectrograms | Native spectrograms to copy or save as PNG |
+| Tag from info file | Reads the titles, artist, date and place from the info file, lets you check them, then tags and renames the FLAC files |
 | Clipboard helpers | Copy a show's FFP or its info file straight into an upload form |
 | Media info | A MediaInfo-style technical summary of a show's files or of a DVD, as text to copy |
 
@@ -159,6 +160,15 @@ Some recorders and editors write WAV files that older tools choke on. Clean WAV 
 - **Clean copies** go to a "WAV-cleaned" folder with a canonical 44-byte header (or the extensible header where it is required). Each copy is checked: its audio MD5 must match the original.
 - Float WAVs are left as they are: their header is already correct, and they have their own conversion path.
 
+### Tag and rename from the info file
+
+Most shows arrive with a text file describing them; Bootleg Toolbox turns it into tags and file names, after you have checked them.
+
+- **What is read:** the artist, date and place from the top of the file or from "Artist:", "Date:", "Venue:" fields; the tracklist, numbered ("01 - Title", "1. Title", "[01] Title", "d1t01 Title") or plain, across "Disc 1", "CD 2:" or "Set 2" headings, with running times, footnote marks and fingerprint lines left out. Several text files: the one whose tracklist matches the number of files comes first.
+- **A window to check everything** before it is written: artist, date, place, album (the eTree "date place" by default), each title next to its file and its new name. It warns when the list and the files do not have the same count, when the folder name gives another date, and when a new name would clash.
+- **Written:** TITLE, ARTIST, ALBUM, DATE, TRACKNUMBER, TRACKTOTAL, and DISCNUMBER/DISCTOTAL for several discs; the other tags are kept. Names: "01 - Title", "d1t01 - Title", "Artist YYYY-MM-DD d1t01", or unchanged.
+- **The audio is never rewritten:** only the FLAC header changes, in place when its padding has room. The audio signature is checked after every file. FFP and ST5 stay valid; .md5 and .sfv lines of the tagged files are computed again, and new names are written into every checksum file. A .torrent made before is reported as out of date.
+
 ### Lossy files (MP3, MP2, AAC)
 
 MP3 and MP2 files, and AAC in M4A or MKA files, can be added like any other show, mostly to recognise them for what they are.
@@ -255,7 +265,7 @@ The interface is one compact window, close in spirit to TLH: a list of shows and
 
 - **Toolbar on one line:** Add, Check, Create, Convert, Torrent, with Stop and Settings on the right.
 - **Right-click** on any row gives every action, with Open folder first. For a track, the folder opens with the file selected (Explorer on Windows, Dolphin, Nautilus and others on Linux).
-- **Keyboard:** F1 help, F5 verify, F6 create, F7 decode test, F8 details, F9 spectrogram, F10 torrents for all trackers, Ctrl+L Lossless?, Ctrl+P Speed?, Ctrl+I media info, Ctrl+A select all, Delete removes from the list, Escape stops a running task (or clears the selection, or closes a window).
+- **Keyboard:** Page Up/Page Down and Home/End move through the list; F1 help, F5 verify, F6 create, F7 decode test, F8 details, F9 spectrogram, F10 torrents for all trackers, Ctrl+L Lossless?, Ctrl+P Speed?, Ctrl+I media info, Ctrl+A select all, Delete removes from the list, Escape stops a running task (or clears the selection, or closes a window).
 - **Help > Keyboard shortcuts and command line** (F1) lists every shortcut, mouse gesture and command-line option in one page, with a Copy button.
 - Menus scroll instead of spilling over the window when it is small.
 
@@ -325,7 +335,7 @@ Bootleg Toolbox runs on 64-bit Windows and Linux from a single file, with nothin
 
 ### Safety of your files
 
-- **Originals are never modified.** Every conversion, MP3 copy, SBE fix and WAV clean-up writes new files.
+- **Originals are never modified** by conversions, MP3 copies, SBE fixes and WAV clean-ups: they write new files. Tag and rename changes tags and names in place, only after you have checked them, and never the audio.
 - **Nothing half-written:** new files are written as ".part" and renamed only once complete and verified; a stopped or failed job removes them.
 - **Existing files are not overwritten** without your say: an existing FLAC, MP3 or checksum file is skipped and reported.
 - **Nothing is deleted:** the after-conversion window moves files to the system trash (Recycle Bin, or the desktop trash on Linux), only if you tick the box, so they can be restored.
@@ -366,6 +376,7 @@ Bootleg Toolbox covers the everyday jobs TLH is used for and adds Linux, WavPack
 | WAV clean-up | Removes extra RIFF chunks, rewrites canonical headers | Yes, into a separate folder, audio checked by MD5 |
 | Technical summary (MediaInfo-style) | No | Audio files and DVDs (video, audio tracks with lossless/lossy, subtitles, titles, chapters) |
 | SHN seek tables (SKT) | Yes | No |
+| Tag from info file | No (Live Show Tagger, a separate foobar2000 component, last updated in 2010) | Yes, checked in a window, checksum files kept up to date |
 | Upload helpers | Not described | Copy FFP, copy info file |
 | File manager integration | Explorer | Explorer, Dolphin, Nautilus, Nemo (optional) |
 | Update check | Yes | Yes, optional and off by default |
@@ -379,7 +390,7 @@ Bootleg Toolbox covers the everyday jobs TLH is used for and adds Linux, WavPack
 - **Linux and modern Windows**, from one file that cannot break because a bundled tool was replaced or is missing.
 - **WavPack and Unicode names**, both common in collections today.
 - **Source analysis** that explains itself: TLH relies on auCDtect, a closed tool that tests WAV files and gives a verdict without its reasons, while Lossless? works on every format and shows its measures and reasoning, and recognises FM broadcasts instead of calling them lossy.
-- **Tape speed, spectrograms, float WAV, upload helpers and DVD media info**, none of which TLH offers.
+- **Tape speed, spectrograms, float WAV, tagging from the info file, upload helpers and DVD media info**, none of which TLH offers.
 - **Open source and maintained:** bugs can be fixed and the tool can follow new needs.
 
 ### Where TLH still does more

@@ -93,13 +93,13 @@ pub fn natural_path_cmp(a: &Path, b: &Path) -> Ordering {
 
 // ---------------------------------------------------------------- scanning
 
-/// A disc, set or tape side of a show: "CD1", "Disc 2 - Encore", "D1", "Set B", "Side A",
+/// A disc, set or tape side of a show: "CD1", "Disc 2 - Encore", "Disc Two", "D1", "Set B", "Side A",
 /// "Part 2", "Tape 1", "Vol 1", or a bare letter or number ("A", "B", "1", "2").
 fn disc_dir_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
-            r"(?i)^(?:(?:cd|disc|disk|dvd|set|d|part|pt|side|tape|vol|volume)[\s._-]*\d+|(?:cd|disc|disk|set|part|side|tape)[\s._-]+[a-z](?:$|[\s._-])|[a-z]$|\d{1,2}$)",
+            r"(?i)^(?:(?:cd|disc|disk|dvd|set|d|part|pt|side|tape|vol|volume)[\s._-]*\d+|(?:cd|disc|disk|set|part|side|tape|vol|volume)[\s._-]+(?:one|two|three|four|five|six|seven|eight|nine|ten)(?:$|[\s._-])|(?:cd|disc|disk|set|part|side|tape)[\s._-]+[a-z](?:$|[\s._-])|[a-z]$|\d{1,2}$)",
         )
         .unwrap()
     })
@@ -340,10 +340,10 @@ mod tests {
         assert!(disc_dir_re().is_match("Disc 2"));
         assert!(disc_dir_re().is_match("set_1"));
         assert!(!disc_dir_re().is_match("Concert"));
-        for disc in ["A", "b", "1", "02", "Side A", "Set B", "Part 2", "Tape 1", "Vol. 1", "CD A", "Disc 2 - Encore"] {
+        for disc in ["A", "b", "1", "02", "Side A", "Set B", "Part 2", "Tape 1", "Vol. 1", "CD A", "Disc 2 - Encore", "Disc One", "CD Two", "disc_three"] {
             assert!(disc_dir_re().is_match(disc), "{disc}");
         }
-        for show in ["Dave Matthews Band", "Doors 1968", "Setlist", "Tapes", "Sideshow", "AB", "Part of it", "1977-05-08", "123"] {
+        for show in ["Dave Matthews Band", "Doors 1968", "Setlist", "Tapes", "Sideshow", "AB", "Part of it", "1977-05-08", "123", "Disco Inferno", "Side Oneida"] {
             assert!(!disc_dir_re().is_match(show), "{show}");
         }
     }

@@ -21,6 +21,7 @@ mod shn;
 mod speed;
 mod wv;
 mod spectrogram;
+mod tagging;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -140,6 +141,10 @@ fn run_cli(args: &[String]) -> i32 {
         "mp3-v0" => Op::Mp3(encode::Mp3Mode::V0),
         "fix-sbe" => Op::FixSbe,
         "clean-wav" => Op::CleanWav,
+        "tag-info" => match tag_jobs(&args[1..]) {
+            Some(jobs) => Op::Tag(jobs),
+            None => return 0,
+        },
         // .torrent files among the paths, checked against the folders (or the folders next to them).
         "torrent-check" => Op::TorrentCheck(args[1..].iter().map(PathBuf::from).filter(|p| crate::files::ext_lower(p) == "torrent").collect()),
         // DVDs (VIDEO_TS folders, VOB files) found in the paths as well as the audio files.
@@ -213,6 +218,57 @@ fn run_cli(args: &[String]) -> i32 {
         }
     }
     if errors > 0 { 1 } else { 0 }
+}
+
+/// tag-info: the plan of each show, read from its most likely info file and printed;
+/// BT_RENAME=number|disc|etree|keep (default number); BT_DRY=1 prints without writing.
+fn tag_jobs(paths: &[String]) -> Option<Vec<tagging::TagJob>> {
+    use tagging::NameScheme;
+    let scheme = match std::env::var("BT_RENAME").unwrap_or_default().as_str() {
+        "disc" => NameScheme::DiscTrackTitle,
+        "etree" => NameScheme::Etree,
+        "keep" => NameScheme::Keep,
+        _ => NameScheme::NumberTitle,
+    };
+    let paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+    let mut jobs = Vec::new();
+    for show in files::scan_paths(&paths, &Default::default()) {
+        let name = files::file_name(&show.root);
+        let Some((info, _)) = tagging::info_files(&show).into_iter().next() else {
+            println!("{}{name}: no info file", prefix(Level::Warn));
+            continue;
+        };
+        let draft = match tagging::draft(&show, &info) {
+            Ok(d) => d,
+            Err(e) => {
+                println!("{}{name}: {e}", prefix(Level::Error));
+                continue;
+            }
+        };
+        println!("{name}");
+        println!("  info file: {}", files::file_name(&info));
+        println!("  artist: {}\n  date: {}\n  place: {}\n  album: {}", draft.artist, draft.date, draft.place, draft.album);
+        println!("  titles found: {} for {} files", draft.found, draft.tracks.len());
+        if let Some(d) = draft.folder_date.as_ref().filter(|d| **d != draft.date) {
+            println!("  {}the folder name says {d}", prefix(Level::Warn));
+        }
+        for t in &draft.tracks {
+            let disc = t.disc.map(|d| format!("d{d}")).unwrap_or_default();
+            let new = draft.new_name(t, scheme).map(|n| format!(" -> {n}")).unwrap_or_default();
+            println!("  {disc}t{:02} {:?}  [{}]{new}", t.track, t.title, files::file_name(&t.path));
+        }
+        for e in &draft.extra {
+            println!("  {}extra title: {e}", prefix(Level::Warn));
+        }
+        let conflicts = draft.name_conflicts(scheme);
+        for c in &conflicts {
+            println!("  {}{c}", prefix(Level::Error));
+        }
+        if conflicts.is_empty() {
+            jobs.push(draft.job(scheme, true));
+        }
+    }
+    (std::env::var_os("BT_DRY").is_none() && !jobs.is_empty()).then_some(jobs)
 }
 
 fn prefix(level: Level) -> &'static str {

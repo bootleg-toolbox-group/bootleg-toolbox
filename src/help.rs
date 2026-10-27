@@ -13,6 +13,8 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+P", "Speed? (tape speed check)"),
     ("Ctrl+I", "Media info"),
     ("Ctrl+A", "Select everything"),
+    ("Page Up / Page Down", "Scroll the list by a screen"),
+    ("Home / End", "Go to the top or the bottom of the list"),
     ("Delete", "Remove the selection from the list (the files are not touched)"),
     ("Escape", "Stop the running task; otherwise clear the selection, or close a menu or window"),
 ];
@@ -50,6 +52,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("mp3-v0", "MP3 copies, VBR V0"),
     ("fix-sbe", "Fix sector boundary errors (copies in an SBE-fixed folder)"),
     ("clean-wav", "Clean WAV headers (copies in a WAV-cleaned folder)"),
+    ("tag-info", "Tag and rename the FLAC files from the info file (prints what it read first)"),
     ("media-info", "Media info of the shows, and of the DVDs (VIDEO_TS folders, VOB files)"),
     ("check-update", "Look for a newer release on GitHub"),
     ("shell-menu-add", "Add \"Open in Bootleg Toolbox\" to the file manager's right-click menu"),
@@ -65,6 +68,8 @@ pub const VARIABLES: &[(&str, &str)] = &[
     ("BT_FLOAT=round", "to-flac: round float WAVs to 24 bits when they are not exact"),
     ("BT_MP3_DIR=folder", "mp3-320, mp3-v0: write the copies there (default: next to the show)"),
     ("BT_TRACKERS=\"Name=URL;...\"", "torrent-all: extra trackers, with their announce URLs"),
+    ("BT_RENAME=number|disc|etree|keep", "tag-info: \"01 - Title\" (default), \"d1t01 - Title\", \"Artist YYYY-MM-DD d1t01\", or no renaming"),
+    ("BT_DRY=1", "tag-info: only print what would be written"),
     ("BT_REPORT=1", "lossless, speed: print the full report"),
     ("BT_WAYLAND=1", "Linux, window mode: native Wayland window (no drag and drop)"),
 ];

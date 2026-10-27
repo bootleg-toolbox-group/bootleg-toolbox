@@ -157,6 +157,8 @@ pub struct Options {
     pub shell_integration: bool,
     /// Look for a newer release on GitHub at startup (the only network access; off by default).
     pub check_updates: bool,
+    /// File names chosen in "Tag and rename from info file".
+    pub tag_scheme: crate::tagging::NameScheme,
     /// The entries of the former name (Bootleg Helper) have been looked for and removed.
     pub legacy_cleaned: bool,
     /// Compact view: fewer columns (Format then gives bits and rate), tighter rows.
@@ -198,6 +200,7 @@ impl Default for Options {
             after_flac_old: true,
             after_flac_ffp: true,
             hidden_columns: Vec::new(),
+            tag_scheme: Default::default(),
             log_open: false,
             compact: false,
             always_on_top: false,
@@ -230,6 +233,8 @@ pub enum Op {
     TorrentCheck(Vec<PathBuf>),
     /// Technical summary of the selected files and of these DVDs (VIDEO_TS folders, VOB files).
     MediaInfo(Vec<PathBuf>),
+    /// Tags and new names from the info file (the choices of its window).
+    Tag(Vec<crate::tagging::TagJob>),
     /// Follow-up of a conversion to FLAC (the choices of its window).
     AfterFlac { roots: Vec<PathBuf>, sources: Vec<PathBuf>, trash_sources: bool, trash_checksums: Vec<PathBuf>, create_ffp: bool },
 }
@@ -274,6 +279,7 @@ impl Op {
             Op::CleanWav => "Cleaning WAV headers",
             Op::TorrentCheck(_) => "Checking against the torrent",
             Op::MediaInfo(_) => "Reading media info",
+            Op::Tag(_) => "Tagging from the info file",
             Op::AfterFlac { .. } => "Tidying up after the conversion",
         }
     }
@@ -349,6 +355,7 @@ pub fn spawn(op: Op, shows: Vec<Show>, files: Vec<PathBuf>, opt: Options, tx: Se
                 Op::CleanWav => op_clean_wav(&ctx, &shows, &files),
                 Op::TorrentCheck(torrents) => op_torrent_check(&ctx, &shows, torrents),
                 Op::MediaInfo(dvds) => op_media_info(&ctx, &shows, &files, dvds),
+                Op::Tag(jobs) => op_tag(&ctx, jobs),
                 Op::AfterFlac { roots, sources, trash_sources, trash_checksums, create_ffp } => {
                     op_after_flac(&ctx, roots, sources, *trash_sources, trash_checksums, *create_ffp)
                 }
@@ -1916,6 +1923,147 @@ fn clone_bencode(b: &Bencode) -> Bencode {
         Bencode::List(l) => Bencode::List(l.iter().map(clone_bencode).collect()),
         Bencode::Dict(d) => Bencode::Dict(d.iter().map(|(k, v)| (k.clone(), clone_bencode(v))).collect()),
     }
+}
+
+// ---------------------------------------------------------------- Tag from info file
+
+/// Writes the tags, renames the files, then brings the checksum files up to date: new names
+/// everywhere, new .md5/.sfv digests of the tagged files (the FFP and ST5, made from the
+/// audio, do not change).
+pub fn op_tag(ctx: &Ctx, jobs: &[crate::tagging::TagJob]) -> String {
+    ctx.add_total(jobs.iter().map(|j| j.files.len()).sum());
+    ctx.rescan.store(true, Ordering::SeqCst);
+    let (mut tagged, mut renamed) = (0, 0);
+    for job in jobs {
+        if ctx.cancelled() {
+            return "Stopped.".into();
+        }
+        let (t, r) = tag_show(ctx, job);
+        tagged += t;
+        renamed += r;
+    }
+    format!("{} tagged, {} renamed.", plural(tagged, "file", "files"), renamed)
+}
+
+fn tag_show(ctx: &Ctx, job: &crate::tagging::TagJob) -> (usize, usize) {
+    use crate::tagging;
+    let show = file_name(&job.root);
+    // 1. Tags, FLAC only; the audio signature and length must be the same afterwards.
+    let mut tagged = Vec::new();
+    let mut untagged = Vec::new();
+    for (path, fields, _) in &job.files {
+        if ctx.cancelled() {
+            return (tagged.len(), 0);
+        }
+        if !tagging::taggable(path) {
+            untagged.push(file_name(path));
+            continue;
+        }
+        let before = audio::probe(path).map(|i| (i.md5, i.samples));
+        let result = tagging::write_flac_tags(path, fields).and_then(|()| {
+            let after = audio::probe(path).map(|i| (i.md5, i.samples));
+            if before.is_ok() && after != before {
+                return Err("the audio signature changed after tagging (please report this)".into());
+            }
+            Ok(())
+        });
+        match result {
+            Ok(()) => tagged.push(path.clone()),
+            Err(e) => {
+                ctx.status(path, format!("Not tagged: {e}"), Level::Error, "");
+                ctx.log(format!("{}: not tagged: {e}", file_name(path)), Level::Error);
+            }
+        }
+    }
+    if !untagged.is_empty() {
+        ctx.log(format!("{show}: {} not tagged (only FLAC files can be tagged): {}", plural(untagged.len(), "file", "files"), untagged.join(", ")), Level::Warn);
+    }
+
+    // 2. Whole-file digests of the tagged files, when a .md5 or .sfv lists them.
+    let checksums = tagging::checksum_files(&job.root);
+    let whole = checksums.iter().any(|p| matches!(ext_lower(p).as_str(), "md5" | "sfv"));
+    let mut digests = HashMap::new();
+    if job.update_checksums && whole && !tagged.is_empty() {
+        let computed = par_map(ctx, &tagged, |p| p.clone(), |p| {
+            Ok((hex(&audio::file_md5(p, &ctx.cancel)?), format!("{:08x}", audio::file_crc32(p, &ctx.cancel)?)))
+        });
+        for (p, d) in tagged.iter().zip(computed) {
+            if let Some(d) = d {
+                digests.insert(p.clone(), d);
+            }
+        }
+        if ctx.cancelled() {
+            return (tagged.len(), 0);
+        }
+    } else {
+        ctx.advance(tagged.len());
+    }
+
+    // 3. New names: through temporary names, so that two files can swap their names.
+    let moves: Vec<(PathBuf, PathBuf)> = job
+        .files
+        .iter()
+        .filter_map(|(p, _, name)| name.as_ref().map(|n| (p.clone(), p.with_file_name(n))))
+        .filter(|(old, new)| old != new)
+        .collect();
+    let mut renamed = HashMap::new();
+    let mut parked = Vec::new();
+    for (i, (old, new)) in moves.iter().enumerate() {
+        let temp = old.with_file_name(format!(".bt-rename-{i}-{}", std::process::id()));
+        match fs::rename(old, &temp) {
+            Ok(()) => parked.push((old, temp, new)),
+            Err(e) => ctx.log(format!("Cannot rename {}: {e}", file_name(old)), Level::Error),
+        }
+    }
+    for (old, temp, new) in parked {
+        if new.exists() {
+            ctx.log(format!("Not renamed: {} already exists", file_name(new)), Level::Error);
+            let _ = fs::rename(&temp, old);
+            continue;
+        }
+        match fs::rename(&temp, new) {
+            Ok(()) => {
+                renamed.insert(old.clone(), new.clone());
+            }
+            Err(e) => {
+                ctx.log(format!("Cannot rename {} to {}: {e}", file_name(old), file_name(new)), Level::Error);
+                let _ = fs::rename(&temp, old);
+            }
+        }
+    }
+
+    // 4. Checksum files.
+    let changes = tagging::Changes { renamed, digests };
+    for sum in &checksums {
+        match tagging::update_checksum_file(sum, &changes, &tagged) {
+            Ok((0, 0)) => {}
+            Ok((changed, stale)) => {
+                if changed > 0 {
+                    ctx.log(format!("Updated {}: {}", rel_posix(sum, &job.root), plural(changed, "line", "lines")), Level::Ok);
+                }
+                if stale > 0 {
+                    ctx.log(
+                        format!("{}: {} of tagged files no longer match (whole-file checksums change with the tags; Create checksums makes them again)", rel_posix(sum, &job.root), plural(stale, "line", "lines")),
+                        Level::Warn,
+                    );
+                }
+            }
+            Err(e) => ctx.log(format!("Cannot update {}: {e}", rel_posix(sum, &job.root)), Level::Error),
+        }
+    }
+    // A torrent made before no longer matches the files.
+    if let Some(parent) = job.root.parent() {
+        let old_torrents = fs::read_dir(parent).into_iter().flatten().flatten().any(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            name.starts_with(&show) && name.to_lowercase().ends_with(".torrent")
+        });
+        if old_torrents && (!tagged.is_empty() || !changes.renamed.is_empty()) {
+            ctx.log(format!("{show}: the .torrent files made before no longer match the files; make them again before seeding."), Level::Warn);
+        }
+    }
+    ctx.status(&job.root, format!("Tagged {}, renamed {}", tagged.len(), changes.renamed.len()), Level::Ok, "");
+    ctx.log(format!("{show}: {} tagged, {} renamed.", plural(tagged.len(), "file", "files"), changes.renamed.len()), Level::Ok);
+    (tagged.len(), changes.renamed.len())
 }
 
 /// Text of the .ffp files of a show, for the TTD upload form.
