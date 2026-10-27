@@ -107,6 +107,10 @@ pub fn read_file(path: &Path) -> Result<FileInfo, String> {
         Format::WavPack => "WavPack".into(),
         Format::Mp3 => "MPEG Audio Layer 3 (MP3)".into(),
         Format::Mp2 => "MPEG Audio Layer 2 (MP2)".into(),
+        Format::M4a | Format::Mka => {
+            let container = if info.format == Format::M4a { "MPEG-4 (M4A)" } else { "Matroska (MKA)" };
+            format!("{}, in {container}", info.codec.map_or("unknown", audio::Codec::long_name))
+        }
     };
     lines.push(("Format", format));
     match info.format {
@@ -168,7 +172,7 @@ fn write_file(doc: &mut Doc, f: &FileInfo) {
     for (key, value) in f.lines.iter().take(1) {
         doc.line(key, value);
     }
-    doc.line("Compression mode", if i.format.lossy() { "Lossy" } else if i.format == Format::Wav { "None (uncompressed)" } else { "Lossless" });
+    doc.line("Compression mode", if i.lossy() { "Lossy" } else if i.format == Format::Wav || i.codec == Some(audio::Codec::Pcm) { "None (uncompressed)" } else { "Lossless" });
     for (key, value) in f.lines.iter().skip(1) {
         doc.line(key, value);
     }
@@ -179,7 +183,7 @@ fn write_file(doc: &mut Doc, f: &FileInfo) {
     }
     doc.line("Channels", if i.channels == 1 { "1 channel".to_string() } else { format!("{} channels", i.channels) });
     doc.line("Sampling rate", khz(i.rate));
-    if !i.format.lossy() {
+    if !i.lossy() {
         doc.line("Bit depth", format!("{} bits{}", i.bits, if i.float { " (float)" } else { "" }));
     }
     doc.line("Samples", i.samples.to_string());
@@ -202,7 +206,7 @@ fn write_file(doc: &mut Doc, f: &FileInfo) {
 pub fn audio_text(show: &Path, files: &[FileInfo], failed: &[(PathBuf, String)]) -> String {
     let mut doc = Doc(String::new());
     doc.heading(&file_name(show), '=');
-    let mut formats: Vec<&str> = files.iter().map(|f| f.info.format.name()).collect();
+    let mut formats: Vec<&str> = files.iter().map(|f| f.info.name()).collect();
     formats.dedup();
     formats.sort_unstable();
     formats.dedup();
@@ -216,7 +220,7 @@ pub fn audio_text(show: &Path, files: &[FileInfo], failed: &[(PathBuf, String)])
     }
     let quality = |i: &AudioInfo| {
         let mut q = format!("{}, {}", khz(i.rate), if i.channels == 1 { "mono".to_string() } else { format!("{} channels", i.channels) });
-        if !i.format.lossy() {
+        if !i.lossy() {
             q = format!("{} bits{}, {q}", i.bits, if i.float { " float" } else { "" });
         }
         q

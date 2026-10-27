@@ -20,6 +20,13 @@ Project Authors and Google LLC, SIL Open Font Licence 1.1, see
 [assets/fonts/OFL.txt](assets/fonts/OFL.txt)), and the emoji-icon-font symbols that egui
 ships (MIT, see [assets/fonts/emoji-icon-font-mit-license.txt](assets/fonts/emoji-icon-font-mit-license.txt)).
 
+## ape-decoder (Monkey's Audio decoder), modified
+
+The `ape-decoder` crate 0.3.2 (MIT OR Apache-2.0, https://crates.io/crates/ape-decoder) is
+built from a modified copy in [vendor/ape-decoder](vendor/ape-decoder), with its licence
+files. The change adds the value coding of Monkey's Audio 3.95 to 3.98 files, which the
+original decodes as if they were 3.99 and later; it is listed in its CHANGELOG.md.
+
 ## Rust crates
 
 Crates built into the Windows and Linux executables (build tools included), by licence.
@@ -47,7 +54,7 @@ ab_glyph v0.2.32, ab_glyph_rasterizer v0.1.10, accesskit_winit v0.22.4, flacenc 
 
 ### MPL-2.0
 
-symphonia v0.5.5, symphonia-bundle-flac v0.5.5, symphonia-bundle-mp3 v0.5.5, symphonia-codec-pcm v0.5.5, symphonia-core v0.5.5, symphonia-format-riff v0.5.5, symphonia-metadata v0.5.5, symphonia-utils-xiph v0.5.5
+symphonia v0.5.5, symphonia-bundle-flac v0.5.5, symphonia-bundle-mp3 v0.5.5, symphonia-codec-aac v0.5.5, symphonia-codec-alac v0.5.5, symphonia-codec-pcm v0.5.5, symphonia-codec-vorbis v0.5.5, symphonia-core v0.5.5, symphonia-format-isomp4 v0.5.5, symphonia-format-mkv v0.5.5, symphonia-format-riff v0.5.5, symphonia-metadata v0.5.5, symphonia-utils-xiph v0.5.5
 
 ### MIT/Apache-2.0
 

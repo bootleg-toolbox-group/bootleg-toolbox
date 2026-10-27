@@ -29,6 +29,9 @@ pub enum Format {
     /// Lossy: read for checks and analyses, never converted to FLAC.
     Mp3,
     Mp2,
+    /// Containers: what they hold (AAC, ALAC...) is in `AudioInfo::codec`.
+    M4a,
+    Mka,
 }
 
 impl Format {
@@ -42,6 +45,8 @@ impl Format {
             "wv" => Some(Format::WavPack),
             "mp3" => Some(Format::Mp3),
             "mp2" => Some(Format::Mp2),
+            "m4a" => Some(Format::M4a),
+            "mka" => Some(Format::Mka),
             _ => None,
         }
     }
@@ -55,16 +60,81 @@ impl Format {
             Format::WavPack => "WV",
             Format::Mp3 => "MP3",
             Format::Mp2 => "MP2",
+            Format::M4a => "M4A",
+            Format::Mka => "MKA",
         }
     }
 
     /// Formats this version can decode.
     pub fn supported(self) -> bool {
-        matches!(self, Format::Flac | Format::Wav | Format::Shn | Format::Ape | Format::WavPack | Format::Mp3 | Format::Mp2)
+        true
+    }
+
+    /// Lossy by the format itself. A container depends on its codec: see `AudioInfo::lossy`.
+    pub fn lossy(self) -> bool {
+        matches!(self, Format::Mp3 | Format::Mp2)
+    }
+
+    pub fn container(self) -> bool {
+        matches!(self, Format::M4a | Format::Mka)
+    }
+}
+
+/// The codec inside an M4A or MKA file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Codec {
+    Aac,
+    Alac,
+    Flac,
+    Mp3,
+    Mp2,
+    Vorbis,
+    Pcm,
+}
+
+impl Codec {
+    fn from_type(codec: symphonia::core::codecs::CodecType) -> Option<Codec> {
+        use symphonia::core::codecs::*;
+        Some(match codec {
+            CODEC_TYPE_AAC => Codec::Aac,
+            CODEC_TYPE_ALAC => Codec::Alac,
+            CODEC_TYPE_FLAC => Codec::Flac,
+            CODEC_TYPE_MP3 => Codec::Mp3,
+            CODEC_TYPE_MP2 => Codec::Mp2,
+            CODEC_TYPE_VORBIS => Codec::Vorbis,
+            CODEC_TYPE_PCM_S16LE | CODEC_TYPE_PCM_S16BE | CODEC_TYPE_PCM_S24LE | CODEC_TYPE_PCM_S24BE
+            | CODEC_TYPE_PCM_S32LE | CODEC_TYPE_PCM_S32BE | CODEC_TYPE_PCM_U8 | CODEC_TYPE_PCM_S8 => Codec::Pcm,
+            _ => return None,
+        })
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Codec::Aac => "AAC",
+            Codec::Alac => "ALAC",
+            Codec::Flac => "FLAC",
+            Codec::Mp3 => "MP3",
+            Codec::Mp2 => "MP2",
+            Codec::Vorbis => "Vorbis",
+            Codec::Pcm => "PCM",
+        }
+    }
+
+    /// For media info.
+    pub fn long_name(self) -> &'static str {
+        match self {
+            Codec::Aac => "AAC (Advanced Audio Coding)",
+            Codec::Alac => "ALAC (Apple Lossless)",
+            Codec::Flac => "FLAC (Free Lossless Audio Codec)",
+            Codec::Mp3 => "MPEG Audio Layer 3 (MP3)",
+            Codec::Mp2 => "MPEG Audio Layer 2 (MP2)",
+            Codec::Vorbis => "Vorbis",
+            Codec::Pcm => "PCM (uncompressed)",
+        }
     }
 
     pub fn lossy(self) -> bool {
-        matches!(self, Format::Mp3 | Format::Mp2)
+        matches!(self, Codec::Aac | Codec::Mp3 | Codec::Mp2 | Codec::Vorbis)
     }
 }
 
@@ -79,11 +149,22 @@ pub struct AudioInfo {
     pub md5: Option<[u8; 16]>,
     /// WAV only: IEEE float samples instead of integers.
     pub float: bool,
+    /// M4A and MKA only: the codec inside.
+    pub codec: Option<Codec>,
 }
 
 impl AudioInfo {
+    pub fn lossy(&self) -> bool {
+        self.format.lossy() || self.codec.is_some_and(Codec::lossy)
+    }
+
+    /// The codec for a container ("AAC"), the format otherwise ("FLAC").
+    pub fn name(&self) -> &'static str {
+        self.codec.map_or(self.format.name(), Codec::name)
+    }
+
     pub fn is_cd(&self) -> bool {
-        !self.format.lossy() && self.rate == 44100 && self.bits == 16 && self.channels == 2
+        !self.lossy() && self.rate == 44100 && self.bits == 16 && self.channels == 2
     }
 
     /// Some(true/false) for CD audio, None when the notion does not apply.
@@ -125,11 +206,11 @@ impl AudioInfo {
 
     /// "FLAC 16/44.1"
     pub fn label(&self) -> String {
-        if self.format.lossy() {
-            return format!("{} {}", self.format.name(), trim_float(self.rate as f64 / 1000.0));
+        if self.lossy() {
+            return format!("{} {}", self.name(), trim_float(self.rate as f64 / 1000.0));
         }
         let float = if self.float { " float" } else { "" };
-        format!("{} {}{float}/{}", self.format.name(), self.bits, trim_float(self.rate as f64 / 1000.0))
+        format!("{} {}{float}/{}", self.name(), self.bits, trim_float(self.rate as f64 / 1000.0))
     }
 }
 
@@ -172,9 +253,11 @@ pub fn probe_as(path: &Path, format: Option<Format>) -> Result<AudioInfo, String
             samples: h.samples,
             md5: None,
             float: false,
+            codec: None,
         }),
         Some(Format::Wav) => probe_wav(path).map(|(info, _, _)| info),
         Some(f @ (Format::Mp3 | Format::Mp2)) => probe_mpa(path, f),
+        Some(f @ (Format::M4a | Format::Mka)) => probe_container(path, f),
         Some(Format::Ape) => {
             let decoder = open_ape(path)?;
             let i = decoder.info();
@@ -186,6 +269,7 @@ pub fn probe_as(path: &Path, format: Option<Format>) -> Result<AudioInfo, String
                 samples: i.total_samples,
                 md5: None,
                 float: i.is_floating_point,
+                codec: None,
             })
         }
         Some(Format::WavPack) => crate::wv::probe(path).map(|w| AudioInfo {
@@ -196,6 +280,7 @@ pub fn probe_as(path: &Path, format: Option<Format>) -> Result<AudioInfo, String
             samples: w.samples,
             md5: None,
             float: w.float,
+            codec: None,
         }),
         None => Err("not an audio file".into()),
     }
@@ -239,6 +324,7 @@ fn probe_flac(path: &Path) -> Result<AudioInfo, String> {
         samples: v & 0xF_FFFF_FFFF,
         md5: Some(md5),
         float: false,
+        codec: None,
     })
 }
 
@@ -372,7 +458,7 @@ pub fn probe_wav(path: &Path) -> Result<(AudioInfo, u64, u64), String> {
                 let declared = if size == 0 || size == 0xFFFF_FFFF { available } else { size };
                 let len = declared.min(available);
                 let samples = declared / block_align as u64;
-                let info = AudioInfo { format: Format::Wav, rate, bits, channels, samples, md5: None, float };
+                let info = AudioInfo { format: Format::Wav, rate, bits, channels, samples, md5: None, float, codec: None };
                 return Ok((info, pos, len));
             }
             _ => {
@@ -426,11 +512,12 @@ pub fn read_pcm_as(
         Some(Format::Ape) => decode_ape(path, cancel, sink),
         Some(Format::WavPack) => crate::wv::decode(path, cancel, sink),
         Some(f @ (Format::Mp3 | Format::Mp2)) => decode_mpa(path, f, cancel, sink),
+        Some(f @ (Format::M4a | Format::Mka)) => decode_container(path, f, cancel, sink),
         None => Err("not an audio file".into()),
     }
 }
 
-fn decode_flac(path: &Path, cancel: &AtomicBool, mut sink: impl FnMut(&[u8])) -> Result<u64, String> {
+fn decode_flac(path: &Path, cancel: &AtomicBool, sink: impl FnMut(&[u8])) -> Result<u64, String> {
     let file = File::open(path).map_err(io_err)?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
@@ -438,17 +525,28 @@ fn decode_flac(path: &Path, cancel: &AtomicBool, mut sink: impl FnMut(&[u8])) ->
     let probed = symphonia::default::get_probe()
         .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
         .map_err(|e| format!("cannot open FLAC stream: {e}"))?;
-    let mut reader = probed.format;
+    let reader = probed.format;
     let track = reader.default_track().ok_or("no audio track")?.clone();
     let bits = track.codec_params.bits_per_sample.ok_or("unknown bit depth")?;
-    let width = bits.div_ceil(8) as usize;
-    let shift = 32 - bits;
+    decode_track(reader, &track, Some(bits), cancel, sink)
+}
+
+/// Decodes one track to little-endian PCM: `bits` wide, or 16-bit for lossy codecs (None).
+fn decode_track(
+    mut reader: Box<dyn symphonia::core::formats::FormatReader>,
+    track: &symphonia::core::formats::Track,
+    bits: Option<u32>,
+    cancel: &AtomicBool,
+    mut sink: impl FnMut(&[u8]),
+) -> Result<u64, String> {
     let mut decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions { verify: false })
         .map_err(|e| format!("cannot create decoder: {e}"))?;
+    let (width, shift) = bits.map_or((2, 0), |b| (b.div_ceil(8) as usize, 32 - b));
     let mut frames = 0u64;
     let mut out: Vec<u8> = Vec::with_capacity(1 << 16);
-    let mut sample_buf: Option<SampleBuffer<i32>> = None;
+    let mut wide: Option<SampleBuffer<i32>> = None;
+    let mut narrow: Option<SampleBuffer<i16>> = None;
     loop {
         if cancel.load(Ordering::Relaxed) {
             return Err("cancelled".into());
@@ -463,19 +561,31 @@ fn decode_flac(path: &Path, cancel: &AtomicBool, mut sink: impl FnMut(&[u8])) ->
         }
         let decoded = decoder.decode(&packet).map_err(|e| format!("decoding error: {e}"))?;
         let spec = *decoded.spec();
-        let needed = decoded.capacity() as u64;
         let channels = spec.channels.count();
-        if sample_buf.as_ref().map_or(true, |b| b.capacity() < needed as usize * channels) {
-            sample_buf = Some(SampleBuffer::<i32>::new(needed, spec));
-        }
-        let buf = sample_buf.as_mut().unwrap();
-        buf.copy_interleaved_ref(decoded);
+        let needed = decoded.capacity();
         out.clear();
-        for &s in buf.samples() {
-            let v = s >> shift;
-            out.extend_from_slice(&v.to_le_bytes()[..width]);
-        }
-        frames += (buf.samples().len() / spec.channels.count()) as u64;
+        let samples = if bits.is_some() {
+            if wide.as_ref().map_or(true, |b| b.capacity() < needed * channels) {
+                wide = Some(SampleBuffer::<i32>::new(needed as u64, spec));
+            }
+            let buf = wide.as_mut().unwrap();
+            buf.copy_interleaved_ref(decoded);
+            for &s in buf.samples() {
+                out.extend_from_slice(&(s >> shift).to_le_bytes()[..width]);
+            }
+            buf.samples().len()
+        } else {
+            if narrow.as_ref().map_or(true, |b| b.capacity() < needed * channels) {
+                narrow = Some(SampleBuffer::<i16>::new(needed as u64, spec));
+            }
+            let buf = narrow.as_mut().unwrap();
+            buf.copy_interleaved_ref(decoded);
+            for &s in buf.samples() {
+                out.extend_from_slice(&s.to_le_bytes());
+            }
+            buf.samples().len()
+        };
+        frames += (samples / channels) as u64;
         sink(&out);
     }
     Ok(frames)
@@ -515,46 +625,142 @@ fn probe_mpa(path: &Path, format: Format) -> Result<AudioInfo, String> {
             n
         }
     };
-    Ok(AudioInfo { format, rate, bits: 16, channels, samples, md5: None, float: false })
+    Ok(AudioInfo { format, rate, bits: 16, channels, samples, md5: None, float: false, codec: None })
 }
 
-fn decode_mpa(path: &Path, format: Format, cancel: &AtomicBool, mut sink: impl FnMut(&[u8])) -> Result<u64, String> {
-    let mut reader = open_mpa(path, format)?;
+fn decode_mpa(path: &Path, format: Format, cancel: &AtomicBool, sink: impl FnMut(&[u8])) -> Result<u64, String> {
+    let reader = open_mpa(path, format)?;
     let track = reader.default_track().ok_or("no audio track")?.clone();
-    let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &DecoderOptions { verify: false })
-        .map_err(|e| format!("cannot create decoder: {e}"))?;
-    let mut frames = 0u64;
-    let mut out: Vec<u8> = Vec::with_capacity(1 << 14);
-    let mut sample_buf: Option<SampleBuffer<i16>> = None;
-    loop {
-        if cancel.load(Ordering::Relaxed) {
-            return Err("cancelled".into());
+    decode_track(reader, &track, None, cancel, sink)
+}
+
+/// An M4A or MKA file, with its first audio track this version can decode.
+fn open_container(
+    path: &Path,
+    format: Format,
+) -> Result<(Box<dyn symphonia::core::formats::FormatReader>, symphonia::core::formats::Track, Codec), String> {
+    let file = File::open(path).map_err(io_err)?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    hint.with_extension(if format == Format::M4a { "m4a" } else { "mka" });
+    let options = FormatOptions { enable_gapless: true, ..Default::default() };
+    let reader = symphonia::default::get_probe()
+        .format(&hint, mss, &options, &MetadataOptions::default())
+        .map_err(|e| format!("cannot open {} file: {e}", format.name()))?
+        .format;
+    let found = reader.tracks().iter().find_map(|t| Codec::from_type(t.codec_params.codec).map(|c| (t.clone(), c)));
+    match found {
+        Some((mut track, codec)) => {
+            let p = &mut track.codec_params;
+            if codec == Codec::Alac {
+                // The sample entry holds the rate as 16.16 fixed point (96 kHz does not fit):
+                // the ALAC "magic cookie" has it whole, at offset 20.
+                if let Some(rate) = p.extra_data.as_ref().and_then(|c| c.get(20..24)).map(|b| u32::from_be_bytes(b.try_into().unwrap())) {
+                    p.with_sample_rate(rate);
+                }
+            }
+            if codec == Codec::Pcm && p.max_frames_per_packet.is_none() {
+                // Matroska does not give it; 2 seconds is far more than any block holds.
+                let rate = p.sample_rate.unwrap_or(48000) as u64;
+                p.with_max_frames_per_packet(2 * rate);
+            }
+            Ok((reader, track, codec))
         }
-        let packet = match reader.next_packet() {
-            Ok(p) => p,
-            Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Err(e) => return Err(format!("read error: {e}")),
-        };
-        if packet.track_id() != track.id {
-            continue;
-        }
-        let decoded = decoder.decode(&packet).map_err(|e| format!("decoding error: {e}"))?;
-        let spec = *decoded.spec();
-        let channels = spec.channels.count();
-        if sample_buf.as_ref().map_or(true, |b| b.capacity() < decoded.capacity() * channels) {
-            sample_buf = Some(SampleBuffer::<i16>::new(decoded.capacity() as u64, spec));
-        }
-        let buf = sample_buf.as_mut().unwrap();
-        buf.copy_interleaved_ref(decoded);
-        out.clear();
-        for &s in buf.samples() {
-            out.extend_from_slice(&s.to_le_bytes());
-        }
-        frames += (buf.samples().len() / channels) as u64;
-        sink(&out);
+        None => Err(match mka_codec_id(path) {
+            Some(id) => format!("{} audio is not supported yet", mka_codec_name(&id)),
+            None => "no audio track this version can decode".into(),
+        }),
     }
-    Ok(frames)
+}
+
+/// The bit depth a lossless codec decodes to; None for lossy codecs (decoded as 16-bit).
+fn container_bits(track: &symphonia::core::formats::Track, codec: Codec) -> Result<Option<u32>, String> {
+    if codec.lossy() {
+        return Ok(None);
+    }
+    let p = &track.codec_params;
+    let bits = match codec {
+        // The ALAC "magic cookie": frame length (4 bytes), version, bit depth.
+        Codec::Alac => p.extra_data.as_ref().and_then(|cookie| cookie.get(5)).map(|&b| b as u32),
+        _ => p.bits_per_sample.or_else(|| {
+            // FLAC in MKA: the decoder reads it from STREAMINFO.
+            symphonia::default::get_codecs().make(p, &DecoderOptions::default()).ok()?.codec_params().bits_per_sample
+        }),
+    };
+    bits.filter(|b| (8..=32).contains(b)).map(Some).ok_or_else(|| "unknown bit depth".into())
+}
+
+fn probe_container(path: &Path, format: Format) -> Result<AudioInfo, String> {
+    let (mut reader, track, codec) = open_container(path, format)?;
+    let bits = container_bits(&track, codec)?;
+    let p = &track.codec_params;
+    let rate = p.sample_rate.ok_or("unknown sample rate")?;
+    let channels = p.channels.map(|c| c.count() as u32).unwrap_or(2);
+    // The length in the container's own time units (MKA: milliseconds). Lossy codecs decode
+    // a little more (the encoder's delay and padding): see `length_ok`.
+    let samples = match (p.n_frames, p.time_base) {
+        (Some(n), Some(base)) => {
+            let t = base.calc_time(n);
+            ((t.seconds as f64 + t.frac) * rate as f64).round() as u64
+        }
+        _ => {
+            let mut n = 0u64;
+            while let Ok(packet) = reader.next_packet() {
+                if packet.track_id() == track.id {
+                    n += packet.dur;
+                }
+            }
+            n
+        }
+    };
+    Ok(AudioInfo { format, rate, bits: bits.unwrap_or(16), channels, samples, md5: None, float: false, codec: Some(codec) })
+}
+
+/// Whether `frames` decoded samples match the announced length. In an M4A or MKA, lossy
+/// codecs also decode the encoder's delay and padding (a few thousand samples); an MKA
+/// gives its length to the millisecond only.
+pub fn length_ok(info: &AudioInfo, frames: u64) -> bool {
+    if info.format.container() && info.lossy() {
+        frames + 4096 >= info.samples && frames <= info.samples + 8192
+    } else if info.format == Format::Mka {
+        frames.abs_diff(info.samples) <= info.rate as u64 / 1000 + 1
+    } else {
+        frames == info.samples
+    }
+}
+
+fn decode_container(path: &Path, format: Format, cancel: &AtomicBool, sink: impl FnMut(&[u8])) -> Result<u64, String> {
+    let (reader, track, codec) = open_container(path, format)?;
+    let bits = container_bits(&track, codec)?;
+    decode_track(reader, &track, bits, cancel, sink)
+}
+
+/// The codec ID of the first audio track of an MKA file ("A_AC3"), read from its first 64 KB.
+pub fn mka_codec_id(path: &Path) -> Option<String> {
+    let mut head = Vec::new();
+    File::open(path).ok()?.take(1 << 16).read_to_end(&mut head).ok()?;
+    // CodecID element: 0x86, a one-byte size, then the text.
+    head.windows(4).enumerate().find_map(|(i, w)| {
+        (w[0] == 0x86 && w[1] & 0x80 != 0 && &w[2..4] == b"A_").then(|| {
+            let len = (w[1] & 0x7f) as usize;
+            String::from_utf8_lossy(head.get(i + 2..i + 2 + len)?).into_owned().into()
+        })?
+    })
+}
+
+/// "A_AC3" -> "AC-3".
+pub fn mka_codec_name(id: &str) -> String {
+    match id {
+        "A_AC3" | "A_AC3/BSID9" | "A_AC3/BSID10" => "AC-3".into(),
+        "A_EAC3" => "E-AC-3".into(),
+        "A_DTS" | "A_DTS/EXPRESS" | "A_DTS/LOSSLESS" => "DTS".into(),
+        "A_TRUEHD" => "Dolby TrueHD".into(),
+        "A_OPUS" => "Opus".into(),
+        "A_ALAC" => "ALAC (in MKA)".into(),
+        "A_TTA1" => "TTA".into(),
+        "A_WAVPACK4" => "WavPack (in MKA)".into(),
+        other => other.trim_start_matches("A_").to_string(),
+    }
 }
 
 pub fn open_ape(path: &Path) -> Result<ape_decoder::ApeDecoder<BufReader<File>>, String> {
@@ -573,6 +779,7 @@ pub fn source_tags(path: &Path) -> Vec<(String, String)> {
     match Format::from_path(path) {
         Some(Format::Flac) => return flac_tags(path).unwrap_or_default(),
         Some(Format::Ape | Format::WavPack) => {}
+        Some(f @ (Format::M4a | Format::Mka)) => return container_tags(path, f),
         _ => return Vec::new(),
     }
     let Ok(mut file) = File::open(path) else { return Vec::new() };
@@ -584,6 +791,86 @@ pub fn source_tags(path: &Path) -> Vec<(String, String)> {
         .filter_map(|f| f.value_as_str().map(|v| (f.name.clone(), v.to_string())))
         .collect();
     ape_to_vorbis(&text)
+}
+
+/// The tags of an M4A (iTunes) or MKA file, under their Vorbis names.
+fn container_tags(path: &Path, format: Format) -> Vec<(String, String)> {
+    use symphonia::core::meta::StandardTagKey as K;
+    if format == Format::Mka {
+        return mka_tags(path);
+    }
+    let Ok((mut reader, _, _)) = open_container(path, format) else { return Vec::new() };
+    let Some(revision) = reader.metadata().skip_to_latest().cloned() else { return Vec::new() };
+    revision
+        .tags()
+        .iter()
+        .filter_map(|tag| {
+            let name = match tag.std_key? {
+                K::Artist => "ARTIST",
+                K::AlbumArtist => "ALBUMARTIST",
+                K::Album => "ALBUM",
+                K::TrackTitle => "TITLE",
+                K::TrackNumber => "TRACKNUMBER",
+                K::DiscNumber => "DISCNUMBER",
+                K::Date | K::ReleaseDate => "DATE",
+                K::Genre => "GENRE",
+                K::Comment => "COMMENT",
+                _ => return None,
+            };
+            Some((name.to_string(), tag.value.to_string()))
+        })
+        .collect()
+}
+
+/// The SimpleTag elements of an MKA file (name 0x45A3, text 0x4487), found in its first and
+/// last 256 KB, where muxers put them.
+fn mka_tags(path: &Path) -> Vec<(String, String)> {
+    const KEEP: [&str; 8] = ["ARTIST", "ALBUMARTIST", "ALBUM", "TITLE", "TRACKNUMBER", "DATE", "GENRE", "COMMENT"];
+    let Ok(mut file) = File::open(path) else { return Vec::new() };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut data = Vec::new();
+    let _ = file.by_ref().take(1 << 18).read_to_end(&mut data);
+    if len > 1 << 19 && file.seek(SeekFrom::Start(len - (1 << 18))).is_ok() {
+        let _ = file.read_to_end(&mut data);
+    }
+    // An EBML element: its ID, a size (vint), then the data.
+    let element = |at: usize, id: &[u8]| -> Option<(String, usize)> {
+        let rest = data.get(at..)?.strip_prefix(id)?;
+        let first = *rest.first()?;
+        let width = first.leading_zeros() as usize + 1;
+        if width > 8 {
+            return None;
+        }
+        let size = rest.get(1..width)?.iter().fold((first as u64) & (0xff >> width), |acc, &b| (acc << 8) | b as u64) as usize;
+        let start = at + id.len() + width;
+        Some((String::from_utf8_lossy(data.get(start..start + size)?).into_owned(), start + size))
+    };
+    let mut tags: Vec<(String, String)> = Vec::new();
+    let mut at = 0;
+    while let Some(found) = data.get(at..).and_then(|d| d.windows(2).position(|w| w == [0x45, 0xA3])) {
+        at += found;
+        if let Some((name, next)) = element(at, &[0x45, 0xA3]) {
+            if let Some((value, _)) = element(next, &[0x44, 0x87]) {
+                let name = match name.to_ascii_uppercase().as_str() {
+                    "PART_NUMBER" => "TRACKNUMBER".to_string(),
+                    "DATE_RECORDED" | "DATE_RELEASED" => "DATE".to_string(),
+                    other => other.to_string(),
+                };
+                if KEEP.contains(&name.as_str()) && !tags.iter().any(|(n, _)| *n == name) {
+                    tags.push((name, value));
+                }
+            }
+        }
+        at += 2;
+    }
+    // The title can be the segment's own (Info > Title, 0x7BA9) rather than a tag.
+    if !tags.iter().any(|(n, _)| n == "TITLE") {
+        let title = data.windows(2).position(|w| w == [0x7B, 0xA9]).and_then(|at| element(at, &[0x7B, 0xA9]));
+        if let Some((title, _)) = title.filter(|(t, _)| !t.trim().is_empty()) {
+            tags.push(("TITLE".into(), title));
+        }
+    }
+    tags
 }
 
 /// The VORBIS_COMMENT block of a FLAC file ("ARTIST", "Some name").
@@ -692,6 +979,12 @@ fn decode_ape(path: &Path, cancel: &AtomicBool, mut sink: impl FnMut(&[u8])) -> 
         let i = first.info();
         (i.is_big_endian, (i.bits_per_sample as usize).div_ceil(8), i.channels.max(1) as usize, i.total_frames)
     };
+    let (frame_len, rate, samples) = {
+        let i = first.info();
+        (i.blocks_per_frame as u64, i.sample_rate.max(1) as f64, i.total_samples)
+    };
+    // Frames that fail: the rest is still decoded (not passed on), to tell how much is lost.
+    let mut damaged: Vec<u32> = Vec::new();
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 8).min(total.max(1) as usize);
     let mut decoders = vec![first];
     for _ in 1..threads {
@@ -713,7 +1006,7 @@ fn decode_ape(path: &Path, cancel: &AtomicBool, mut sink: impl FnMut(&[u8])) -> 
                     scope.spawn(move || {
                         (start + t as u32..end)
                             .step_by(threads)
-                            .map(|f| (f, decoder.decode_frame(f).map_err(|e| format!("damaged data: {e}"))))
+                            .map(|f| (f, decoder.decode_frame(f).map_err(|e| e.to_string())))
                             .collect()
                     })
                 })
@@ -725,8 +1018,14 @@ fn decode_ape(path: &Path, cancel: &AtomicBool, mut sink: impl FnMut(&[u8])) -> 
         if frames.len() != (end - start) as usize {
             return Err("damaged data: a frame could not be decoded".into());
         }
-        for (_, frame) in frames {
-            let mut pcm = frame?;
+        for (f, frame) in frames {
+            let Ok(mut pcm) = frame else {
+                damaged.push(f);
+                continue;
+            };
+            if !damaged.is_empty() {
+                continue;
+            }
             if big_endian && width > 1 {
                 for sample in pcm.chunks_exact_mut(width) {
                     sample.reverse();
@@ -736,6 +1035,28 @@ fn decode_ape(path: &Path, cancel: &AtomicBool, mut sink: impl FnMut(&[u8])) -> 
             sink(&pcm);
         }
         start = end;
+    }
+    if let Some(&first_bad) = damaged.first() {
+        let at = |frame: u32| {
+            let t = ((frame as u64 * frame_len).min(samples)) as f64 / rate;
+            format!("{}:{:04.1}", (t / 60.0) as u64, t % 60.0)
+        };
+        let readable = total as usize - damaged.len();
+        return Err(if damaged.len() == 1 {
+            format!(
+                "damaged audio in frame {} of {total} ({} to {}): this part cannot be decoded; the other {readable} frames are readable",
+                first_bad + 1,
+                at(first_bad),
+                at(first_bad + 1)
+            )
+        } else {
+            format!(
+                "damaged audio in {} of {total} frames, the first from {} to {}: these parts cannot be decoded; the other {readable} frames are readable",
+                damaged.len(),
+                at(first_bad),
+                at(first_bad + 1)
+            )
+        });
     }
     Ok(bytes / (width * channels) as u64)
 }

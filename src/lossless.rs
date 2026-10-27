@@ -58,8 +58,8 @@ fn round_py(x: f64) -> usize {
 /// shows: the measures then only tell how much was cut.
 pub fn analyse(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<Verdict, String> {
     let mut verdict = analyse_signal(path, info, cancel)?;
-    if info.format.lossy() {
-        let name = info.format.name();
+    if info.lossy() {
+        let name = info.name();
         verdict.label = format!("Lossy ({name})");
         verdict.level = Level::Error;
         // The measured figures only ("cut 12.6 kHz, holes 4 dB"): the analysis's own doubts

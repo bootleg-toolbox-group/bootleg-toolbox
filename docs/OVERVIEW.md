@@ -40,7 +40,7 @@ Fifteen groups of tasks, all in one window and all from the same right-click men
 
 ## Supported formats
 
-All five lossless formats found in trading circles are read natively, as are MP3 and MP2; FLAC, WAV and MP3 are written.
+All five lossless formats found in trading circles are read natively, as are ALAC, MP3, MP2 and AAC, and the M4A and MKA containers; FLAC, WAV and MP3 are written.
 
 | Format | Read and check | Write | Notes |
 | --- | --- | --- | --- |
@@ -50,8 +50,10 @@ All five lossless formats found in trading circles are read natively, as are MP3
 | APE (Monkey's Audio) | Yes, version 3.95 and later | No | Decoded in parallel; APEv2 tags carried over to FLAC |
 | WavPack | Yes, lossless, 16 to 32-bit and float | No | Hybrid (lossy), DSD and multichannel files are refused with a clear message |
 | MP3, MP2 | Yes, gapless | MP3 only, 320 CBR and V0 | Always flagged as lossy; never converted to FLAC ("fake lossless") |
+| M4A (ALAC or AAC) | Yes, ALAC 16 to 32-bit, AAC-LC | No | ALAC converts to FLAC bit for bit; AAC is flagged as lossy; iTunes tags carried over |
+| MKA (Matroska audio) | Yes, with FLAC, PCM, AAC, MP2, MP3 or Vorbis inside | No | AC-3, DTS and Opus tracks are not decoded yet: the file is named with its codec; tags carried over |
 
-Older Monkey's Audio files (before 3.95, from the late 1990s) and hybrid WavPack files are rare; when one turns up, Bootleg Toolbox says exactly why it cannot read it.
+Older Monkey's Audio files (before 3.95, from the late 1990s), hybrid WavPack files and AC-3 audio in MKA files are not read yet; when one turns up, Bootleg Toolbox says exactly why it cannot read it.
 
 ## Features in detail
 
@@ -117,7 +119,7 @@ Torrent check answers the question every downloader has: is this show complete a
 Conversions keep the originals and verify every result before it is kept.
 
 - **To FLAC**, levels 0 to 8 (the level is remembered). Each file is written to a temporary ".part" file, decoded again and compared with the source audio (MD5 and sample count), and only then renamed. The audio is identical bit for bit (checked after every file), and so is the MD5 signature stored in the FLAC, so FFP files match those of any other encoder; only the compression differs slightly, so files come within 0.3% of the size the reference flac encoder would give.
-- **Tags carried over:** FLAC Vorbis comments, and APEv2 tags from APE and WavPack files (year, track and disc numbers, album artist).
+- **Tags carried over:** FLAC Vorbis comments, APEv2 tags from APE and WavPack files (year, track and disc numbers, album artist), iTunes tags from M4A files and Matroska tags from MKA files.
 - **To WAV** from any format, also verified.
 - **After a conversion to FLAC**, a window offers to move the converted originals to the trash, to remove the old .md5/.st5 files that list them, and to create the new FFP. Your choices are remembered.
 
@@ -157,12 +159,12 @@ Some recorders and editors write WAV files that older tools choke on. Clean WAV 
 - **Clean copies** go to a "WAV-cleaned" folder with a canonical 44-byte header (or the extensible header where it is required). Each copy is checked: its audio MD5 must match the original.
 - Float WAVs are left as they are: their header is already correct, and they have their own conversion path.
 
-### MP3 and MP2 files
+### Lossy files (MP3, MP2, AAC)
 
-MP3 and MP2 files can be added like any other show, mostly to recognise them for what they are.
+MP3 and MP2 files, and AAC in M4A or MKA files, can be added like any other show, mostly to recognise them for what they are.
 
-- Details, decode test, spectrogram, checksums and torrents work on them; decoding is gapless when the LAME header gives the encoder delay.
-- They are marked "Lossy file" and never called CD-ready. Lossless? gives a firm "Lossy (MP3)" verdict, with the measures for reference.
+- Details, decode test, spectrogram, checksums and torrents work on them; decoding is gapless when the LAME header gives the encoder delay (AAC files include the encoder delay, which only matters for joining tracks).
+- They are marked "Lossy file" and never called CD-ready. Lossless? gives a firm "Lossy (MP3)" or "Lossy (AAC)" verdict, with the measures for reference.
 - To FLAC is refused, since it would only make a "fake lossless" file. To WAV is allowed, for burning or editing.
 
 ### Lossless? (lossless origin check)
@@ -348,6 +350,7 @@ Bootleg Toolbox covers the everyday jobs TLH is used for and adds Linux, WavPack
 | Read FLAC, WAV, SHN, APE | Yes | Yes |
 | Read WavPack | No | Yes |
 | Read MP2, MP3 | Yes | Yes, gapless, always flagged as lossy |
+| Read M4A (ALAC, AAC) and MKA | No | Yes (AC-3 in MKA not yet) |
 | Read MKW | Yes | No |
 | 32-bit float WAV | Not described | Read; bit-exact or measured 24-bit conversion to FLAC |
 | Encode FLAC | Yes, through flac.exe | Yes, built in, verified after every file |
@@ -390,7 +393,7 @@ APE and SHN encoding, MKW and SKT were left out on purpose: these formats are no
 
 Bootleg Toolbox is free software by Rattlehead80, released under the GNU General Public License v3.0 or later: anyone may use, study, share and improve it, and improved versions stay open.
 
-- **Built with open-source components:** egui and eframe (interface), Symphonia (FLAC and WAV decoding), flacenc (FLAC encoding), ape-decoder (Monkey's Audio), wavicle (WavPack), LAME 3.100 (MP3), rustls (encrypted update check) and the Noto fonts, among others. Every component is under an OSI-approved open-source licence. The full list with licences is in the About window and in THIRD-PARTY.md in the source.
+- **Built with open-source components:** egui and eframe (interface), Symphonia (FLAC, MP3, AAC and ALAC decoding, M4A and MKA files), flacenc (FLAC encoding), ape-decoder (Monkey's Audio), wavicle (WavPack), LAME 3.100 (MP3), rustls (encrypted update check) and the Noto fonts, among others. Every component is under an OSI-approved open-source licence. The full list with licences is in the About window and in THIRD-PARTY.md in the source.
 - **The Shorten (SHN) decoder** was written for Bootleg Toolbox and checked bit for bit against ffmpeg.
 - **Not affiliated with Trader's Little Helper:** the two programs share no code.
 

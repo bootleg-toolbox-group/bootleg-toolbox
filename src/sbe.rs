@@ -74,7 +74,7 @@ pub fn write_track(
     if cut.end <= cut.start {
         return Err("the track is shorter than a CD sector once its boundaries are moved".into());
     }
-    let info = AudioInfo { format: Format::Flac, rate: 44100, bits: 16, channels: 2, samples: cut.frames(), md5: None, float: false };
+    let info = AudioInfo { format: Format::Flac, rate: 44100, bits: 16, channels: 2, samples: cut.frames(), md5: None, float: false, codec: None };
     encode::pcm_to_flac(out, &info, level, tags, cancel, |sink| {
         let mut offset = 0u64;
         for (path, len) in tracks {

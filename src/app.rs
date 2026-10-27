@@ -21,7 +21,7 @@ const AUTO_DETAILS_LIMIT: usize = 3000;
 const COMPONENTS: &[(&str, &str, &str)] = &[
     ("egui, eframe, egui_extras", "user interface", "MIT or Apache-2.0"),
     ("winit", "windows and input", "Apache-2.0"),
-    ("Symphonia", "FLAC and WAV decoding", "MPL-2.0"),
+    ("Symphonia", "FLAC, MP3, AAC and ALAC decoding; M4A and MKA files", "MPL-2.0"),
     ("flacenc", "FLAC encoding", "Apache-2.0"),
     ("ape-decoder", "Monkey's Audio (APE) decoding", "MIT or Apache-2.0"),
     ("wavicle", "WavPack decoding", "MIT or Apache-2.0"),
@@ -1169,7 +1169,7 @@ impl App {
                     }
                     if ui.add_enabled(!busy, egui::Button::new("Add files...")).clicked() {
                         ui.close_menu();
-                        if let Some(files) = rfd::FileDialog::new().add_filter("Audio", &["flac", "wav", "ape", "shn", "wv", "mp3", "mp2"]).pick_files() {
+                        if let Some(files) = rfd::FileDialog::new().add_filter("Audio", &["flac", "wav", "ape", "shn", "wv", "mp3", "mp2", "m4a", "mka"]).pick_files() {
                             self.add_paths(files, true);
                         }
                     }
@@ -1291,7 +1291,7 @@ impl App {
                         }
                         if ui.button("Add files...").clicked() {
                             ui.close_menu();
-                            if let Some(files) = rfd::FileDialog::new().add_filter("Audio", &["flac", "wav", "ape", "shn", "wv", "mp3", "mp2"]).pick_files() {
+                            if let Some(files) = rfd::FileDialog::new().add_filter("Audio", &["flac", "wav", "ape", "shn", "wv", "mp3", "mp2", "m4a", "mka"]).pick_files() {
                                 self.add_paths(files, true);
                             }
                         }
@@ -1518,6 +1518,8 @@ impl App {
             }
             let dragging = self.drag_select.is_some();
             let compact = self.opt.compact;
+            // Same windows taking the keys as for the shortcuts, plus the settings.
+            let keys_taken = ctx.wants_keyboard_input() || self.info_choice.is_some() || self.float_dialog.is_some() || self.settings.is_some();
             // A little air between columns fitted to their content.
             ui.spacing_mut().item_spacing.x = 16.0;
             egui::ScrollArea::horizontal().show(ui, |ui| {
@@ -1569,6 +1571,22 @@ impl App {
                         }
                         let (mut first_shown, mut last_shown) = (usize::MAX, 0usize);
                         let row_height = if compact { 18.0 } else { 20.0 };
+                        // Page Up / Page Down scroll by a screen (keeping one row in view), Home / End
+                        // go to the top / bottom of the list.
+                        if !keys_taken {
+                            let page = (visible.height() - row_height).max(row_height);
+                            let all = rows.len() as f32 * row_height + visible.height();
+                            let delta = ctx.input_mut(|i| {
+                                if i.consume_key(Modifiers::NONE, Key::PageDown) { -page }
+                                else if i.consume_key(Modifiers::NONE, Key::PageUp) { page }
+                                else if i.consume_key(Modifiers::NONE, Key::End) { -all }
+                                else if i.consume_key(Modifiers::NONE, Key::Home) { all }
+                                else { 0.0 }
+                            });
+                            if delta != 0.0 {
+                                body.ui_mut().scroll_with_delta(egui::vec2(0.0, delta));
+                            }
+                        }
                         body.rows(row_height, rows.len(), |mut row| {
                             let index = row.index();
                             first_shown = first_shown.min(index);
@@ -1782,7 +1800,7 @@ impl App {
                 Col::Length => responses.push(row.col(|ui| { ui.label(info.map(|i| i.length()).unwrap_or_default()); }).1),
                 Col::Rate => responses.push(row.col(|ui| { ui.label(info.map(|i| i.rate_label()).unwrap_or_default()); }).1),
                 Col::Bits => responses.push(row.col(|ui| {
-                    ui.label(info.map(|i| if i.format.lossy() { "-".to_string() } else { i.bits.to_string() }).unwrap_or_default());
+                    ui.label(info.map(|i| if i.lossy() { "-".to_string() } else { i.bits.to_string() }).unwrap_or_default());
                 }).1),
                 Col::Ch => responses.push(row.col(|ui| { ui.label(info.map(|i| i.channels.to_string()).unwrap_or_default()); }).1),
                 Col::Sbe => responses.push(row.col(|ui| {
@@ -2294,6 +2312,7 @@ impl App {
             let window_title = format!("{} - {}", report.heading, report.title);
             let builder = egui::ViewportBuilder::default()
                 .with_icon(app_icon())
+                .with_window_level(window_level(self.opt.always_on_top))
                 .with_title(&window_title)
                 .with_inner_size([760.0, 640.0])
                 .with_min_inner_size([420.0, 300.0]);
@@ -2416,6 +2435,7 @@ impl App {
             let window_title = format!("Media info - {title}");
             let builder = egui::ViewportBuilder::default()
                 .with_icon(app_icon())
+                .with_window_level(window_level(self.opt.always_on_top))
                 .with_title(&window_title)
                 .with_inner_size([720.0, 600.0])
                 .with_min_inner_size([420.0, 300.0]);
@@ -2480,6 +2500,7 @@ impl App {
             let id = egui::ViewportId::from_hash_of(("spectrogram", &spec.source));
             let builder = egui::ViewportBuilder::default()
                 .with_icon(app_icon())
+                .with_window_level(window_level(self.opt.always_on_top))
                 .with_title(&title)
                 .with_inner_size(size + egui::vec2(0.0, 44.0))
                 .with_min_inner_size([420.0, 280.0]);
@@ -2579,11 +2600,15 @@ fn tracker_entries(opt: &Options) -> Vec<(String, &'static str, Vec<Tracker>)> {
     entries
 }
 
-/// "320 kbps (CBR)" and "VBR V0" entries.
+/// "Always on top" also applies to the secondary windows (spectrograms, reports, media
+/// info), or they would open behind the main window.
+fn window_level(on_top: bool) -> egui::WindowLevel {
+    if on_top { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal }
+}
+
 /// "Always on top" (honoured by Windows and by X11 desktops; native Wayland has no such request).
 fn set_window_level(ctx: &egui::Context, on_top: bool) {
-    let level = if on_top { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal };
-    ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
+    ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(window_level(on_top)));
 }
 
 /// The content of a right-click menu, scrolling when it is taller than the window (egui

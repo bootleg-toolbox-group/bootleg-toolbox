@@ -177,7 +177,7 @@ fn draw(path: &Path, info: &AudioInfo, levels: &[f32]) -> Image {
     let float = if info.float { " float" } else { "" };
     let subtitle = format!(
         "{}, {}-bit{float}, {} kHz, {channels}, {}",
-        info.format.name(),
+        info.name(),
         info.bits,
         audio::trim_float(info.rate as f64 / 1000.0),
         info.length()

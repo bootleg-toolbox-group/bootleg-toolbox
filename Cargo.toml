@@ -14,7 +14,7 @@ winit = "0.30"
 # Without egui's default fonts (Ubuntu and Hack are not under OSI-approved licences): see fonts.rs.
 eframe = { version = "0.29", default-features = false, features = ["accesskit", "glow", "wayland", "x11", "persistence"] }
 egui_extras = "0.29"
-symphonia = { version = "0.5", default-features = false, features = ["flac", "wav", "pcm", "mp2", "mp3"] }
+symphonia = { version = "0.5", default-features = false, features = ["flac", "wav", "pcm", "mp2", "mp3", "aac", "alac", "vorbis", "isomp4", "mkv"] }
 md-5 = "0.10"
 crc32fast = "1"
 sha1 = "0.10"
@@ -52,3 +52,7 @@ strip = true
 
 [build-dependencies]
 winresource = "0.1"
+
+# ape-decoder with Monkey's Audio 3.95-3.98 support (older value coding), see vendor/ape-decoder.
+[patch.crates-io]
+ape-decoder = { path = "vendor/ape-decoder" }

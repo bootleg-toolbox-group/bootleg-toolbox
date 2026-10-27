@@ -296,7 +296,7 @@ pub fn float_to_flac(source: &Path, out: &Path, level: u8, tags: &[(String, Stri
     let (lo, hi) = (-scale, scale - 1.0);
     let width = (bits / 8) as usize;
     let (mut clipped, mut max_diff) = (0u64, 0f64);
-    let flac_info = AudioInfo { format: Format::Flac, rate: info.rate, bits, channels: info.channels, samples: info.samples, md5: None, float: false };
+    let flac_info = AudioInfo { format: Format::Flac, rate: info.rate, bits, channels: info.channels, samples: info.samples, md5: None, float: false, codec: None };
     pcm_to_flac(out, &flac_info, level, tags, cancel, |sink| {
         let mut buf: Vec<u8> = Vec::with_capacity(1 << 16);
         float_samples(source, &info, cancel, |v| {

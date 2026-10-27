@@ -397,7 +397,7 @@ fn plural(count: usize, singular: &str, many: &str) -> String {
 // ---------------------------------------------------------------- Details
 
 const PROBLEMS: [(&str, &str, &str, &str); 5] = [
-    ("lossy", "Lossy file (MP3/MP2): not for lossless trading", "lossy track", "lossy tracks"),
+    ("lossy", "Lossy file (MP3, AAC...): not for lossless trading", "lossy track", "lossy tracks"),
     ("empty", "Empty or truncated: no audio samples", "empty track", "empty tracks"),
     ("gap", "Gap risk if burned: SBE before the last track", "track with gap risk", "tracks with gap risk"),
     ("no_md5", "No MD5 in header: FFP will be zeros, re-encode", "track without MD5", "tracks without MD5"),
@@ -410,8 +410,8 @@ fn problem(key: &str) -> (&'static str, &'static str, &'static str) {
 }
 
 pub fn quality_label(info: &AudioInfo) -> String {
-    if info.format.lossy() {
-        return format!("{} {} kHz (lossy)", info.format.name(), audio::trim_float(info.rate as f64 / 1000.0));
+    if info.lossy() {
+        return format!("{} {} kHz (lossy)", info.name(), audio::trim_float(info.rate as f64 / 1000.0));
     }
     let mut label = if info.is_cd() {
         "CD-ready".to_string()
@@ -425,7 +425,7 @@ pub fn quality_label(info: &AudioInfo) -> String {
     };
     if info.format != Format::Flac {
         label.push(' ');
-        label.push_str(info.format.name());
+        label.push_str(info.name());
     }
     label
 }
@@ -442,13 +442,13 @@ fn channel_name(count: u32) -> String {
 pub fn describe_details(info: &AudioInfo, last_of_disc: bool) -> (String, String, Level, Vec<&'static str>) {
     let mut checks: Vec<(Option<bool>, String)> = Vec::new();
     let mut problems = Vec::new();
-    checks.push((Some(true), format!("Header readable ({} file)", info.format.name())));
-    let quality = if info.format.lossy() {
-        format!("{} (lossy), {}, {}", info.format.name(), info.rate_label(), channel_name(info.channels))
+    checks.push((Some(true), format!("Header readable ({} file)", info.name())));
+    let quality = if info.lossy() {
+        format!("{} (lossy), {}, {}", info.name(), info.rate_label(), channel_name(info.channels))
     } else {
         format!("{}-bit, {}, {}", info.bits, info.rate_label(), channel_name(info.channels))
     };
-    if info.format.lossy() {
+    if info.lossy() {
         problems.push("lossy");
     }
     checks.push((
@@ -631,11 +631,11 @@ fn st5_digest(path: &Path, cancel: &AtomicBool) -> Result<String, String> {
     if !format.supported() {
         return Err(format!("{} files are not supported yet", format.name()));
     }
-    let expected = audio::probe(path)?.samples;
+    let info = audio::probe(path)?;
     let (md5, frames) = audio::pcm_md5(path, cancel)?;
     // The FLAC reader skips damaged frames: never fingerprint incomplete audio.
-    if expected > 0 && frames != expected {
-        return Err(format!("damaged or truncated audio, only {frames} of {expected} samples decode"));
+    if info.samples > 0 && !audio::length_ok(&info, frames) {
+        return Err(format!("damaged or truncated audio, only {frames} of {} samples decode", info.samples));
     }
     Ok(hex(&md5))
 }
@@ -1003,8 +1003,8 @@ pub fn op_convert(ctx: &Ctx, files: &[PathBuf], target: Target, level: u8, round
             return Ok(None);
         }
         let info = audio::probe(path)?;
-        if target == Target::Flac && info.format.lossy() {
-            return Err(format!("{} is lossy: a FLAC made from it would be a fake lossless file", info.format.name()));
+        if target == Target::Flac && info.lossy() {
+            return Err(format!("{} is lossy: a FLAC made from it would be a fake lossless file", info.name()));
         }
         let float = target == Target::Flac && info.float;
         if float {
@@ -1063,7 +1063,8 @@ pub fn op_mp3(ctx: &Ctx, shows: &[Show], files: &[PathBuf], mode: crate::encode:
         let parent = if base.is_empty() { show.root.parent().map(Path::to_path_buf).unwrap_or_default() } else { PathBuf::from(base) };
         let out_root = parent.join(format!("{} [{tag}]", file_name(&show.root)));
         for f in show.files.iter().filter(|f| selected.contains(f)) {
-            if Format::from_path(f).is_some_and(Format::lossy) {
+            let lossy = Format::from_path(f).is_some_and(|fmt| fmt.lossy() || (fmt.container() && audio::probe(f).is_ok_and(|i| i.lossy())));
+            if lossy {
                 ctx.status(f, "Already lossy: no MP3 copy made", Level::Info, "");
                 continue;
             }
@@ -1492,7 +1493,7 @@ pub fn op_test(ctx: &Ctx, files: &[PathBuf]) -> String {
                 return Ok(Level::Error);
             }
         };
-        if info.samples > 0 && frames != info.samples {
+        if info.samples > 0 && !audio::length_ok(&info, frames) {
             let text = format!("Test FAILED: damaged or truncated audio, only {frames} of {} samples decode", info.samples);
             ctx.status(path, &text, Level::Error, "");
             ctx.log(format!("{}: {text}", path.display()), Level::Error);
