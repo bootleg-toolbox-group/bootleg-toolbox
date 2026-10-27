@@ -1241,7 +1241,13 @@ impl App {
                     if let Some(version) = self.newer_version.clone() {
                         if ui.button(RichText::new(format!("⬇ Download version {version}")).strong()).on_hover_text("Open the release page on GitHub").clicked() {
                             ui.close_menu();
-                            let _ = open::that(format!("{}/latest", crate::update::RELEASES));
+                            // Detached: the browser may take a while to start. The page address goes
+                            // to the log, to open by hand when no browser answers.
+                            let url = format!("{}/latest", crate::update::RELEASES);
+                            match open::that_detached(&url) {
+                                Ok(()) => self.log(format!("Opening the release page in the web browser: {url}"), Level::Info),
+                                Err(e) => self.log(format!("Could not open the web browser ({e}). Release page: {url}"), Level::Error),
+                            }
                         }
                     }
                     if ui
