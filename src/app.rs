@@ -9,6 +9,9 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, Key, Modifiers, RichText};
 use egui_extras::{Column, TableBuilder};
+use winit::raw_window_handle::{
+    DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle, WindowHandle,
+};
 
 use crate::audio::{fmt_total, AudioInfo};
 use crate::files::{file_name, rel_posix, scan_paths, Show};
@@ -46,10 +49,10 @@ const COMPONENTS: &[(&str, &str, &str)] = &[
 
 const DVD_TIP: &str = "Pick a DVD folder (VIDEO_TS, or the folder above it) for a technical summary: video standard, resolution, aspect ratio, bit rates, audio tracks, subtitles, titles and chapters. Dropping a DVD folder on the window does the same.";
 
-/// The name a DVD is known by: the folder above VIDEO_TS, else its own name.
 /// The result of an update check: (asked from the Help menu, newer version or error).
 type UpdateCheck = (bool, Result<Option<String>, String>);
 
+/// The name a DVD is known by: the folder above VIDEO_TS, else its own name.
 fn dvd_name(path: &Path) -> String {
     match path.parent() {
         Some(parent) if file_name(path).eq_ignore_ascii_case("VIDEO_TS") => file_name(parent),
@@ -323,6 +326,10 @@ pub struct App {
     tag_dialog: Option<TagDialog>,
     /// The saved "Always on top" choice was applied to the window.
     window_level_set: bool,
+    /// A file dialog to open, and since when it waits for the window to leave the top.
+    dialog: Option<(Dialog, Instant)>,
+    /// The main window, parent of the file dialogs.
+    parent: Option<ParentWindow>,
     title: String,
     /// A context or menu-bar menu was open during the last frame (Escape closes it
     /// instead of clearing the selection).
@@ -493,6 +500,8 @@ impl App {
             info_choice: None,
             tag_dialog: None,
             window_level_set: false,
+            dialog: None,
+            parent: None,
             title: String::new(),
             menu_open: false,
             spectrograms: Vec::new(),
@@ -698,8 +707,91 @@ impl App {
         }
     }
 
+    /// Opens a file dialog at the start of a coming frame. An always-on-top window would
+    /// cover it (KDE shows it from another process, whatever its parent): the window
+    /// leaves the top first, for as long as the dialog is open.
+    fn ask(&mut self, dialog: Dialog) {
+        if self.dialog.is_none() {
+            self.dialog = Some((dialog, Instant::now()));
+        }
+    }
+
+    /// Always on top, except while a file dialog waits to open (secondary windows too).
+    fn on_top(&self) -> bool {
+        self.opt.always_on_top && self.dialog.is_none()
+    }
+
+    fn pending_dialog(&mut self, ctx: &egui::Context) {
+        let Some((_, since)) = &self.dialog else { return };
+        let on_top = self.opt.always_on_top;
+        if on_top && since.elapsed() < Duration::from_millis(150) {
+            // The window level changes when this frame ends; the dialog waits for it.
+            set_window_level(ctx, false);
+            ctx.request_repaint_after(Duration::from_millis(30));
+            return;
+        }
+        let Some((dialog, _)) = self.dialog.take() else { return };
+        match dialog {
+            Dialog::AddFolder => {
+                if let Some(dir) = file_dialog(self.parent).pick_folder() {
+                    self.add_paths(vec![dir], true);
+                }
+            }
+            Dialog::AddFiles => {
+                if let Some(files) = file_dialog(self.parent).add_filter("Audio", &["flac", "wav", "ape", "shn", "wv", "mp3", "mp2", "m4a", "mka"]).pick_files() {
+                    self.add_paths(files, true);
+                }
+            }
+            Dialog::Dvd => self.pick_dvd_now(),
+            Dialog::SaveLog => self.save_log_now(),
+            Dialog::TorrentCheck => {
+                let (shows, _) = self.selection();
+                let mut dialog = file_dialog(self.parent).add_filter("Torrent", &["torrent"]).set_title("Torrent to check against");
+                if let Some(dir) = shows.first().and_then(|s| s.root.parent()) {
+                    dialog = dialog.set_directory(dir);
+                }
+                if let Some(torrents) = dialog.pick_files() {
+                    self.run_on_selection(Op::TorrentCheck(torrents));
+                }
+            }
+            Dialog::Mp3Dir | Dialog::TorrentDir => {
+                if let (Some(dir), Some(draft)) = (file_dialog(self.parent).pick_folder(), self.settings.as_mut()) {
+                    let field = if matches!(dialog, Dialog::Mp3Dir) { &mut draft.mp3_dir } else { &mut draft.torrent_dir };
+                    *field = dir.display().to_string();
+                }
+            }
+            Dialog::SaveSpectrogram(source) => {
+                let stem = source.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                let mut dialog = file_dialog(self.parent)
+                    .set_title("Save spectrogram")
+                    .set_file_name(format!("{stem} - spectrogram.png"))
+                    .add_filter("PNG image", &["png"]);
+                if let Some(dir) = source.parent() {
+                    dialog = dialog.set_directory(dir);
+                }
+                if let Some(target) = dialog.save_file() {
+                    // The window may have been closed meanwhile.
+                    match self.spectrograms.iter().find(|s| s.source == source) {
+                        Some(spec) => match crate::spectrogram::save_png(&spec.image, &target) {
+                            Ok(()) => self.log(format!("Saved {}", target.display()), Level::Ok),
+                            Err(e) => self.log(format!("Cannot save {}: {e}", target.display()), Level::Error),
+                        },
+                        None => self.log("The spectrogram window was closed: nothing saved.", Level::Warn),
+                    }
+                }
+            }
+        }
+        if on_top {
+            set_window_level(ctx, true);
+        }
+    }
+
     fn pick_dvd(&mut self) {
-        if let Some(dir) = rfd::FileDialog::new().set_title("DVD folder (or the folder above VIDEO_TS)").pick_folder() {
+        self.ask(Dialog::Dvd);
+    }
+
+    fn pick_dvd_now(&mut self) {
+        if let Some(dir) = file_dialog(self.parent).set_title("DVD folder (or the folder above VIDEO_TS)").pick_folder() {
             if crate::dvd::find(&dir).is_empty() {
                 self.flash("No DVD in this folder (no VOB or IFO file).");
             } else {
@@ -1327,7 +1419,11 @@ impl App {
     }
 
     fn save_log(&mut self) {
-        if let Some(path) = rfd::FileDialog::new().set_file_name("bootleg-toolbox.log").save_file() {
+        self.ask(Dialog::SaveLog);
+    }
+
+    fn save_log_now(&mut self) {
+        if let Some(path) = file_dialog(self.parent).set_file_name("bootleg-toolbox.log").save_file() {
             let text: String = self.log.iter().map(|(t, _)| format!("{t}\n")).collect();
             if let Err(e) = std::fs::write(&path, text) {
                 self.log(format!("Cannot save the log: {e}"), Level::Error);
@@ -1348,15 +1444,11 @@ impl App {
                     menu_open = true;
                     if ui.add_enabled(!busy, egui::Button::new("Add folder...")).clicked() {
                         ui.close_menu();
-                        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                            self.add_paths(vec![dir], true);
-                        }
+                        self.ask(Dialog::AddFolder);
                     }
                     if ui.add_enabled(!busy, egui::Button::new("Add files...")).clicked() {
                         ui.close_menu();
-                        if let Some(files) = rfd::FileDialog::new().add_filter("Audio", &["flac", "wav", "ape", "shn", "wv", "mp3", "mp2", "m4a", "mka"]).pick_files() {
-                            self.add_paths(files, true);
-                        }
+                        self.ask(Dialog::AddFiles);
                     }
                     if ui.add_enabled(!busy, egui::Button::new("DVD media info...")).on_hover_text(DVD_TIP).clicked() {
                         ui.close_menu();
@@ -1476,15 +1568,11 @@ impl App {
                         menu_open = true;
                         if ui.button("Add folder...").clicked() {
                             ui.close_menu();
-                            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                                self.add_paths(vec![dir], true);
-                            }
+                            self.ask(Dialog::AddFolder);
                         }
                         if ui.button("Add files...").clicked() {
                             ui.close_menu();
-                            if let Some(files) = rfd::FileDialog::new().add_filter("Audio", &["flac", "wav", "ape", "shn", "wv", "mp3", "mp2", "m4a", "mka"]).pick_files() {
-                                self.add_paths(files, true);
-                            }
+                            self.ask(Dialog::AddFiles);
                         }
                         if ui.button("📀 DVD media info...").on_hover_text(DVD_TIP).clicked() {
                             ui.close_menu();
@@ -2080,16 +2168,7 @@ impl App {
                 Action::CopyFfp => self.copy_ffp(ctx),
                 Action::CopyInfo => self.copy_info(ctx),
                 Action::TagInfo => self.open_tag_dialog(),
-                Action::TorrentCheck => {
-                    let (shows, _) = self.selection();
-                    let mut dialog = rfd::FileDialog::new().add_filter("Torrent", &["torrent"]).set_title("Torrent to check against");
-                    if let Some(dir) = shows.first().and_then(|s| s.root.parent()) {
-                        dialog = dialog.set_directory(dir);
-                    }
-                    if let Some(torrents) = dialog.pick_files() {
-                        self.run_on_selection(Op::TorrentCheck(torrents));
-                    }
-                }
+                Action::TorrentCheck => self.ask(Dialog::TorrentCheck),
                 Action::Remove => self.remove_selected(),
                 Action::ToggleColumn(col) => {
                     self.fit_columns = true;
@@ -2229,9 +2308,7 @@ impl App {
                     ui.horizontal(|ui| {
                         ui.add(egui::TextEdit::singleline(&mut draft.mp3_dir).hint_text("Next to the show folder").desired_width(320.0));
                         if ui.button("...").clicked() {
-                            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                                draft.mp3_dir = dir.display().to_string();
-                            }
+                            self.ask(Dialog::Mp3Dir);
                         }
                     });
                     ui.end_row();
@@ -2249,9 +2326,7 @@ impl App {
                     ui.horizontal(|ui| {
                         ui.add(egui::TextEdit::singleline(&mut draft.torrent_dir).hint_text("Next to the show folder").desired_width(320.0));
                         if ui.button("...").clicked() {
-                            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                                draft.torrent_dir = dir.display().to_string();
-                            }
+                            self.ask(Dialog::TorrentDir);
                         }
                     });
                     ui.end_row();
@@ -2512,7 +2587,7 @@ impl App {
             let window_title = format!("{} - {}", report.heading, report.title);
             let builder = egui::ViewportBuilder::default()
                 .with_icon(app_icon())
-                .with_window_level(window_level(self.opt.always_on_top))
+                .with_window_level(window_level(self.on_top()))
                 .with_title(&window_title)
                 .with_inner_size([760.0, 640.0])
                 .with_min_inner_size([420.0, 300.0]);
@@ -2635,7 +2710,7 @@ impl App {
             let window_title = format!("Media info - {title}");
             let builder = egui::ViewportBuilder::default()
                 .with_icon(app_icon())
-                .with_window_level(window_level(self.opt.always_on_top))
+                .with_window_level(window_level(self.on_top()))
                 .with_title(&window_title)
                 .with_inner_size([720.0, 600.0])
                 .with_min_inner_size([420.0, 300.0]);
@@ -2682,6 +2757,7 @@ impl App {
 
     /// Each spectrogram is a separate system window, free to leave the main one.
     fn spectrogram_windows(&mut self, ctx: &egui::Context) {
+        let level = window_level(self.on_top());
         let mut closed = Vec::new();
         let mut saved = Vec::new();
         let mut copied = Vec::new();
@@ -2700,7 +2776,7 @@ impl App {
             let id = egui::ViewportId::from_hash_of(("spectrogram", &spec.source));
             let builder = egui::ViewportBuilder::default()
                 .with_icon(app_icon())
-                .with_window_level(window_level(self.opt.always_on_top))
+                .with_window_level(level)
                 .with_title(&title)
                 .with_inner_size(size + egui::vec2(0.0, 44.0))
                 .with_min_inner_size([420.0, 280.0]);
@@ -2765,22 +2841,8 @@ impl App {
                 Err(e) => self.log(format!("Cannot copy the spectrogram: {e}"), Level::Error),
             }
         }
-        for index in saved {
-            let spec = &self.spectrograms[index];
-            let stem = spec.source.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-            let mut dialog = rfd::FileDialog::new()
-                .set_title("Save spectrogram")
-                .set_file_name(format!("{stem} - spectrogram.png"))
-                .add_filter("PNG image", &["png"]);
-            if let Some(dir) = spec.source.parent() {
-                dialog = dialog.set_directory(dir);
-            }
-            if let Some(target) = dialog.save_file() {
-                match crate::spectrogram::save_png(&spec.image, &target) {
-                    Ok(()) => self.log(format!("Saved {}", target.display()), Level::Ok),
-                    Err(e) => self.log(format!("Cannot save {}: {e}", target.display()), Level::Error),
-                }
-            }
+        if let Some(&index) = saved.first() {
+            self.ask(Dialog::SaveSpectrogram(self.spectrograms[index].source.clone()));
         }
         closed.sort_unstable();
         closed.dedup();
@@ -2802,6 +2864,54 @@ fn tracker_entries(opt: &Options) -> Vec<(String, &'static str, Vec<Tracker>)> {
 
 /// "Always on top" also applies to the secondary windows (spectrograms, reports, media
 /// info), or they would open behind the main window.
+/// The file dialogs, opened through `App::ask`.
+enum Dialog {
+    AddFolder,
+    AddFiles,
+    Dvd,
+    SaveLog,
+    TorrentCheck,
+    Mp3Dir,
+    TorrentDir,
+    /// The spectrogram of this file.
+    SaveSpectrogram(PathBuf),
+}
+
+/// The main window's native handles. Given to the file dialogs as their parent, so that
+/// they open above the window, even when it is always on top.
+#[derive(Clone, Copy)]
+struct ParentWindow {
+    window: RawWindowHandle,
+    display: RawDisplayHandle,
+}
+
+impl ParentWindow {
+    fn of(frame: &eframe::Frame) -> Option<Self> {
+        Some(ParentWindow { window: frame.window_handle().ok()?.as_raw(), display: frame.display_handle().ok()?.as_raw() })
+    }
+}
+
+// SAFETY (both): the main window and its display connection live as long as the program.
+impl HasWindowHandle for ParentWindow {
+    fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+        Ok(unsafe { WindowHandle::borrow_raw(self.window) })
+    }
+}
+
+impl HasDisplayHandle for ParentWindow {
+    fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
+        Ok(unsafe { DisplayHandle::borrow_raw(self.display) })
+    }
+}
+
+/// A file dialog that belongs to the main window.
+fn file_dialog(parent: Option<ParentWindow>) -> rfd::FileDialog {
+    match parent {
+        Some(p) => rfd::FileDialog::new().set_parent(&p),
+        None => rfd::FileDialog::new(),
+    }
+}
+
 fn window_level(on_top: bool) -> egui::WindowLevel {
     if on_top { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal }
 }
@@ -3000,7 +3110,11 @@ fn torrent_menu(ui: &mut egui::Ui, trackers: &[(String, &'static str, Vec<Tracke
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if self.parent.is_none() {
+            self.parent = ParentWindow::of(frame);
+        }
+        self.pending_dialog(ctx);
         // The saved "Always on top" choice, once the window exists.
         if !self.window_level_set {
             self.window_level_set = true;

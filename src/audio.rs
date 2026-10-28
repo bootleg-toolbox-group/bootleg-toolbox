@@ -968,14 +968,14 @@ fn ape_to_vorbis(items: &[(String, String)]) -> Vec<(String, String)> {
     out
 }
 
+/// A decoded APE frame: its index and its PCM bytes (or the error).
+type DecodedFrame = (u32, Result<Vec<u8>, String>);
+
 /// Monkey's Audio: decoded frame by frame (each frame's CRC is checked), as in a WAV
 /// data chunk (little-endian; files made from AIFF are big-endian and get swapped).
 /// Monkey's Audio frames decode independently, and the stronger modes are slow (about
 /// twice the time of FLAC per frame on one core): the frames of a batch are shared out
 /// between one decoder per thread, then handed to `sink` in order.
-/// A decoded APE frame: its index and its PCM bytes (or the error).
-type DecodedFrame = (u32, Result<Vec<u8>, String>);
-
 fn decode_ape(path: &Path, cancel: &AtomicBool, mut sink: impl FnMut(&[u8])) -> Result<u64, String> {
     let first = open_ape(path)?;
     let (big_endian, width, channels, total) = {
