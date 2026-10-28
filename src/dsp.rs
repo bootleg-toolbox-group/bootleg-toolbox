@@ -26,6 +26,8 @@ impl Fft {
         Fft { rev, twiddles }
     }
 
+    // A transform always has a size: no is_empty.
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.rev.len()
     }

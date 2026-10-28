@@ -1,29 +1,7 @@
 // No console window behind the GUI on Windows.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-mod app;
-mod audio;
-mod dsp;
-mod encode;
-mod dvd;
-mod files;
-mod fonts;
-mod help;
-mod integration;
-mod lossless;
-mod aactrace;
-mod mp3trace;
-mod mediainfo;
-mod ops;
-mod report;
-mod sbe;
-mod torrent_check;
-mod update;
-mod shn;
-mod speed;
-mod wv;
-mod spectrogram;
-mod tagging;
+use bootleg_toolbox::*;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -148,7 +126,7 @@ fn run_cli(args: &[String]) -> i32 {
             None => return 0,
         },
         // .torrent files among the paths, checked against the folders (or the folders next to them).
-        "torrent-check" => Op::TorrentCheck(args[1..].iter().map(PathBuf::from).filter(|p| crate::files::ext_lower(p) == "torrent").collect()),
+        "torrent-check" => Op::TorrentCheck(args[1..].iter().map(PathBuf::from).filter(|p| bootleg_toolbox::files::ext_lower(p) == "torrent").collect()),
         // DVDs (VIDEO_TS folders, VOB files) found in the paths as well as the audio files.
         "media-info" => Op::MediaInfo(args[1..].iter().flat_map(|p| dvd::find(Path::new(p))).collect()),
         other => {
