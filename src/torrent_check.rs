@@ -110,7 +110,7 @@ pub fn read(path: &Path) -> Result<Torrent, String> {
         _ => return Err("the torrent has no piece length".into()),
     };
     let pieces = match info.get(b"pieces".as_slice()) {
-        Some((Value::Bytes(b), _)) if b.len() % 20 == 0 => b.chunks_exact(20).map(|c| c.try_into().unwrap()).collect(),
+        Some((Value::Bytes(b), _)) if b.len() % 20 == 0 => b.as_chunks::<20>().0.to_vec(),
         _ => return Err("the torrent has no piece hashes".into()),
     };
     let (files, single_file) = match (info.get(b"files".as_slice()), info.get(b"length".as_slice())) {

@@ -47,6 +47,9 @@ const COMPONENTS: &[(&str, &str, &str)] = &[
 const DVD_TIP: &str = "Pick a DVD folder (VIDEO_TS, or the folder above it) for a technical summary: video standard, resolution, aspect ratio, bit rates, audio tracks, subtitles, titles and chapters. Dropping a DVD folder on the window does the same.";
 
 /// The name a DVD is known by: the folder above VIDEO_TS, else its own name.
+/// The result of an update check: (asked from the Help menu, newer version or error).
+type UpdateCheck = (bool, Result<Option<String>, String>);
+
 fn dvd_name(path: &Path) -> String {
     match path.parent() {
         Some(parent) if file_name(path).eq_ignore_ascii_case("VIDEO_TS") => file_name(parent),
@@ -346,7 +349,7 @@ pub struct App {
     after_flac: Option<AfterFlac>,
     clipboard: Option<arboard::Clipboard>,
     /// A running update check: (asked from the Help menu, result).
-    update_check: Option<mpsc::Receiver<(bool, Result<Option<String>, String>)>>,
+    update_check: Option<mpsc::Receiver<UpdateCheck>>,
     /// A newer version found on GitHub.
     newer_version: Option<String>,
 }
@@ -1959,7 +1962,7 @@ impl App {
                         .filter(|&fi| self.info.get(&show.files[fi]).and_then(|i| i.sbe()) == Some(true))
                         .count();
                     if sbe > 0 {
-                        ui.label(colored(&sbe.to_string(), Level::Warn))
+                        ui.label(colored(sbe.to_string(), Level::Warn))
                             .on_hover_text(format!("{sbe} track(s) with a sector boundary error before the last track of a disc: Fix SBE corrects them"));
                     }
                 }).1),

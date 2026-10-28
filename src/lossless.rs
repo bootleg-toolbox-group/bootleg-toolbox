@@ -183,7 +183,7 @@ fn analyse_signal(path: &Path, info: &AudioInfo, aac_check: bool, cancel: &Atomi
                 for (p, f) in power.iter_mut().zip(&frame_power) {
                     *p += f;
                 }
-                if frames % stride == 0 {
+                if frames.is_multiple_of(stride) {
                     for b in kept_lo..kept_hi {
                         kept.push((frame_power[b * band..(b + 1) * band].iter().sum::<f64>() / band as f64) as f32);
                     }
@@ -389,7 +389,7 @@ fn analyse_signal(path: &Path, info: &AudioInfo, aac_check: bool, cancel: &Atomi
     // "Digital silence": the rounding noise of 16-bit audio, per bin. Hiss from an analog
     // source stays well above it; a decoded MP3/AAC falls to it (or below, in 24-bit).
     let quant_bits = 16;
-    let lsb = 10.0 * ((2f64.powi(1 - quant_bits as i32)).powi(2) / 12.0 * window.iter().map(|w| w * w).sum::<f64>()).log10();
+    let lsb = 10.0 * ((2f64.powi(1 - quant_bits)).powi(2) / 12.0 * window.iter().map(|w| w * w).sum::<f64>()).log10();
     let traces = cutoff.map(|c| {
         let reference_band = series(c - 3000.0, c - 1500.0);
         let below: Vec<f64> = series(c - 800.0, c - 200.0).iter().zip(&reference_band).map(|(b, r)| b - r).collect();

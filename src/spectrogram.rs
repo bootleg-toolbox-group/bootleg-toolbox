@@ -273,8 +273,8 @@ impl Canvas {
         }
         let i = (y as usize * self.width + x as usize) * 4;
         let a = alpha.clamp(0.0, 1.0);
-        for k in 0..3 {
-            self.rgba[i + k] = (self.rgba[i + k] as f32 * (1.0 - a) + c[k] as f32 * a).round() as u8;
+        for (k, &ck) in c.iter().enumerate() {
+            self.rgba[i + k] = (self.rgba[i + k] as f32 * (1.0 - a) + ck as f32 * a).round() as u8;
         }
     }
 

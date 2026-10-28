@@ -157,6 +157,9 @@ pub fn find(path: &Path) -> Vec<PathBuf> {
 
 // ---------------------------------------------------------------- reading a DVD
 
+/// The files of a title set: IFO, BUP, title VOBs.
+type SetFiles = (Option<PathBuf>, Option<PathBuf>, Vec<PathBuf>);
+
 pub fn read(root: &Path) -> Result<Dvd, String> {
     let named = |p: &Path| file_name(p).eq_ignore_ascii_case("VIDEO_TS");
     let name = match root.parent() {
@@ -177,7 +180,7 @@ pub fn read(root: &Path) -> Result<Dvd, String> {
 
     // VTS_nn_0.IFO (or .BUP), VTS_nn_k.VOB (k = 0: menu, 1-9: title).
     let re = regex::Regex::new(r"(?i)^VTS_(\d\d)_(\d)\.(VOB|IFO|BUP)$").unwrap();
-    let mut by_set: BTreeMap<u32, (Option<PathBuf>, Option<PathBuf>, Vec<PathBuf>)> = BTreeMap::new();
+    let mut by_set: BTreeMap<u32, SetFiles> = BTreeMap::new();
     let mut loose = Vec::new();
     for f in &files {
         let fname = file_name(f);
@@ -197,7 +200,7 @@ pub fn read(root: &Path) -> Result<Dvd, String> {
     }
     let mut sets = Vec::new();
     for (number, (ifo, bup, vobs)) in by_set {
-        let ifo = ifo.or(bup).map(|p| read_ifo(&p).or_else(|e| Err(format!("{}: {e}", file_name(&p)))));
+        let ifo = ifo.or(bup).map(|p| read_ifo(&p).map_err(|e| format!("{}: {e}", file_name(&p))));
         // A title set with no title VOB is only a menu; it has nothing to show.
         if vobs.is_empty() {
             continue;

@@ -535,6 +535,9 @@ fn last_of_each_disc(shows: &[Show]) -> HashSet<PathBuf> {
     last.into_values().collect()
 }
 
+/// Details of a file: header, problems, summary text, level.
+type DetailsResult<'a> = (Option<AudioInfo>, Vec<&'a str>, String, Level);
+
 pub fn op_details(ctx: &Ctx, shows: &[Show], files: &[PathBuf], verbose: bool) -> String {
     ctx.add_total(files.len());
     let last = last_of_each_disc(shows);
@@ -554,7 +557,7 @@ pub fn op_details(ctx: &Ctx, shows: &[Show], files: &[PathBuf], verbose: bool) -
         }
         Ok((Some(info), problems, text, level))
     });
-    let by_path: HashMap<&PathBuf, &(Option<AudioInfo>, Vec<&str>, String, Level)> =
+    let by_path: HashMap<&PathBuf, &DetailsResult> =
         files.iter().zip(results.iter()).filter_map(|(p, r)| r.as_ref().map(|r| (p, r))).collect();
 
     let selected: HashSet<&PathBuf> = files.iter().collect();
@@ -650,6 +653,9 @@ fn st5_digest(path: &Path, cancel: &AtomicBool) -> Result<String, String> {
     Ok(hex(&md5))
 }
 
+/// A verify result for one file: (checksum file, word, level).
+type Mark<'a> = (String, &'a str, Level);
+
 pub fn op_verify(ctx: &Ctx, shows: &[Show]) -> String {
     let mut jobs = Vec::new();
     for show in shows {
@@ -690,7 +696,7 @@ pub fn op_verify(ctx: &Ctx, shows: &[Show]) -> String {
         }
     }
     ctx.add_total(jobs.len());
-    let marks: Mutex<HashMap<PathBuf, Vec<(String, &str, Level)>>> = Mutex::new(HashMap::new());
+    let marks: Mutex<HashMap<PathBuf, Vec<Mark>>> = Mutex::new(HashMap::new());
     let record = |job: &VerifyJob, word: &'static str, level: Level| {
         let Some(target) = &job.target else { return };
         let mut marks = marks.lock().unwrap();
@@ -914,7 +920,7 @@ pub fn op_lossless(ctx: &Ctx, shows: &[Show], files: &[PathBuf]) -> String {
                 None => counts.push((key, 1)),
             }
         }
-        counts.sort_by(|a, b| b.1.cmp(&a.1));
+        counts.sort_by_key(|a| std::cmp::Reverse(a.1));
         let text = counts.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", ");
         let flagged: usize =
             counts.iter().filter(|(k, _)| !["Lossless", "FM broadcast", crate::lossless::FM_15K, "Unclear", "Silent"].contains(&k.as_str())).map(|(_, n)| n).sum();
@@ -1094,7 +1100,7 @@ pub fn op_mp3(ctx: &Ctx, shows: &[Show], files: &[PathBuf], mode: crate::encode:
     let results = par_map(ctx, &jobs, |(_, p, _)| p.clone(), |(root, path, out)| {
         let out_root = &out_roots[root];
         if out.exists() {
-            ctx.status(path, format!("Skipped: {} already exists in {}", file_name(&out), file_name(out_root)), Level::Warn, "");
+            ctx.status(path, format!("Skipped: {} already exists in {}", file_name(out), file_name(out_root)), Level::Warn, "");
             return Ok(false);
         }
         crate::encode::check_mp3(&audio::probe(path)?)?;

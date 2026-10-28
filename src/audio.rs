@@ -169,7 +169,7 @@ impl AudioInfo {
 
     /// Some(true/false) for CD audio, None when the notion does not apply.
     pub fn sbe(&self) -> Option<bool> {
-        self.is_cd().then(|| self.samples % 588 != 0)
+        self.is_cd().then_some(!self.samples.is_multiple_of(588))
     }
 
     pub fn md5_set(&self) -> Option<bool> {
@@ -565,7 +565,7 @@ fn decode_track(
         let needed = decoded.capacity();
         out.clear();
         let samples = if bits.is_some() {
-            if wide.as_ref().map_or(true, |b| b.capacity() < needed * channels) {
+            if wide.as_ref().is_none_or(|b| b.capacity() < needed * channels) {
                 wide = Some(SampleBuffer::<i32>::new(needed as u64, spec));
             }
             let buf = wide.as_mut().unwrap();
@@ -575,7 +575,7 @@ fn decode_track(
             }
             buf.samples().len()
         } else {
-            if narrow.as_ref().map_or(true, |b| b.capacity() < needed * channels) {
+            if narrow.as_ref().is_none_or(|b| b.capacity() < needed * channels) {
                 narrow = Some(SampleBuffer::<i16>::new(needed as u64, spec));
             }
             let buf = narrow.as_mut().unwrap();
@@ -973,6 +973,9 @@ fn ape_to_vorbis(items: &[(String, String)]) -> Vec<(String, String)> {
 /// Monkey's Audio frames decode independently, and the stronger modes are slow (about
 /// twice the time of FLAC per frame on one core): the frames of a batch are shared out
 /// between one decoder per thread, then handed to `sink` in order.
+/// A decoded APE frame: its index and its PCM bytes (or the error).
+type DecodedFrame = (u32, Result<Vec<u8>, String>);
+
 fn decode_ape(path: &Path, cancel: &AtomicBool, mut sink: impl FnMut(&[u8])) -> Result<u64, String> {
     let first = open_ape(path)?;
     let (big_endian, width, channels, total) = {
@@ -998,7 +1001,7 @@ fn decode_ape(path: &Path, cancel: &AtomicBool, mut sink: impl FnMut(&[u8])) -> 
             return Err("cancelled".into());
         }
         let end = (start + batch).min(total);
-        let decoded: Vec<Vec<(u32, Result<Vec<u8>, String>)>> = std::thread::scope(|scope| {
+        let decoded: Vec<Vec<DecodedFrame>> = std::thread::scope(|scope| {
             let handles: Vec<_> = decoders
                 .iter_mut()
                 .enumerate()

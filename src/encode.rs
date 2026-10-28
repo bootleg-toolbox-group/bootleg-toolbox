@@ -473,7 +473,7 @@ fn write_mp3(source: &Path, info: &AudioInfo, part: &Path, mode: Mp3Mode, tags: 
     b.set_sample_rate(info.rate).map_err(|e| lame(&e))?;
     if info.rate > 48000 {
         // MP3 stops at 48 kHz.
-        let rate = if info.rate % 48000 == 0 { 48000 } else { 44100 };
+        let rate = if info.rate.is_multiple_of(48000) { 48000 } else { 44100 };
         b.set_output_sample_rate(std::num::NonZeroU32::new(rate)).map_err(|e| lame(&e))?;
     }
     b.set_quality(Quality::NearBest).map_err(|e| lame(&e))?;
@@ -624,7 +624,7 @@ mod tests {
         for i in 0..frames {
             let t = i as f64 / 44100.0;
             let l = (8000.0 * (2.0 * std::f64::consts::PI * (200.0 + 2000.0 * t) * t).sin()) as i16;
-            let r = (l as i32 / 2 + (i % 7) as i32) as i16;
+            let r = (l as i32 / 2 + (i % 7)) as i16;
             data.extend_from_slice(&l.to_le_bytes());
             data.extend_from_slice(&r.to_le_bytes());
         }
