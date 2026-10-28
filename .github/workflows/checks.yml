@@ -1,7 +1,8 @@
 # Code checks on every push, run by GitHub (nothing to run locally):
 # - Clippy: no warning allowed;
 # - cargo-deny: vulnerable or unmaintained dependencies, licences, crate sources;
-# - zizmor: security of these workflow files (results in Security > Code scanning).
+# - zizmor: security of these workflow files (results in Security > Code scanning);
+# - typos: spelling of the code and of the interface texts (exceptions in _typos.toml).
 # The advisories are also checked every Monday, as new ones are published.
 name: Checks
 
@@ -64,3 +65,12 @@ jobs:
           persist-credentials: false
 
       - uses: zizmorcore/zizmor-action@53290badfa369cb0bf7ad16342cb62c2fa47ac7b # v0.8.0
+
+  typos:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: crate-ci/typos@7f9d0819ca1c008ade73f4b41fa9d258d48f605b # v1.51.1

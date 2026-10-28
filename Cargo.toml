@@ -45,6 +45,10 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # Same zbus as rfd, to read the desktop's light/dark preference (XDG portal).
 zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
 
+# md-5 is used under its library name, md5.
+[package.metadata.cargo-machete]
+ignored = ["md-5"]
+
 [profile.release]
 opt-level = 3
 lto = "thin"

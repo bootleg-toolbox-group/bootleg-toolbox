@@ -1,0 +1,20 @@
+# typos (spell checker), run on every push (.github/workflows/checks.yml).
+[default]
+extend-ignore-re = [
+    # Ordinal suffixes in date patterns (1st, 2nd...).
+    "\\(\\?:st\\|nd\\|rd\\|th\\)",
+]
+
+[default.extend-words]
+# ID3v2 frame names.
+TPE = "TPE"
+TPOS = "TPOS"
+
+[files]
+extend-exclude = [
+    # Generated list of crate names and licences.
+    "THIRD-PARTY.md",
+    "vendor/",
+    "assets/",
+    "testdata/",
+]
