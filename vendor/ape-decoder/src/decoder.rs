@@ -652,7 +652,8 @@ impl<R: Read + Seek> ApeDecoder<R> {
     pub fn seek_remainder(&self, frame_idx: u32) -> u32 {
         let seek_byte = self.file_info.seek_byte(frame_idx);
         let seek_byte_0 = self.file_info.seek_byte(0);
-        ((seek_byte - seek_byte_0) % 4) as u32
+        // Wrapping: a damaged seek table may go backwards (the remainder stays in 0..4).
+        (seek_byte.wrapping_sub(seek_byte_0) % 4) as u32
     }
 
     /// Read the compressed data for a given frame from the source.
@@ -668,7 +669,7 @@ impl<R: Read + Seek> ApeDecoder<R> {
         let read_bytes = (frame_bytes as u32 + seek_remainder + 4) as usize;
 
         self.reader
-            .seek(SeekFrom::Start(seek_byte - seek_remainder as u64))?;
+            .seek(SeekFrom::Start(seek_byte.saturating_sub(seek_remainder as u64)))?;
         let mut frame_data = vec![0u8; read_bytes];
         let bytes_read = self.reader.read(&mut frame_data)?;
         if bytes_read < read_bytes.saturating_sub(4) {

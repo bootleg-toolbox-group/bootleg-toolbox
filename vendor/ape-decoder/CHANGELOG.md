@@ -16,7 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`EntropyState::for_version`, `decode_value_old`), `src/range_coder.rs`
   (`decode_overflow_old`) and `src/decoder.rs` (entropy states built for the file version).
 - `FileInfo::frame_byte_count`: a seek table that goes backwards (damaged file) gives 0
-  bytes instead of an integer overflow (found by fuzzing). Change in `src/format.rs`.
+  bytes instead of an integer overflow (found by fuzzing). Change in `src/format.rs`; in
+  `src/decoder.rs`, `seek_remainder` and `read_frame_data` no longer overflow on it either.
 
 ## [0.3.1] - 2026-03-18
 
