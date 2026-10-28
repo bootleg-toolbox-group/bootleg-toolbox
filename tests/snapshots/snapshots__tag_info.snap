@@ -1,0 +1,15 @@
+---
+source: tests/snapshots.rs
+expression: text
+---
+  album: 1990-01-01 The Hall, Springfield
+  artist: Synthetic Band
+  d1t01 "Opening"  [01 - Opening.flac]
+  d1t02 "Second Song"  [02 - Second Song.flac]
+  d1t03 "Long Jam"  [03 - Long Jam.flac]
+  d2t01 "Encore"  [01 - Encore.flac]
+  date: 1990-01-01
+  info file: info.txt
+  place: The Hall, Springfield
+  titles found: 4 for 4 files
+Synthetic Band 1990-01-01

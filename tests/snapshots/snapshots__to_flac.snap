@@ -1,0 +1,12 @@
+---
+source: tests/snapshots.rs
+expression: text
+---
+  OK   [<dir>/Hires Band 2000-02-02/01 - Hires.wav] Converted to 01 - Hires.flac (verified)
+  OK   [<dir>/Muffled Band 2001-03-03/01 - Muffled.wav] Converted to 01 - Muffled.flac (verified)
+  OK   [<dir>/Synthetic Band 1990-01-01/CD1/01 - Opening.wav] Converted to 01 - Opening.flac (verified)
+  OK   [<dir>/Synthetic Band 1990-01-01/CD1/02 - Second Song.wav] Converted to 02 - Second Song.flac (verified)
+  OK   [<dir>/Synthetic Band 1990-01-01/CD1/03 - Long Jam.wav] Converted to 03 - Long Jam.flac (verified)
+  OK   [<dir>/Synthetic Band 1990-01-01/CD2/01 - Encore.wav] Converted to 01 - Encore.flac (verified)
+6 file(s) converted to FLAC: 6 OK
+FLAC compression level 8

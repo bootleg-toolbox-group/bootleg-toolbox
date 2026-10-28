@@ -1,0 +1,8 @@
+---
+source: tests/snapshots.rs
+expression: text
+---
+  OK   [<dir>/Muffled Band 2001-03-03/01 - Muffled.flac] MP3 V0 copy written to Muffled Band 2001-03-03 [MP3 V0]
+  OK   [<dir>/Muffled Band 2001-03-03] 1 encoded
+1 file(s): 1 encoded to MP3 V0
+OK   MP3 V0 copy of Muffled Band 2001-03-03: 1 encoded -> <dir>/Muffled Band 2001-03-03 [MP3 V0]

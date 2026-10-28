@@ -1,0 +1,9 @@
+---
+source: tests/snapshots.rs
+expression: text
+---
+  WARN [<dir>/Muffled Band 2001-03-03 [MP3 V0]/01 - Muffled.mp3] Lossy file (MP3, AAC...): not for lossless trading
+  WARN [<dir>/Muffled Band 2001-03-03 [MP3 V0]] 1 lossy track
+Details read for 1 file(s): 0 without issue; to check: 1 lossy track
+WARN     01 - Muffled.mp3: Lossy file (MP3, AAC...): not for lossless trading
+WARN Muffled Band 2001-03-03 [MP3 V0]: 1 lossy track

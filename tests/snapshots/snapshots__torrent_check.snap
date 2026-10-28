@@ -1,0 +1,27 @@
+---
+source: tests/snapshots.rs
+expression: text
+---
+  OK   [Synthetic Band 1990-01-01/CD1/01 - Opening.flac] Matches Synthetic Band 1990-01-01 [DIME].torrent
+  OK   [Synthetic Band 1990-01-01/CD1/01 - Opening.flac] Matches Synthetic Band 1990-01-01 [TTD].torrent
+  OK   [Synthetic Band 1990-01-01/CD1/02 - Second Song.flac] Matches Synthetic Band 1990-01-01 [DIME].torrent
+  OK   [Synthetic Band 1990-01-01/CD1/02 - Second Song.flac] Matches Synthetic Band 1990-01-01 [TTD].torrent
+  OK   [Synthetic Band 1990-01-01/CD1/03 - Long Jam.flac] Matches Synthetic Band 1990-01-01 [DIME].torrent
+  OK   [Synthetic Band 1990-01-01/CD1/03 - Long Jam.flac] Matches Synthetic Band 1990-01-01 [TTD].torrent
+  OK   [Synthetic Band 1990-01-01/CD2/01 - Encore.flac] Matches Synthetic Band 1990-01-01 [DIME].torrent
+  OK   [Synthetic Band 1990-01-01/CD2/01 - Encore.flac] Matches Synthetic Band 1990-01-01 [TTD].torrent
+  OK   [Synthetic Band 1990-01-01/Synthetic Band 1990-01-01.ffp] Matches Synthetic Band 1990-01-01 [DIME].torrent
+  OK   [Synthetic Band 1990-01-01/Synthetic Band 1990-01-01.ffp] Matches Synthetic Band 1990-01-01 [TTD].torrent
+  OK   [Synthetic Band 1990-01-01/Synthetic Band 1990-01-01.md5] Matches Synthetic Band 1990-01-01 [DIME].torrent
+  OK   [Synthetic Band 1990-01-01/Synthetic Band 1990-01-01.md5] Matches Synthetic Band 1990-01-01 [TTD].torrent
+  OK   [Synthetic Band 1990-01-01/Synthetic Band 1990-01-01.sfv] Matches Synthetic Band 1990-01-01 [DIME].torrent
+  OK   [Synthetic Band 1990-01-01/Synthetic Band 1990-01-01.sfv] Matches Synthetic Band 1990-01-01 [TTD].torrent
+  OK   [Synthetic Band 1990-01-01/Synthetic Band 1990-01-01.st5] Matches Synthetic Band 1990-01-01 [DIME].torrent
+  OK   [Synthetic Band 1990-01-01/Synthetic Band 1990-01-01.st5] Matches Synthetic Band 1990-01-01 [TTD].torrent
+  OK   [Synthetic Band 1990-01-01/info.txt] Matches Synthetic Band 1990-01-01 [DIME].torrent
+  OK   [Synthetic Band 1990-01-01/info.txt] Matches Synthetic Band 1990-01-01 [TTD].torrent
+2 torrent(s) checked: 2 match
+OK   Synthetic Band 1990-01-01: Matches Synthetic Band 1990-01-01 [DIME].torrent (134 pieces checked)
+OK   Synthetic Band 1990-01-01: Matches Synthetic Band 1990-01-01 [TTD].torrent (134 pieces checked)
+Synthetic Band 1990-01-01 [DIME].torrent: "Synthetic Band 1990-01-01", 9 file(s), 4.2 MB, pieces of 32.0 KB, private, source DIME, tracker bt.dimeadozen.org, made with Bootleg Toolbox 0.1.7, info hash 24de45ef89151b13afa10ca833250ab046ef008b
+Synthetic Band 1990-01-01 [TTD].torrent: "Synthetic Band 1990-01-01", 9 file(s), 4.2 MB, pieces of 32.0 KB, private, source TTD, tracker www.thetradersden.org, made with Bootleg Toolbox 0.1.7, info hash 1be837bb83b808c1ea411839bfc2d15d51d14c3b

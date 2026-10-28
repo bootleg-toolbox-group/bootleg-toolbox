@@ -1,0 +1,15 @@
+---
+source: tests/snapshots.rs
+expression: text
+---
+  OK   [<dir>/Hires Band 2000-02-02] Created FFP, MD5, ST5, SFV
+  OK   [<dir>/Synthetic Band 1990-01-01] Created FFP, MD5, ST5, SFV
+8 checksum file(s) created.
+OK   Created <dir>/Hires Band 2000-02-02/Hires Band 2000-02-02.ffp
+OK   Created <dir>/Hires Band 2000-02-02/Hires Band 2000-02-02.md5
+OK   Created <dir>/Hires Band 2000-02-02/Hires Band 2000-02-02.sfv
+OK   Created <dir>/Hires Band 2000-02-02/Hires Band 2000-02-02.st5
+OK   Created <dir>/Synthetic Band 1990-01-01/Synthetic Band 1990-01-01.ffp
+OK   Created <dir>/Synthetic Band 1990-01-01/Synthetic Band 1990-01-01.md5
+OK   Created <dir>/Synthetic Band 1990-01-01/Synthetic Band 1990-01-01.sfv
+OK   Created <dir>/Synthetic Band 1990-01-01/Synthetic Band 1990-01-01.st5

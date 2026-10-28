@@ -1,0 +1,13 @@
+---
+source: tests/snapshots.rs
+expression: text
+---
+  OK   [<dir>/Hires Band 2000-02-02/01 - Hires.flac] Test OK: decodes cleanly and matches its MD5 signature
+  OK   [<dir>/Muffled Band 2001-03-03/01 - Muffled.flac] Test OK: decodes cleanly and matches its MD5 signature
+  OK   [<dir>/Synthetic Band 1990-01-01/CD1/01 - Opening.flac] Test OK: decodes cleanly and matches its MD5 signature
+  OK   [<dir>/Synthetic Band 1990-01-01/CD1/02 - Second Song.flac] Test OK: decodes cleanly and matches its MD5 signature
+  OK   [<dir>/Synthetic Band 1990-01-01/CD1/03 - Long Jam.flac] Test OK: decodes cleanly and matches its MD5 signature
+  OK   [<dir>/Synthetic Band 1990-01-01/CD2/01 - Encore.flac] Test OK: decodes cleanly and matches its MD5 signature
+  OK   [<dir>/Wav Band 2002-04-04/01 - Extra chunk.wav] Test OK: audio data complete and readable
+  OK   [<dir>/Wav Band 2002-04-04/02 - Plain.wav] Test OK: audio data complete and readable
+8 file(s) tested: 8 OK

@@ -1,0 +1,9 @@
+---
+source: tests/snapshots.rs
+expression: text
+---
+  OK   [<dir>/Synthetic Band 1990-01-01] Torrent created: DIME, TTD
+Next: upload each .torrent on its site, then download the torrent the site gives back (it holds your passkey) and seed with that one.
+OK   Created <dir>/Synthetic Band 1990-01-01 [DIME].torrent
+OK   Created <dir>/Synthetic Band 1990-01-01 [TTD].torrent
+Torrents created for 1 show(s).

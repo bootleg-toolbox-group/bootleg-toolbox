@@ -1,0 +1,328 @@
+---
+source: tests/snapshots.rs
+expression: text
+---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   - A cutoff at 13.4 kHz is typical of an MP3/AAC at 96 kbps or less.
+   - Above the cutoff there is digital silence: nothing was added after the encoder, so a lossy file was converted back to a lossless format.
+   - Encoder holes of 43 dB below the 13.4 kHz lowpass: the fingerprint of a perceptual encoder (MP3, MP2, AAC). FM and analog recordings stay under about 5 dB.
+   - High frequencies are present (-0 dB relative to 1-4 kHz above 15 kHz), so encoder traces would show.
+   - High frequencies are present (-0 dB relative to 1-4 kHz above 15 kHz), so encoder traces would show.
+   - High frequencies are present (-0 dB relative to 1-4 kHz above 15 kHz), so encoder traces would show.
+   - No brick-wall lowpass: lossy encoders always cut the top of the spectrum.
+   - No brick-wall lowpass: lossy encoders always cut the top of the spectrum.
+   - No brick-wall lowpass: lossy encoders always cut the top of the spectrum.
+  A lossy file converted back has digital silence there (about 0 dB). Steady hiss well above 0 dB was added by an analog stage (tuner, sound card) after any encoder.
+  A true hi-res recording has content (or at least hiss) up there; an upsampled 44.1/48 kHz file is empty above 22-24 kHz.
+  An FM or analog capture keeps its hiss up to the converter's filter (+20 dB and more); an encoder after that stage leaves silence there.
+  Below about -60 dB there is too little treble to see encoder traces (common with audience and cassette recordings).
+  Below about -60 dB there is too little treble to see encoder traces (common with audience and cassette recordings).
+  Below about -60 dB there is too little treble to see encoder traces (common with audience and cassette recordings).
+  Below about -60 dB there is too little treble to see encoder traces (common with audience and cassette recordings).
+  Below about -60 dB there is too little treble to see encoder traces (common with audience and cassette recordings).
+  Below about -60 dB there is too little treble to see encoder traces (common with audience and cassette recordings).
+  Below about -60 dB there is too little treble to see encoder traces (common with audience and cassette recordings).
+  Below about -60 dB there is too little treble to see encoder traces (common with audience and cassette recordings).
+  Concert mixes usually sit 4 to 10 dB below; 20 dB and more is nearly mono.
+  Concert mixes usually sit 4 to 10 dB below; 20 dB and more is nearly mono.
+  Concert mixes usually sit 4 to 10 dB below; 20 dB and more is nearly mono.
+  Concert mixes usually sit 4 to 10 dB below; 20 dB and more is nearly mono.
+  Concert mixes usually sit 4 to 10 dB below; 20 dB and more is nearly mono.
+  Concert mixes usually sit 4 to 10 dB below; 20 dB and more is nearly mono.
+  Concert mixes usually sit 4 to 10 dB below; 20 dB and more is nearly mono.
+  Concert mixes usually sit 4 to 10 dB below; 20 dB and more is nearly mono.
+  ERR  [<dir>/Muffled Band 2001-03-03/01 - Muffled.flac] Lossy source (high confidence): brick-wall lowpass at 13.4 kHz with encoder holes below it, typical of an MP3/AAC at 96 kbps or less
+  ERR  [<dir>/Muffled Band 2001-03-03/01 - Muffled.flac] Source: Lossy 13.4 kHz
+  ERR  [<dir>/Muffled Band 2001-03-03] Source: 1 Lossy
+  FM stereo stations transmit a 19 kHz tone; a capture that keeps it was recorded off air, and its exact frequency measures the tape speed. Tuners often filter it out, so its absence proves nothing.
+  FM stereo stations transmit a 19 kHz tone; a capture that keeps it was recorded off air, and its exact frequency measures the tape speed. Tuners often filter it out, so its absence proves nothing.
+  FM stereo stations transmit a 19 kHz tone; a capture that keeps it was recorded off air, and its exact frequency measures the tape speed. Tuners often filter it out, so its absence proves nothing.
+  FM stereo stations transmit a 19 kHz tone; a capture that keeps it was recorded off air, and its exact frequency measures the tape speed. Tuners often filter it out, so its absence proves nothing.
+  FM stereo stations transmit a 19 kHz tone; a capture that keeps it was recorded off air, and its exact frequency measures the tape speed. Tuners often filter it out, so its absence proves nothing.
+  FM stereo stations transmit a 19 kHz tone; a capture that keeps it was recorded off air, and its exact frequency measures the tape speed. Tuners often filter it out, so its absence proves nothing.
+  FM stereo stations transmit a 19 kHz tone; a capture that keeps it was recorded off air, and its exact frequency measures the tape speed. Tuners often filter it out, so its absence proves nothing.
+  FM stereo stations transmit a 19 kHz tone; a capture that keeps it was recorded off air, and its exact frequency measures the tape speed. Tuners often filter it out, so its absence proves nothing.
+  FM stereo stops at 15 kHz; MP3/AAC encoders cut between about 15 and 20 kHz; a converter's anti-alias filter sits around 20-22 kHz; analog tape rolls off gently instead of cutting.
+  How deep the band just below the cutoff collapses in some frames. Perceptual encoders (MP3, MP2, AAC) switch these bands off and on: 10 dB and more. FM and analog sources stay under about 5 dB.
+  How fast the level falls (across the cutoff, or from 10 to 16 kHz without one). Encoders and digital filters drop by hundreds of dB per octave; tape, microphones and analog filters by tens.
+  How fast the level falls (across the cutoff, or from 10 to 16 kHz without one). Encoders and digital filters drop by hundreds of dB per octave; tape, microphones and analog filters by tens.
+  How fast the level falls (across the cutoff, or from 10 to 16 kHz without one). Encoders and digital filters drop by hundreds of dB per octave; tape, microphones and analog filters by tens.
+  How fast the level falls (across the cutoff, or from 10 to 16 kHz without one). Encoders and digital filters drop by hundreds of dB per octave; tape, microphones and analog filters by tens.
+  How fast the level falls (across the cutoff, or from 10 to 16 kHz without one). Encoders and digital filters drop by hundreds of dB per octave; tape, microphones and analog filters by tens.
+  How fast the level falls (across the cutoff, or from 10 to 16 kHz without one). Encoders and digital filters drop by hundreds of dB per octave; tape, microphones and analog filters by tens.
+  How fast the level falls (across the cutoff, or from 10 to 16 kHz without one). Encoders and digital filters drop by hundreds of dB per octave; tape, microphones and analog filters by tens.
+  How fast the level falls (across the cutoff, or from 10 to 16 kHz without one). Encoders and digital filters drop by hundreds of dB per octave; tape, microphones and analog filters by tens.
+  Lossy encoders cut the top of the spectrum with a brick wall; there is none here.
+  Lossy encoders cut the top of the spectrum with a brick wall; there is none here.
+  Lossy encoders cut the top of the spectrum with a brick wall; there is none here.
+  Lossy encoders cut the top of the spectrum with a brick wall; there is none here.
+  Lossy encoders cut the top of the spectrum with a brick wall; there is none here.
+  Lossy encoders cut the top of the spectrum with a brick wall; there is none here.
+  Lossy encoders cut the top of the spectrum with a brick wall; there is none here.
+  OK   [<dir>/Hires Band 2000-02-02/01 - Hires.flac] No sign of lossy encoding or upsampling: no encoder lowpass, high frequencies present
+  OK   [<dir>/Hires Band 2000-02-02/01 - Hires.flac] Source: Lossless
+  OK   [<dir>/Hires Band 2000-02-02] Source: All lossless
+  OK   [<dir>/Synthetic Band 1990-01-01/CD1/01 - Opening.flac] No sign of lossy encoding or upsampling: no encoder lowpass, high frequencies present
+  OK   [<dir>/Synthetic Band 1990-01-01/CD1/01 - Opening.flac] Source: Lossless
+  OK   [<dir>/Synthetic Band 1990-01-01/CD1/02 - Second Song.flac] No sign of lossy encoding or upsampling: no encoder lowpass, high frequencies present
+  OK   [<dir>/Synthetic Band 1990-01-01/CD1/02 - Second Song.flac] Source: Lossless
+  OK   [<dir>/Synthetic Band 1990-01-01/CD1/03 - Long Jam.flac] No sign of lossy encoding or upsampling: no encoder lowpass, high frequencies present
+  OK   [<dir>/Synthetic Band 1990-01-01/CD1/03 - Long Jam.flac] Source: Lossless
+  OK   [<dir>/Synthetic Band 1990-01-01/CD2/01 - Encore.flac] No sign of lossy encoding or upsampling: no encoder lowpass, high frequencies present
+  OK   [<dir>/Synthetic Band 1990-01-01/CD2/01 - Encore.flac] Source: Lossless
+  OK   [<dir>/Synthetic Band 1990-01-01] Source: All lossless
+  OK   [<dir>/Wav Band 2002-04-04/01 - Extra chunk.wav] No sign of lossy encoding or upsampling: no encoder lowpass, high frequencies present
+  OK   [<dir>/Wav Band 2002-04-04/01 - Extra chunk.wav] Source: Lossless
+  OK   [<dir>/Wav Band 2002-04-04/02 - Plain.wav] No sign of lossy encoding or upsampling: no encoder lowpass, high frequencies present
+  OK   [<dir>/Wav Band 2002-04-04/02 - Plain.wav] Source: Lossless
+  OK   [<dir>/Wav Band 2002-04-04] Source: All lossless
+  The same search with the transform of AAC (iTunes, YouTube, streaming services, many webcasts). A file decoded from an AAC falls back onto the encoder's rounding grid at one position; genuine audio does not. Resampling or effects after the decoder erase this trace.
+  The same search with the transform of AAC (iTunes, YouTube, streaming services, many webcasts). A file decoded from an AAC falls back onto the encoder's rounding grid at one position; genuine audio does not. Resampling or effects after the decoder erase this trace.
+  The same search with the transform of AAC (iTunes, YouTube, streaming services, many webcasts). A file decoded from an AAC falls back onto the encoder's rounding grid at one position; genuine audio does not. Resampling or effects after the decoder erase this trace.
+  The same search with the transform of AAC (iTunes, YouTube, streaming services, many webcasts). A file decoded from an AAC falls back onto the encoder's rounding grid at one position; genuine audio does not. Resampling or effects after the decoder erase this trace.
+  The same search with the transform of AAC (iTunes, YouTube, streaming services, many webcasts). A file decoded from an AAC falls back onto the encoder's rounding grid at one position; genuine audio does not. Resampling or effects after the decoder erase this trace.
+  The same search with the transform of AAC (iTunes, YouTube, streaming services, many webcasts). A file decoded from an AAC falls back onto the encoder's rounding grid at one position; genuine audio does not. Resampling or effects after the decoder erase this trace.
+  The same search with the transform of AAC (iTunes, YouTube, streaming services, many webcasts). A file decoded from an AAC falls back onto the encoder's rounding grid at one position; genuine audio does not. Resampling or effects after the decoder erase this trace.
+  The sound is analysed again with an MP3 encoder's own filter bank, at every possible position. A file decoded from an MP3 falls back onto the encoder's rounding grid in many bands (3 % and more, far above the other positions), even at 320 kbps; genuine audio stays around 2 %, at no particular position. Resampling or effects after the decoder erase this trace, so its absence does not prove a file lossless.
+  The sound is analysed again with an MP3 encoder's own filter bank, at every possible position. A file decoded from an MP3 falls back onto the encoder's rounding grid in many bands (3 % and more, far above the other positions), even at 320 kbps; genuine audio stays around 2 %, at no particular position. Resampling or effects after the decoder erase this trace, so its absence does not prove a file lossless.
+  The sound is analysed again with an MP3 encoder's own filter bank, at every possible position. A file decoded from an MP3 falls back onto the encoder's rounding grid in many bands (3 % and more, far above the other positions), even at 320 kbps; genuine audio stays around 2 %, at no particular position. Resampling or effects after the decoder erase this trace, so its absence does not prove a file lossless.
+  The sound is analysed again with an MP3 encoder's own filter bank, at every possible position. A file decoded from an MP3 falls back onto the encoder's rounding grid in many bands (3 % and more, far above the other positions), even at 320 kbps; genuine audio stays around 2 %, at no particular position. Resampling or effects after the decoder erase this trace, so its absence does not prove a file lossless.
+  The sound is analysed again with an MP3 encoder's own filter bank, at every possible position. A file decoded from an MP3 falls back onto the encoder's rounding grid in many bands (3 % and more, far above the other positions), even at 320 kbps; genuine audio stays around 2 %, at no particular position. Resampling or effects after the decoder erase this trace, so its absence does not prove a file lossless.
+  The sound is analysed again with an MP3 encoder's own filter bank, at every possible position. A file decoded from an MP3 falls back onto the encoder's rounding grid in many bands (3 % and more, far above the other positions), even at 320 kbps; genuine audio stays around 2 %, at no particular position. Resampling or effects after the decoder erase this trace, so its absence does not prove a file lossless.
+  The sound is analysed again with an MP3 encoder's own filter bank, at every possible position. A file decoded from an MP3 falls back onto the encoder's rounding grid in many bands (3 % and more, far above the other positions), even at 320 kbps; genuine audio stays around 2 %, at no particular position. Resampling or effects after the decoder erase this trace, so its absence does not prove a file lossless.
+(Lossless analysis, Bootleg Toolbox 0.1.7)
+(Lossless analysis, Bootleg Toolbox 0.1.7)
+(Lossless analysis, Bootleg Toolbox 0.1.7)
+(Lossless analysis, Bootleg Toolbox 0.1.7)
+(Lossless analysis, Bootleg Toolbox 0.1.7)
+(Lossless analysis, Bootleg Toolbox 0.1.7)
+(Lossless analysis, Bootleg Toolbox 0.1.7)
+(Lossless analysis, Bootleg Toolbox 0.1.7)
+(Lossless analysis, Bootleg Toolbox 0.1.7)
+(Lossless analysis, Bootleg Toolbox 0.1.7)
+(Lossless analysis, Bootleg Toolbox 0.1.7)
+(Lossless analysis, Bootleg Toolbox 0.1.7)
+- 01 - Extra chunk.wav: Lossless (treble -0 dB)
+- 01 - Hires.flac: Lossless (treble -0 dB)
+- 01 - Muffled.flac: Lossy 13.4 kHz (cut 13.4 kHz, holes 43 dB, floor -4 dB)
+- 02 - Plain.wav: Lossless (treble -0 dB)
+- 19 kHz FM stereo pilot: not found
+- 19 kHz FM stereo pilot: not found
+- 19 kHz FM stereo pilot: not found
+- 19 kHz FM stereo pilot: not found
+- 19 kHz FM stereo pilot: not found
+- 19 kHz FM stereo pilot: not found
+- 19 kHz FM stereo pilot: not found
+- 19 kHz FM stereo pilot: not found
+- AAC coding traces: none (1.7 % of the bands, 3 standard deviations above chance)
+- AAC coding traces: none (1.8 % of the bands, 4 standard deviations above chance)
+- AAC coding traces: none (1.8 % of the bands, 4 standard deviations above chance)
+- AAC coding traces: none (1.8 % of the bands, 5 standard deviations above chance)
+- AAC coding traces: none (1.8 % of the bands, 5 standard deviations above chance)
+- AAC coding traces: none (1.8 % of the bands, 5 standard deviations above chance)
+- AAC coding traces: none (16.8 % of the bands, 3 standard deviations above chance)
+- CD1/01 - Opening.flac: Lossless (treble -0 dB)
+- CD1/02 - Second Song.flac: Lossless (treble -0 dB)
+- CD1/03 - Long Jam.flac: Lossless (treble -0 dB)
+- CD2/01 - Encore.flac: Lossless (treble -0 dB)
+- Content above 15 kHz: -0 dB relative to 1-4 kHz
+- Content above 15 kHz: -0 dB relative to 1-4 kHz
+- Content above 15 kHz: -0 dB relative to 1-4 kHz
+- Content above 15 kHz: -0 dB relative to 1-4 kHz
+- Content above 15 kHz: -0 dB relative to 1-4 kHz
+- Content above 15 kHz: -0 dB relative to 1-4 kHz
+- Content above 15 kHz: -0 dB relative to 1-4 kHz
+- Content above 15 kHz: -19 dB relative to 1-4 kHz
+- Edge of the lowpass: 230 dB per octave
+- Encoder holes below the cutoff: 43 dB
+- Floor above the cutoff: -4 dB over digital silence, steady (quiet passages -3 dB, loud -3 dB)
+- Floor at 18-19.5 kHz: -4 dB over digital silence
+- Hi-res content: real content above 22-24 kHz
+- Highest frequencies: no brick-wall lowpass up to 21.4 kHz
+- Highest frequencies: no brick-wall lowpass up to 21.4 kHz
+- Highest frequencies: no brick-wall lowpass up to 21.4 kHz
+- Highest frequencies: no brick-wall lowpass up to 21.4 kHz
+- Highest frequencies: no brick-wall lowpass up to 21.4 kHz
+- Highest frequencies: no brick-wall lowpass up to 21.4 kHz
+- Highest frequencies: no brick-wall lowpass up to 47.3 kHz
+- Highest frequencies: steep lowpass at 13.4 kHz (21 dB drop)
+- MP3 coding traces: none (1.7 % of the bands, 3 standard deviations above chance)
+- MP3 coding traces: none (1.7 % of the bands, 4 standard deviations above chance)
+- MP3 coding traces: none (1.8 % of the bands, 4 standard deviations above chance)
+- MP3 coding traces: none (1.8 % of the bands, 4 standard deviations above chance)
+- MP3 coding traces: none (1.9 % of the bands, 4 standard deviations above chance)
+- MP3 coding traces: none (1.9 % of the bands, 5 standard deviations above chance)
+- MP3 coding traces: none (31.5 % of the bands, 4 standard deviations above chance)
+- Stereo width: difference channel (L-R) 11 dB below the sum
+- Stereo width: difference channel (L-R) 11 dB below the sum
+- Stereo width: difference channel (L-R) 12 dB below the sum
+- Stereo width: difference channel (L-R) 13 dB below the sum
+- Stereo width: difference channel (L-R) 5 dB below the sum
+- Stereo width: difference channel (L-R) 6 dB below the sum
+- Stereo width: difference channel (L-R) 7 dB below the sum
+- Stereo width: difference channel (L-R) 8 dB below the sum
+- Treble roll-off: -0 dB per octave
+- Treble roll-off: -0 dB per octave
+- Treble roll-off: 0 dB per octave
+- Treble roll-off: 0 dB per octave
+- Treble roll-off: 0 dB per octave
+- Treble roll-off: 0 dB per octave
+- Treble roll-off: 1 dB per octave
+01 - Encore.flac
+01 - Extra chunk.wav
+01 - Hires.flac
+01 - Muffled.flac
+01 - Opening.flac
+02 - Plain.wav
+02 - Second Song.flac
+03 - Long Jam.flac
+1. 1 track(s) analysed: 1 Lossless.
+1. 1 track(s) analysed: 1 Lossy.
+1. 2 track(s) analysed: 2 Lossless.
+1. 4 track(s) analysed: 4 Lossless.
+1. Encoder holes of 43 dB below the 13.4 kHz lowpass: the fingerprint of a perceptual encoder (MP3, MP2, AAC). FM and analog recordings stay under about 5 dB.
+1. No brick-wall lowpass: lossy encoders always cut the top of the spectrum.
+1. No brick-wall lowpass: lossy encoders always cut the top of the spectrum.
+1. No brick-wall lowpass: lossy encoders always cut the top of the spectrum.
+1. No brick-wall lowpass: lossy encoders always cut the top of the spectrum.
+1. No brick-wall lowpass: lossy encoders always cut the top of the spectrum.
+1. No brick-wall lowpass: lossy encoders always cut the top of the spectrum.
+1. No brick-wall lowpass: lossy encoders always cut the top of the spectrum.
+2. Above the cutoff there is digital silence: nothing was added after the encoder, so a lossy file was converted back to a lossless format.
+2. High frequencies are present (-0 dB relative to 1-4 kHz above 15 kHz), so encoder traces would show.
+2. High frequencies are present (-0 dB relative to 1-4 kHz above 15 kHz), so encoder traces would show.
+2. High frequencies are present (-0 dB relative to 1-4 kHz above 15 kHz), so encoder traces would show.
+2. High frequencies are present (-0 dB relative to 1-4 kHz above 15 kHz), so encoder traces would show.
+2. High frequencies are present (-0 dB relative to 1-4 kHz above 15 kHz), so encoder traces would show.
+2. High frequencies are present (-0 dB relative to 1-4 kHz above 15 kHz), so encoder traces would show.
+2. High frequencies are present (-0 dB relative to 1-4 kHz above 15 kHz), so encoder traces would show.
+2. Most tracks read "Lossless". Why, for 01 - Extra chunk.wav:
+2. Most tracks read "Lossless". Why, for 01 - Hires.flac:
+2. Most tracks read "Lossless". Why, for 01 - Opening.flac:
+2. Most tracks read "Lossy". Why, for 01 - Muffled.flac:
+3. A cutoff at 13.4 kHz is typical of an MP3/AAC at 96 kbps or less.
+8 file(s) checked for lossless origin: 7 OK, 1 error(s)
+==============
+===============
+================
+=================
+=================
+==================
+===================
+====================
+=====================
+=====================
+=======================
+=========================
+ERR  01 - Muffled.flac: Lossy source (high confidence): brick-wall lowpass at 13.4 kHz with encoder holes below it, typical of an MP3/AAC at 96 kbps or less
+Hires Band 2000-02-02
+Lossy source (high confidence): brick-wall lowpass at 13.4 kHz with encoder holes below it, typical of an MP3/AAC at 96 kbps or less
+Lossy source (high confidence): brick-wall lowpass at 13.4 kHz with encoder holes below it, typical of an MP3/AAC at 96 kbps or less
+Measurements
+Measurements
+Measurements
+Measurements
+Measurements
+Measurements
+Measurements
+Measurements
+Muffled Band 2001-03-03
+No sign of lossy encoding or upsampling: no encoder lowpass, high frequencies present
+No sign of lossy encoding or upsampling: no encoder lowpass, high frequencies present
+No sign of lossy encoding or upsampling: no encoder lowpass, high frequencies present
+No sign of lossy encoding or upsampling: no encoder lowpass, high frequencies present
+No sign of lossy encoding or upsampling: no encoder lowpass, high frequencies present
+No sign of lossy encoding or upsampling: no encoder lowpass, high frequencies present
+No sign of lossy encoding or upsampling: no encoder lowpass, high frequencies present
+No sign of lossy encoding or upsampling: no encoder lowpass, high frequencies present
+No sign of lossy encoding or upsampling: no encoder lowpass, high frequencies present
+No sign of lossy encoding or upsampling: no encoder lowpass, high frequencies present
+Reasoning
+Reasoning
+Reasoning
+Reasoning
+Reasoning
+Reasoning
+Reasoning
+Reasoning
+Reasoning
+Reasoning
+Reasoning
+Reasoning
+Synthetic Band 1990-01-01
+Tracks
+Tracks
+Tracks
+Tracks
+Verdict: 1 Lossy
+Verdict: All lossless
+Verdict: All lossless
+Verdict: All lossless
+Verdict: Lossless
+Verdict: Lossless
+Verdict: Lossless
+Verdict: Lossless
+Verdict: Lossless
+Verdict: Lossless
+Verdict: Lossless
+Verdict: Lossy 13.4 kHz
+Wav Band 2002-04-04

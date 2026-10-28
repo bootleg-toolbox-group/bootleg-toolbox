@@ -1,0 +1,8 @@
+---
+source: tests/snapshots.rs
+expression: text
+---
+  OK   [<dir>/Wav Band 2002-04-04/01 - Extra chunk.wav] Cleaned copy (same sound): WAV-cleaned/01 - Extra chunk.wav; fixed: extra chunks: LIST (12 bytes)
+  OK   [<dir>/Wav Band 2002-04-04/02 - Plain.wav] Clean: only the format and the sound, canonical header
+01 - Extra chunk.wav: extra chunks: LIST (12 bytes)
+2 WAV file(s) checked: 2 OK

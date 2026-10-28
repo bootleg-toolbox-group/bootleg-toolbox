@@ -3,6 +3,8 @@ name = "bootleg-toolbox"
 version = "0.1.7"
 edition = "2021"
 rust-version = "1.89"
+# Distributed as executables, not on crates.io.
+publish = false
 authors = ["Rattlehead80"]
 license = "GPL-3.0-or-later"
 description = "Checksums, tests, torrents and conversions for lossless concert recordings - a modern take on Trader's Little Helper"
@@ -61,3 +63,9 @@ winresource = "0.1"
 # ape-decoder with Monkey's Audio 3.95-3.98 support (older value coding), see vendor/ape-decoder.
 [patch.crates-io]
 ape-decoder = { path = "vendor/ape-decoder" }
+
+[dev-dependencies]
+# Property tests (tests/properties.rs), snapshot tests (tests/snapshots.rs).
+proptest = "1"
+insta = "1"
+tempfile = "3"

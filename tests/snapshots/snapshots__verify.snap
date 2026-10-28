@@ -1,0 +1,14 @@
+---
+source: tests/snapshots.rs
+expression: text
+---
+  OK   [<dir>/Hires Band 2000-02-02/01 - Hires.flac] FFP OK, MD5 OK, SFV OK, ST5 OK
+  OK   [<dir>/Hires Band 2000-02-02] All 4 checksums OK
+  OK   [<dir>/Synthetic Band 1990-01-01/CD1/01 - Opening.flac] FFP OK, MD5 OK, SFV OK, ST5 OK
+  OK   [<dir>/Synthetic Band 1990-01-01/CD1/02 - Second Song.flac] FFP OK, MD5 OK, SFV OK, ST5 OK
+  OK   [<dir>/Synthetic Band 1990-01-01/CD1/03 - Long Jam.flac] FFP OK, MD5 OK, SFV OK, ST5 OK
+  OK   [<dir>/Synthetic Band 1990-01-01/CD2/01 - Encore.flac] FFP OK, MD5 OK, SFV OK, ST5 OK
+  OK   [<dir>/Synthetic Band 1990-01-01] All 16 checksums OK
+20 checksum(s) verified: 20 OK
+OK   Hires Band 2000-02-02: all 4 checksums OK
+OK   Synthetic Band 1990-01-01: all 16 checksums OK

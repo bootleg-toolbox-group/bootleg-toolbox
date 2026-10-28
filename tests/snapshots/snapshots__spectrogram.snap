@@ -1,0 +1,6 @@
+---
+source: tests/snapshots.rs
+expression: text
+---
+OK   Saved 01 - Hires - spectrogram.png
+Spectrogram ready.

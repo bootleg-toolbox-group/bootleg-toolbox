@@ -1,0 +1,11 @@
+---
+source: tests/snapshots.rs
+expression: text
+---
+  WARN [<dir>/Synthetic Band 1990-01-01/CD1/01 - Opening.flac] Speed: 1.9 % slow?
+  WARN [<dir>/Synthetic Band 1990-01-01/CD1/02 - Second Song.flac] Speed: 2.2 % slow?
+  WARN [<dir>/Synthetic Band 1990-01-01/CD1/03 - Long Jam.flac] Speed: 2.4 % slow?
+  WARN [<dir>/Synthetic Band 1990-01-01/CD2/01 - Encore.flac] Speed: 2.3 % slow?
+  WARN [<dir>/Synthetic Band 1990-01-01] Speed: 2.2 % slow?
+1 show(s) checked for tape speed: 0 OK, 1 warning(s)
+WARN Synthetic Band 1990-01-01: speed possibly plays 2.2 % slow (estimated from the tuning): speed it up by 2.2 % (play at 102.2 %, +38 cents)

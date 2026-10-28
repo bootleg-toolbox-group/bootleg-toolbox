@@ -1,0 +1,76 @@
+---
+source: tests/snapshots.rs
+expression: text
+---
+
+
+
+
+
+
+(Media info, Bootleg Toolbox 0.1.7)
+----------------
+-----------------
+------------------
+---------------------
+01 - Encore.flac
+01 - Opening.flac
+02 - Second Song.flac
+03 - Long Jam.flac
+=========================
+Audio             : 16 bits, 44.1 kHz, 2 channels (CD audio)
+Audio MD5         : 62499bd800620e0a202ace56a0b4ab8e
+Audio MD5         : aadfc3c1c9f066ef27498d979732ee5c
+Audio MD5         : cfbe58904ad46419987b61b904447536
+Audio MD5         : dc2f0f2d111a60857e7a760b97943302
+Average bit rate  : 983 kb/s
+Bit depth         : 16 bits
+Bit depth         : 16 bits
+Bit depth         : 16 bits
+Bit depth         : 16 bits
+CD audio          : yes, sector boundary error (length not a multiple of 588 samples)
+CD audio          : yes, sector boundary error (length not a multiple of 588 samples)
+CD audio          : yes, sector boundary error (length not a multiple of 588 samples)
+CD audio          : yes, sector boundary error (length not a multiple of 588 samples)
+Channels          : 2 channels
+Channels          : 2 channels
+Channels          : 2 channels
+Channels          : 2 channels
+Compression mode  : Lossless
+Compression mode  : Lossless
+Compression mode  : Lossless
+Compression mode  : Lossless
+Duration          : 0:06.00
+Duration          : 0:07.37
+Duration          : 0:10.00
+Duration          : 0:12.00
+File size         : 1.16 MiB
+File size         : 1.40 MiB
+File size         : 724.93 KiB
+File size         : 908.22 KiB
+Files             : 4 (FLAC)
+Format            : FLAC (Free Lossless Audio Codec)
+Format            : FLAC (Free Lossless Audio Codec)
+Format            : FLAC (Free Lossless Audio Codec)
+Format            : FLAC (Free Lossless Audio Codec)
+Media info: 1 summary.
+Overall bit rate  : 977 kb/s
+Overall bit rate  : 978 kb/s
+Overall bit rate  : 990 kb/s
+Overall bit rate  : 992 kb/s
+Samples           : 264641
+Samples           : 330757
+Samples           : 441123
+Samples           : 529500
+Sampling rate     : 44.1 kHz
+Sampling rate     : 44.1 kHz
+Sampling rate     : 44.1 kHz
+Sampling rate     : 44.1 kHz
+Sector boundaries : 3 tracks not on a sector boundary (last track not counted)
+Synthetic Band 1990-01-01
+Total duration    : 0:36
+Total size        : 4.16 MiB
+Writing library   : Bootleg Toolbox 0.1.7
+Writing library   : Bootleg Toolbox 0.1.7
+Writing library   : Bootleg Toolbox 0.1.7
+Writing library   : Bootleg Toolbox 0.1.7

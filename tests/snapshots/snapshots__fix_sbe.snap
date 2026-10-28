@@ -1,0 +1,10 @@
+---
+source: tests/snapshots.rs
+expression: text
+---
+  OK   [<dir>/Synthetic Band 1990-01-01/CD1/01 - Opening.flac] SBE fixed copy: SBE-fixed/CD1/01 - Opening.flac
+  OK   [<dir>/Synthetic Band 1990-01-01/CD1/02 - Second Song.flac] SBE fixed copy: SBE-fixed/CD1/02 - Second Song.flac
+  OK   [<dir>/Synthetic Band 1990-01-01/CD1/03 - Long Jam.flac] SBE fixed copy: SBE-fixed/CD1/03 - Long Jam.flac
+  OK   [<dir>/Synthetic Band 1990-01-01] SBEs fixed: 3 track(s) in SBE-fixed
+OK   Synthetic Band 1990-01-01: 3 corrected track(s) written to <dir>/Synthetic Band 1990-01-01/SBE-fixed. Check them, replace the originals, then create new checksum files.
+SBE fix finished: 1 show(s) corrected (3 track(s) written)

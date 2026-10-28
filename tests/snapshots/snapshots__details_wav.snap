@@ -1,0 +1,29 @@
+---
+source: tests/snapshots.rs
+expression: text
+---
+  OK   [<dir>/Hires Band 2000-02-02/01 - Hires.wav] 24-bit/96 kHz hi-res WAV (not for CD)
+  OK   [<dir>/Hires Band 2000-02-02] 1 track, 24-bit/96 kHz hi-res WAV
+  OK   [<dir>/Muffled Band 2001-03-03/01 - Muffled.wav] CD-ready WAV
+  OK   [<dir>/Muffled Band 2001-03-03] 1 track, CD-ready WAV
+  OK   [<dir>/Synthetic Band 1990-01-01/CD1/03 - Long Jam.wav] CD-ready WAV (SBE on last track only)
+  OK   [<dir>/Synthetic Band 1990-01-01/CD2/01 - Encore.wav] CD-ready WAV (SBE on last track only)
+  OK   [<dir>/Wav Band 2002-04-04/01 - Extra chunk.wav] CD-ready WAV
+  OK   [<dir>/Wav Band 2002-04-04/02 - Plain.wav] CD-ready WAV
+  OK   [<dir>/Wav Band 2002-04-04] 2 tracks, CD-ready WAV
+  WARN [<dir>/Synthetic Band 1990-01-01/CD1/01 - Opening.wav] Gap risk if burned: SBE before the last track
+  WARN [<dir>/Synthetic Band 1990-01-01/CD1/02 - Second Song.wav] Gap risk if burned: SBE before the last track
+  WARN [<dir>/Synthetic Band 1990-01-01] 2 tracks with gap risk
+Details read for 8 file(s): 6 without issue; to check: 2 tracks with gap risk
+OK       01 - Extra chunk.wav: CD-ready WAV
+OK       01 - Hires.wav: 24-bit/96 kHz hi-res WAV (not for CD)
+OK       01 - Muffled.wav: CD-ready WAV
+OK       02 - Plain.wav: CD-ready WAV
+OK       CD1/03 - Long Jam.wav: CD-ready WAV (SBE on last track only)
+OK       CD2/01 - Encore.wav: CD-ready WAV (SBE on last track only)
+OK   Hires Band 2000-02-02: 1 track, 24-bit/96 kHz hi-res WAV
+OK   Muffled Band 2001-03-03: 1 track, CD-ready WAV
+OK   Wav Band 2002-04-04: 2 tracks, CD-ready WAV
+WARN     CD1/01 - Opening.wav: Gap risk if burned: SBE before the last track
+WARN     CD1/02 - Second Song.wav: Gap risk if burned: SBE before the last track
+WARN Synthetic Band 1990-01-01: 2 tracks with gap risk
