@@ -2,6 +2,7 @@
 name = "bootleg-toolbox"
 version = "0.1.7"
 edition = "2021"
+rust-version = "1.89"
 authors = ["Rattlehead80"]
 license = "GPL-3.0-or-later"
 description = "Checksums, tests, torrents and conversions for lossless concert recordings - a modern take on Trader's Little Helper"

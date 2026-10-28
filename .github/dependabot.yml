@@ -1,0 +1,35 @@
+# Dependabot: weekly update proposals (pull requests), on top of the security updates
+# GitHub opens as soon as a vulnerability is published.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    # New releases wait a week: a compromised one is usually pulled by then.
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    groups:
+      # Patch releases together, in one pull request.
+      patches:
+        update-types: [patch]
+    ignore:
+      # egui's API changes with each release: upgraded by hand only.
+      - dependency-name: "egui*"
+        update-types: [version-update:semver-minor, version-update:semver-major]
+      - dependency-name: eframe
+        update-types: [version-update:semver-minor, version-update:semver-major]
+      - dependency-name: winit
+        update-types: [version-update:semver-minor, version-update:semver-major]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # New releases wait a week: a compromised one is usually pulled by then.
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]

@@ -1,0 +1,66 @@
+# Code checks on every push, run by GitHub (nothing to run locally):
+# - Clippy: no warning allowed;
+# - cargo-deny: vulnerable or unmaintained dependencies, licences, crate sources;
+# - zizmor: security of these workflow files (results in Security > Code scanning).
+# The advisories are also checked every Monday, as new ones are published.
+name: Checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  clippy:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Tools
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup component add clippy
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: clippy-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: clippy-${{ runner.os }}-
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check advisories licenses sources bans
+
+  zizmor:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: zizmorcore/zizmor-action@53290badfa369cb0bf7ad16342cb62c2fa47ac7b # v0.8.0
