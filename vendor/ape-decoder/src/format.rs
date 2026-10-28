@@ -704,7 +704,8 @@ impl ApeFileInfo {
             return 0;
         }
         if frame_idx < self.header.total_frames - 1 {
-            self.seek_byte(frame_idx + 1) - self.seek_byte(frame_idx)
+            // A damaged seek table may go backwards: no bytes, not an overflow.
+            self.seek_byte(frame_idx + 1).saturating_sub(self.seek_byte(frame_idx))
         } else {
             // Final frame: from seek position to end of compressed data
             // End of compressed data = file_size - terminating_data - tag_bytes

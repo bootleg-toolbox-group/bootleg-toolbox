@@ -17,6 +17,10 @@ bootleg-toolbox = { path = ".." }
 [workspace]
 members = ["."]
 
+# The same modified ape-decoder as the program (see ../Cargo.toml).
+[patch.crates-io]
+ape-decoder = { path = "../vendor/ape-decoder" }
+
 [profile.release]
 debug = 1
 
