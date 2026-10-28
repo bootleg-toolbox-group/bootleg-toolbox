@@ -22,6 +22,9 @@ updates:
         update-types: [version-update:semver-minor, version-update:semver-major]
       - dependency-name: winit
         update-types: [version-update:semver-minor, version-update:semver-major]
+      # The decoder behind every checksum: a new version means checking every MD5 again.
+      - dependency-name: "symphonia*"
+        update-types: [version-update:semver-minor, version-update:semver-major]
 
   - package-ecosystem: github-actions
     directory: /
