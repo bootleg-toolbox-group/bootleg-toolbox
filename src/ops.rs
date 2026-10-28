@@ -2188,6 +2188,23 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Found by fuzzing: 24 bytes whose EBML header announces a 2.4 TB element; symphonia
+    /// allocated it and the program ended. Named .m4a or .mka, it must be an error.
+    #[test]
+    fn ebml_huge_element() {
+        let dir = std::env::temp_dir().join(format!("bt-ebml-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["01.m4a", "01.mka"] {
+            let file = dir.join(name);
+            std::fs::write(&file, [0x1a, 0x45, 0xdf, 0xa3, 0x01, 0xe0, 0xff, 0xff, 0x1c, 0xff, 0xff, 0xff, 0xff, 0xff, 0x42, 0x82, 0x06, 0x42, 0x82, 0x2c, 0x00, 0x80, 0xfc, 0x81]).unwrap();
+            assert!(crate::audio::probe(&file).is_err());
+            assert!(crate::audio::read_pcm(&file, &AtomicBool::new(false), |_| {}).is_err());
+            // Returning at all is the test: the allocation used to end the program.
+            let _ = crate::mediainfo::read_file(&file);
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn decoder_panic_is_an_error() {
         let dir = std::env::temp_dir().join(format!("bt-panic-{}", std::process::id()));

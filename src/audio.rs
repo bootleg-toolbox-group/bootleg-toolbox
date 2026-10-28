@@ -7,6 +7,7 @@ use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 
 use md5::{Digest, Md5};
 use symphonia::core::audio::SampleBuffer;
@@ -522,7 +523,7 @@ fn decode_flac(path: &Path, cancel: &AtomicBool, sink: impl FnMut(&[u8])) -> Res
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
     hint.with_extension("flac");
-    let probed = symphonia::default::get_probe()
+    let probed = probe_for(Format::Flac)
         .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
         .map_err(|e| format!("cannot open FLAC stream: {e}"))?;
     let reader = probed.format;
@@ -599,7 +600,7 @@ fn open_mpa(path: &Path, format: Format) -> Result<Box<dyn symphonia::core::form
     let mut hint = Hint::new();
     hint.with_extension(if format == Format::Mp2 { "mp2" } else { "mp3" });
     let options = FormatOptions { enable_gapless: true, ..Default::default() };
-    symphonia::default::get_probe()
+    probe_for(format)
         .format(&hint, mss, &options, &MetadataOptions::default())
         .map(|p| p.format)
         .map_err(|e| format!("cannot open {} stream: {e}", format.name()))
@@ -634,17 +635,105 @@ fn decode_mpa(path: &Path, format: Format, cancel: &AtomicBool, sink: impl FnMut
     decode_track(reader, &track, None, cancel, sink)
 }
 
+/// Symphonia's prober with the one reader of `format`: the default one tries every
+/// reader on any file, so a damaged .flac or .m4a could reach the MKV reader (below).
+fn probe_for(format: Format) -> &'static symphonia::core::probe::Probe {
+    use symphonia::core::probe::Probe;
+    use symphonia::default::formats::{FlacReader, IsoMp4Reader, MkvReader, MpaReader};
+    static PROBES: OnceLock<[Probe; 4]> = OnceLock::new();
+    let probes = PROBES.get_or_init(|| {
+        let mut flac = Probe::default();
+        flac.register_all::<FlacReader>();
+        let mut mpa = Probe::default();
+        mpa.register_all::<MpaReader>();
+        let mut mp4 = Probe::default();
+        mp4.register_all::<IsoMp4Reader>();
+        let mut mkv = Probe::default();
+        mkv.register_all::<MkvReader>();
+        [flac, mpa, mp4, mkv]
+    });
+    match format {
+        Format::Mp3 | Format::Mp2 => &probes[1],
+        Format::M4a => &probes[2],
+        Format::Mka => &probes[3],
+        _ => &probes[0],
+    }
+}
+
+/// Matroska elements that hold other elements (the ones symphonia reads).
+const EBML_MASTERS: [u32; 31] = [
+    0x1A45DFA3, 0x18538067, 0x114D9B74, 0x4DBB, 0x1549A966, 0x1654AE6B, 0xAE, 0xE0, 0xE1, 0x6D80, 0x6240, 0x5034,
+    0x5035, 0x1F43B675, 0xA0, 0x75A1, 0xA6, 0x1C53BB6B, 0xBB, 0xB7, 0xDB, 0x1043A770, 0x45B9, 0xB6, 0x8F, 0x80,
+    0x1254C367, 0x7373, 0x63C0, 0x67C8, 0x1941A469,
+];
+
+/// Checks an MKA file's element sizes before symphonia reads it: symphonia 0.5 allocates
+/// an element's announced size before reading it, and a damaged size made it ask for
+/// terabytes, which ends the program (found by fuzzing). Every element must fit in its
+/// parent and in the file; only the headers are read.
+fn ebml_sizes_ok(path: &Path) -> Result<(), String> {
+    let mut f = BufReader::new(File::open(path).map_err(io_err)?);
+    let len = f.get_ref().metadata().map_err(io_err)?.len();
+    // A variable-length integer: (value, width); for a size, all ones means "unknown".
+    fn vint(f: &mut impl Read, keep_marker: bool) -> Option<(u64, u32, bool)> {
+        let mut b = [0u8];
+        f.read_exact(&mut b).ok()?;
+        let width = b[0].leading_zeros() + 1;
+        if width > 8 {
+            return None;
+        }
+        let mut value = if keep_marker { b[0] as u64 } else { (b[0] as u64) & (0xFF >> width) };
+        let mut all_ones = value == (0xFF >> width) as u64;
+        for _ in 1..width {
+            f.read_exact(&mut b).ok()?;
+            value = value << 8 | b[0] as u64;
+            all_ones &= b[0] == 0xFF;
+        }
+        Some((value, width, all_ones))
+    }
+    let damaged = || "damaged MKA file: an element is larger than the file".to_string();
+    // (end of the element being walked), from the outside in.
+    let mut ends = vec![len];
+    let mut pos = 0u64;
+    let mut elements = 0u32;
+    while let Some(&end) = ends.last() {
+        if pos >= end {
+            ends.pop();
+            continue;
+        }
+        elements += 1;
+        if elements > 1_000_000 {
+            return Ok(());
+        }
+        f.seek(SeekFrom::Start(pos)).map_err(io_err)?;
+        let Some((id, id_width, _)) = vint(&mut f, true) else { return Err(damaged()) };
+        let Some((size, size_width, unknown)) = vint(&mut f, false) else { return Err(damaged()) };
+        let start = pos + (id_width + size_width) as u64;
+        let stop = if unknown { end } else { start.checked_add(size).filter(|&s| s <= end).ok_or_else(damaged)? };
+        if u32::try_from(id).is_ok_and(|id| EBML_MASTERS.contains(&id)) {
+            ends.push(stop);
+            pos = start;
+        } else {
+            pos = stop;
+        }
+    }
+    Ok(())
+}
+
 /// An M4A or MKA file, with its first audio track this version can decode.
 fn open_container(
     path: &Path,
     format: Format,
 ) -> Result<(Box<dyn symphonia::core::formats::FormatReader>, symphonia::core::formats::Track, Codec), String> {
+    if format == Format::Mka {
+        ebml_sizes_ok(path)?;
+    }
     let file = File::open(path).map_err(io_err)?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
     hint.with_extension(if format == Format::M4a { "m4a" } else { "mka" });
     let options = FormatOptions { enable_gapless: true, ..Default::default() };
-    let reader = symphonia::default::get_probe()
+    let reader = probe_for(format)
         .format(&hint, mss, &options, &MetadataOptions::default())
         .map_err(|e| format!("cannot open {} file: {e}", format.name()))?
         .format;
