@@ -53,7 +53,8 @@ fn parse(data: &[u8], pos: usize, depth: usize) -> Result<(Value, usize), String
         b'0'..=b'9' => {
             let colon = pos + data[pos..].iter().position(|&b| b == b':').ok_or_else(bad)?;
             let len: usize = std::str::from_utf8(&data[pos..colon]).ok().and_then(|s| s.parse().ok()).ok_or_else(bad)?;
-            let end = colon.checked_add(1 + len).filter(|&e| e <= data.len()).ok_or_else(bad)?;
+            // The length comes from the file: it may be absurd.
+            let end = len.checked_add(colon + 1).filter(|&e| e <= data.len()).ok_or_else(bad)?;
             Ok((Value::Bytes(data[colon + 1..end].to_vec()), end))
         }
         _ => Err(bad()),
@@ -337,6 +338,13 @@ mod tests {
     fn passkey_hidden() {
         assert_eq!(tracker_host("http://tracker.example.org:2710/abc123/announce"), "tracker.example.org");
         assert_eq!(tracker_host("https://user:pw@t.example.net/announce.php?passkey=x"), "t.example.net");
+    }
+
+    /// Found by fuzzing: a string length near 2^64 made the end overflow.
+    #[test]
+    fn bencode_absurd_length() {
+        assert!(parse(b"18446744073709551615:x", 0, 0).is_err());
+        assert!(parse(b"d4:infod18446744073709551614:ee", 0, 0).is_err());
     }
 
     #[test]

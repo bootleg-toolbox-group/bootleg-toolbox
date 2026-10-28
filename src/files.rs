@@ -251,14 +251,14 @@ pub fn parse_checksum_file(path: &Path) -> std::io::Result<(String, Vec<(String,
                     entries.push((name.trim().to_string(), digest));
                 }
             }
-        } else if line.len() > 33 && is_md5_hex(&line[..32]) {
-            let mut rest = line[32..].trim_start();
+        } else if let Some((digest, rest)) = line.split_at_checked(32).filter(|(d, _)| line.len() > 33 && is_md5_hex(d)) {
+            let mut rest = rest.trim_start();
             if let Some(after) = rest.strip_prefix("[shntool]") {
                 rest = after.trim_start();
             }
             let rest = rest.strip_prefix('*').unwrap_or(rest).trim_end();
             if !rest.is_empty() {
-                entries.push((rest.to_string(), line[..32].to_ascii_lowercase()));
+                entries.push((rest.to_string(), digest.to_ascii_lowercase()));
             }
         }
     }
@@ -312,6 +312,19 @@ mod tests {
         assert_eq!(resolve_entry(&dir, "./CD1/04 - Chatter.flac").unwrap(), dir.join("CD1").join("04 - Chatter.flac"));
         assert_eq!(resolve_entry(&dir, "elsewhere/04 - CHATTER.flac").unwrap(), dir.join("CD1").join("04 - Chatter.flac"));
         assert!(resolve_entry(&dir, "05.flac").is_none());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Found by fuzzing: a line with accented letters was cut inside a character.
+    #[test]
+    fn checksum_lines_with_accents() {
+        let dir = std::env::temp_dir().join(format!("bt-accents-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("show.md5");
+        let digest = "0123456789abcdef0123456789abcdef";
+        fs::write(&file, format!("{digest} *01 - Café.flac\n0123456789abcdef0123456789abcdé ok\néééééééééééééééééééééééééé.flac\n")).unwrap();
+        let (_, entries) = parse_checksum_file(&file).unwrap();
+        assert_eq!(entries, vec![("01 - Café.flac".to_string(), digest.to_string())]);
         fs::remove_dir_all(&dir).unwrap();
     }
 

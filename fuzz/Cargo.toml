@@ -1,0 +1,56 @@
+# Fuzz targets (cargo-fuzz, libFuzzer): malformed files of every kind the program reads.
+# Run with the nightly toolchain: cargo +nightly fuzz run <target> (from the repository root).
+[package]
+name = "bootleg-toolbox-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bootleg-toolbox = { path = ".." }
+
+# Not part of the main package's build.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "audio"
+path = "fuzz_targets/audio.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "torrent"
+path = "fuzz_targets/torrent.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "checksums"
+path = "fuzz_targets/checksums.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "info_file"
+path = "fuzz_targets/info_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dvd"
+path = "fuzz_targets/dvd.rs"
+test = false
+doc = false
+bench = false
