@@ -1081,6 +1081,11 @@ fn decode_ape(path: &Path, cancel: &AtomicBool, mut sink: impl FnMut(&[u8])) -> 
     if total as u64 * 4 > size {
         return Err(format!("damaged header: {total} frames announced in a file of {size} bytes"));
     }
+    // Monkey's Audio writes at most 294,912 blocks per frame (Extra High, Insane): a larger
+    // value is a damaged header, each frame of which takes seconds to fail (fuzzing).
+    if frame_len > 1 << 21 {
+        return Err(format!("damaged header: {frame_len} samples per frame"));
+    }
     if !(1..=4).contains(&width) {
         return Err(format!("damaged header: {} bits per sample", first.info().bits_per_sample));
     }
