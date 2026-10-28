@@ -316,16 +316,7 @@ impl Tables {
             .iter()
             .filter(|&&sf| {
                 let gain = 2f64.powf(-3.0 / 16.0 * (sf * sf_max - 60.0));
-                let err = powered
-                    .iter()
-                    .map(|p| {
-                        let v = p * gain;
-                        let e = v.round() - v;
-                        e * e
-                    })
-                    .sum::<f64>()
-                    / powered.len() as f64;
-                err < tau
+                crate::mp3trace::grid_error(powered, gain) < tau
             })
             .count()
     }

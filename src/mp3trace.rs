@@ -422,15 +422,28 @@ impl Tables {
             .iter()
             .filter(|&&sf| {
                 let gain = 2f64.powf(-3.0 / 16.0 * (sf * sf_max - 80.0));
-                let err = powered.iter().map(|p| {
-                    let v = p * gain;
-                    let e = v.round() - v;
-                    e * e
-                }).sum::<f64>() / powered.len() as f64;
-                err < tau
+                grid_error(&powered, gain) < tau
             })
             .count()
     }
+}
+
+/// Mean squared distance of `values × gain` (all ≥ 0) to the nearest integers: how well
+/// they fit an encoder's quantisation grid.
+pub(crate) fn grid_error(values: &[f64], gain: f64) -> f64 {
+    // Adding then removing 2^52 rounds to the nearest integer in plain arithmetic: f64::round
+    // is a call into the C library on x86-64 without SSE4.1, the bulk of the detectors' time.
+    // Halves go to the even integer instead of away from zero, which leaves e² unchanged.
+    const SHIFT: f64 = 4_503_599_627_370_496.0;
+    let sum: f64 = values
+        .iter()
+        .map(|p| {
+            let v = p * gain;
+            let e = if v < SHIFT { (v + SHIFT) - SHIFT - v } else { 0.0 };
+            e * e
+        })
+        .sum();
+    sum / values.len() as f64
 }
 
 /// erf, to 1.2e-7 (Numerical Recipes, Chebyshev fit of erfc).
