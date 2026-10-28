@@ -986,6 +986,12 @@ fn decode_ape(path: &Path, cancel: &AtomicBool, mut sink: impl FnMut(&[u8])) -> 
         let i = first.info();
         (i.blocks_per_frame as u64, i.sample_rate.max(1) as f64, i.total_samples)
     };
+    // The seek table holds 4 bytes per frame: a damaged header can announce billions of
+    // frames in a small file, each failing in turn (found by fuzzing: hours on 96 bytes).
+    let size = std::fs::metadata(path).map_err(io_err)?.len();
+    if total as u64 * 4 > size {
+        return Err(format!("damaged header: {total} frames announced in a file of {size} bytes"));
+    }
     // Frames that fail: the rest is still decoded (not passed on), to tell how much is lost.
     let mut damaged: Vec<u32> = Vec::new();
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 8).min(total.max(1) as usize);
