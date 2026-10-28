@@ -561,7 +561,7 @@ fn decode_track(
         }
         let decoded = decoder.decode(&packet).map_err(|e| format!("decoding error: {e}"))?;
         let spec = *decoded.spec();
-        let channels = spec.channels.count();
+        let channels = spec.channels.count().max(1);
         let needed = decoded.capacity();
         out.clear();
         let samples = if bits.is_some() {
@@ -991,6 +991,9 @@ fn decode_ape(path: &Path, cancel: &AtomicBool, mut sink: impl FnMut(&[u8])) -> 
     let size = std::fs::metadata(path).map_err(io_err)?.len();
     if total as u64 * 4 > size {
         return Err(format!("damaged header: {total} frames announced in a file of {size} bytes"));
+    }
+    if !(1..=4).contains(&width) {
+        return Err(format!("damaged header: {} bits per sample", first.info().bits_per_sample));
     }
     // Frames that fail: the rest is still decoded (not passed on), to tell how much is lost.
     let mut damaged: Vec<u32> = Vec::new();

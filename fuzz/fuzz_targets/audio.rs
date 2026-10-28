@@ -1,8 +1,9 @@
 //! Audio files of every format: header, decoding, media info, WAV layout.
 //!
 //! The program turns a decoder's panic into an error for that file (ops::catch_panic), so
-//! panics inside symphonia are expected here: they are let through to catch_panic. Any
-//! other panic is a crash.
+//! panics inside the third-party decoders are expected here (symphonia: AAC/ADTS reader;
+//! wavicle: block size overflow, a debug assertion only): they are let through to
+//! catch_panic. Any other panic is a crash.
 #![no_main]
 
 use std::sync::atomic::AtomicBool;
@@ -20,7 +21,8 @@ fn hook() {
     static HOOK: Once = Once::new();
     HOOK.call_once(|| {
         std::panic::set_hook(Box::new(|info| {
-            if std::backtrace::Backtrace::force_capture().to_string().contains("symphonia") {
+            let trace = std::backtrace::Backtrace::force_capture().to_string();
+            if ["symphonia", "wavicle"].iter().any(|c| trace.contains(c)) {
                 return;
             }
             eprintln!("{info}");
