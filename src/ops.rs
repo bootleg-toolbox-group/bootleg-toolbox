@@ -342,7 +342,7 @@ pub fn spawn(op: Op, shows: Vec<Show>, files: Vec<PathBuf>, opt: Options, tx: Se
         };
         let pool = rayon::ThreadPoolBuilder::new().num_threads(ctx.opt.jobs.max(1)).build();
         let summary = match pool {
-            Ok(pool) => pool.install(|| match &op {
+            Ok(pool) => catch_panic(|| Ok(pool.install(|| match &op {
                 Op::Details { verbose } => op_details(&ctx, &shows, &files, *verbose),
                 Op::Verify => op_verify(&ctx, &shows),
                 Op::Create => op_create(&ctx, &shows),
@@ -362,12 +362,26 @@ pub fn spawn(op: Op, shows: Vec<Show>, files: Vec<PathBuf>, opt: Options, tx: Se
                 Op::AfterFlac { roots, sources, trash_sources, trash_checksums, create_ffp } => {
                     op_after_flac(&ctx, roots, sources, *trash_sources, trash_checksums, *create_ffp)
                 }
-            }),
+            })))
+            .unwrap_or_else(|e| format!("Stopped by an internal error: {e}")),
             Err(e) => format!("Cannot start worker threads: {e}"),
         };
         let summary = if ctx.cancelled() { "Stopped.".to_string() } else { summary };
         let _ = tx.send(Msg::Finished { summary, rescan: ctx.rescan.load(Ordering::SeqCst) });
     });
+}
+
+/// Runs `f`, turning a panic into an error: one malformed file must not stop the operation
+/// (nor leave the window waiting for it to finish).
+pub fn catch_panic<R>(f: impl FnOnce() -> Result<R, String>) -> Result<R, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|panic| {
+        let what = panic
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown error".into());
+        Err(format!("the file could not be read (decoder failure: {what})"))
+    })
 }
 
 /// Runs `f` on every item in parallel; errors are reported against `path_of(item)`.
@@ -383,7 +397,9 @@ fn par_map<T: Sync, R: Send>(
             if ctx.cancelled() {
                 return None;
             }
-            let result = f(item);
+            // A decoder that panics on a malformed file (found by fuzzing, in symphonia's
+            // AAC reader) fails that file only.
+            let result = catch_panic(|| f(item));
             ctx.tick();
             match result {
                 Ok(value) => Some(value),
@@ -1658,7 +1674,7 @@ fn op_media_info(ctx: &Ctx, shows: &[Show], files: &[PathBuf], dvds: &[PathBuf])
         let read: Vec<Result<crate::mediainfo::FileInfo, String>> = mine
             .par_iter()
             .map(|f| {
-                let r = crate::mediainfo::read_file(f);
+                let r = catch_panic(|| crate::mediainfo::read_file(f));
                 ctx.tick();
                 r
             })
@@ -2145,6 +2161,23 @@ pub fn move_to_trash(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Found by fuzzing: these bytes, named .m4a, make symphonia 0.5's AAC (ADTS) reader
+    /// panic. The file must come out as unreadable, not stop the program.
+    #[test]
+    fn decoder_panic_is_an_error() {
+        let dir = std::env::temp_dir().join(format!("bt-panic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("01.m4a");
+        let bytes = [
+            0xff, 0x00, 0xed, 0x2e, 0x00, 0xf1, 0x84, 0x0f, 0xed, 0x00, 0x00, 0xc1, 0x3e, 0xff, 0xf1, 0x00, //
+            0xed, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        std::fs::write(&file, bytes).unwrap();
+        assert!(catch_panic(|| crate::audio::probe(&file)).is_err());
+        assert!(catch_panic(|| crate::mediainfo::read_file(&file)).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn info_file_ranking() {

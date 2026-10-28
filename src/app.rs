@@ -921,7 +921,7 @@ impl App {
         if let Op::Convert { target: Target::Flac, level, round_float: false } = op {
             let float = |p: &PathBuf| match self.info.get(p) {
                 Some(info) => info.float,
-                None => crate::audio::probe(p).is_ok_and(|i| i.float),
+                None => ops::catch_panic(|| crate::audio::probe(p)).is_ok_and(|i| i.float),
             };
             if self.running.is_none() && files.iter().any(float) {
                 self.float_pending = Some(FloatPending { level, shows: shows.clone(), files: files.clone(), scans: Vec::new() });
