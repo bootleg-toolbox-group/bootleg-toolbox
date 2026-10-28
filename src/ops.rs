@@ -133,6 +133,8 @@ pub struct Options {
     pub crlf: bool,
     pub jobs: usize,
     pub auto_details: bool,
+    /// Lossless? also looks for AAC coding traces (several times slower; off by default).
+    pub aac_check: bool,
     pub announce_dime: String,
     pub announce_ttd: String,
     pub torrent_dir: String,
@@ -187,6 +189,7 @@ impl Default for Options {
             crlf: cfg!(windows),
             jobs: cpus.clamp(1, 8),
             auto_details: true,
+            aac_check: false,
             announce_dime: Tracker::Dime.default_announce().into(),
             announce_ttd: Tracker::Ttd.default_announce().into(),
             torrent_dir: String::new(),
@@ -876,7 +879,7 @@ pub fn op_lossless(ctx: &Ctx, shows: &[Show], files: &[PathBuf]) -> String {
     let results = par_map(ctx, files, |p| p.clone(), |path| {
         let info = audio::probe(path)?;
         ctx.info(path, &info);
-        let verdict = crate::lossless::analyse(path, &info, &ctx.cancel)?;
+        let verdict = crate::lossless::analyse(path, &info, ctx.opt.aac_check, &ctx.cancel)?;
         let tooltip = format!(
             "Lossless check:\n{}",
             verdict.details.iter().map(|d| format!("\u{2022} {d}")).collect::<Vec<_>>().join("\n")

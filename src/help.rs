@@ -70,6 +70,7 @@ pub const VARIABLES: &[(&str, &str)] = &[
     ("BT_TRACKERS=\"Name=URL;...\"", "torrent-all: extra trackers, with their announce URLs"),
     ("BT_RENAME=number|disc|etree|keep", "tag-info: \"01 - Title\" (default), \"d1t01 - Title\", \"Artist YYYY-MM-DD d1t01\", or no renaming"),
     ("BT_DRY=1", "tag-info: only print what would be written"),
+    ("BT_AAC=1", "lossless: also look for AAC coding traces (slower)"),
     ("BT_REPORT=1", "lossless, speed: print the full report"),
     ("BT_WAYLAND=1", "Linux, window mode: native Wayland window (no drag and drop)"),
 ];

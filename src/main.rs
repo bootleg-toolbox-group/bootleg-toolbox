@@ -165,6 +165,9 @@ fn run_cli(args: &[String]) -> i32 {
     if std::env::var("BT_OVERWRITE").is_ok() {
         opt.overwrite = true;
     }
+    if std::env::var("BT_AAC").is_ok() {
+        opt.aac_check = true;
+    }
     if std::env::var("BT_SFV").is_ok() {
         opt.create_sfv = true;
     }

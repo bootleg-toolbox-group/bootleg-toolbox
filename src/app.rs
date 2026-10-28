@@ -2286,6 +2286,12 @@ impl App {
                     ui.add(egui::DragValue::new(&mut draft.jobs).range(1..=64));
                 });
                 ui.checkbox(&mut draft.auto_details, "Read file details automatically when adding files");
+                ui.checkbox(&mut draft.aac_check, "Lossless?: also look for AAC coding traces (slower)")
+                    .on_hover_text("Finds files decoded from an AAC (M4A, iTunes, YouTube, streams) and converted back \
+                                    to a lossless format, even at high bitrates.\n\
+                                    The analysis then takes several times longer: about 10 seconds of processor time \
+                                    per track, spread over the files processed in parallel.\n\
+                                    MP3 coding traces are always looked for.");
                 ui.checkbox(&mut draft.check_updates, "Check for a new version at startup")
                     .on_hover_text("Asks github.com once at each start whether a newer version has been released. \
                                     Nothing is sent but the program's name and version. \
