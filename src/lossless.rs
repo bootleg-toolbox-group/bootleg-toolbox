@@ -132,7 +132,9 @@ fn analyse_signal(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<
     // (a comb); the values around zero are counted.
     let comb_check = info.bits == 24 && integer;
     // MP3 traces in the encoder's own filter bank (MP3 sample rates only).
-    let mut mp3 = (matches!(info.rate, 32000 | 44100 | 48000) && channels <= 2 && !info.lossy()).then(|| crate::mp3trace::Collector::new(channels));
+    let codec_rates = matches!(info.rate, 32000 | 44100 | 48000) && channels <= 2 && !info.lossy();
+    let mut mp3 = codec_rates.then(|| crate::mp3trace::Collector::new(channels));
+    let mut aac = codec_rates.then(|| crate::aactrace::collector(channels));
     const SPAN: i32 = 1 << 16;
     let mut histogram = if comb_check { vec![0u32; 2 * SPAN as usize] } else { Vec::new() };
 
@@ -158,6 +160,9 @@ fn analyse_signal(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<
         }
         if let Some(m) = mp3.as_mut() {
             m.push(values);
+        }
+        if let Some(a) = aac.as_mut() {
+            a.push(values);
         }
         let mono = values.iter().sum::<f64>() / channels as f64;
         if mono != 0.0 {
@@ -203,6 +208,9 @@ fn analyse_signal(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<
 
     let mut details = Vec::new();
     let mp3_trace = mp3.and_then(|m| m.detect(info.rate));
+    // AAC only when no MP3 was found (the slower search).
+    let aac_trace = if mp3_trace.is_some_and(|t| t.found()) { None } else { aac.and_then(|a| crate::aactrace::detect(a, info.rate)) };
+    let aac_found = aac_trace.filter(crate::aactrace::found);
     if let Some(t) = mp3_trace.filter(|t| t.found()) {
         details.push(format!("MP3 coding traces found ({:.1} % of the bands, {:.0} standard deviations above chance)", t.likelihood * 100.0, t.contrast));
     }
@@ -645,8 +653,20 @@ fn analyse_signal(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<
             details,
         )
     };
-    if (verdict.label.starts_with("Unsure") || verdict.label.starts_with("Lossy?")) && mp3_trace.is_some_and(|t| !t.found()) {
-        verdict.sentence.push_str("; no MP3 coding traces, so not an MP3 converted straight back");
+    if (verdict.label.starts_with("Unsure") || verdict.label.starts_with("Lossy?")) && mp3_trace.is_some_and(|t| !t.found()) && aac_trace.is_some() && aac_found.is_none() {
+        verdict.sentence.push_str("; no MP3 or AAC coding traces, so not an MP3 or AAC converted straight back");
+    }
+    if let Some(t) = aac_found {
+        let sentence = format!(
+            "Decoded from an AAC: the file still holds the rounding pattern of an AAC encoder ({:.1} % of the bands match it, {:.0} standard deviations above chance), which only a lossy file converted back leaves",
+            t.likelihood * 100.0,
+            t.contrast
+        );
+        let label = if verdict.label.starts_with("Lossy ") && !verdict.label.starts_with(LOSSY_UPSTREAM) { verdict.label.clone() } else { "Lossy (AAC traces)".into() };
+        let mut lossy = Verdict::new(label, sentence, Level::Error, verdict.details.clone());
+        lossy.details.push(format!("AAC coding traces found ({:.1} % of the bands, {:.0} standard deviations above chance)", t.likelihood * 100.0, t.contrast));
+        lossy.report = std::mem::take(&mut verdict.report);
+        verdict = lossy;
     }
     if let Some(t) = mp3_trace.filter(|t| t.found()) {
         let sentence = format!(
@@ -701,6 +721,7 @@ fn analyse_signal(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<
         lossywav,
         edge,
         mp3_trace,
+        aac_trace,
     };
     verdict.report = build_report(crate::files::file_name(path), &verdict, &facts);
     Ok(verdict)
@@ -737,6 +758,8 @@ struct Facts {
     edge: Option<f64>,
     /// The MP3 encoder's rounding pattern, looked for in its own filter bank.
     mp3_trace: Option<crate::mp3trace::Trace>,
+    /// The same with AAC's transform (not looked for when MP3 traces were found).
+    aac_trace: Option<crate::mp3trace::Trace>,
 }
 
 /// Blocks whose lowest bits are all zero beyond the file's own resolution (lossyWAV).
@@ -930,6 +953,25 @@ fn build_report(title: String, verdict: &Verdict, f: &Facts) -> Report {
             if t.found() { Level::Error } else { Level::Ok },
         );
     }
+    if let Some(t) = f.aac_trace {
+        let found = crate::aactrace::found(&t);
+        add(
+            "AAC coding traces",
+            if found {
+                format!(
+                    "found: {:.1} % of the bands, {:.0} standard deviations above chance (AAC frames at sample {}, {})",
+                    t.likelihood * 100.0,
+                    t.contrast,
+                    t.offset,
+                    if t.mid_side { "mid/side" } else { "left/right" }
+                )
+            } else {
+                format!("none ({:.1} % of the bands, {:.0} standard deviations above chance)", t.likelihood * 100.0, t.contrast)
+            },
+            "The same search with the transform of AAC (iTunes, YouTube, streaming services, many webcasts). A file decoded from an AAC falls back onto the encoder's rounding grid at one position; genuine audio does not. Resampling or effects after the decoder erase this trace.",
+            if found { Level::Error } else { Level::Ok },
+        );
+    }
     if let Some(e) = f.edge {
         add(
             if f.cutoff.is_some() { "Edge of the lowpass" } else { "Treble roll-off" },
@@ -1099,8 +1141,19 @@ fn reasoning(verdict: &Verdict, f: &Facts) -> Vec<String> {
     if let (Some(p), true) = (&f.padded, label != LOSSLESS_PADDED) {
         r.push(format!("Also: {p}."));
     }
-    if (label.starts_with("Lossy?") || label.starts_with("Unsure")) && f.mp3_trace.is_some_and(|t| !t.found()) {
-        r.push("No MP3 coding traces were found. An MP3 converted straight back to a lossless format shows them, even at 320 kbps; an AAC, or audio processed after decoding (resampled, equalised), would not, so the doubt is smaller but remains.".into());
+    if let Some(t) = f.aac_trace.filter(crate::aactrace::found) {
+        r.insert(
+            0,
+            format!(
+                "Analysed again with an AAC encoder's transform, the sound falls back onto the encoder's rounding grid in {:.1} % of the bands at one position (sample {}), {:.0} standard deviations above the other positions. Genuine audio shows no such position: this file was decoded from an AAC and converted back to a lossless format.",
+                t.likelihood * 100.0,
+                t.offset,
+                t.contrast
+            ),
+        );
+    }
+    if (label.starts_with("Lossy?") || label.starts_with("Unsure")) && f.mp3_trace.is_some_and(|t| !t.found()) && f.aac_trace.is_some_and(|t| !crate::aactrace::found(&t)) {
+        r.push("No MP3 or AAC coding traces were found. An MP3 or AAC converted straight back to a lossless format shows them, even at high bitrates; audio processed after decoding (resampled, equalised) or another codec would not, so the doubt is smaller but remains.".into());
     }
     if let Some(e) = f.edge.filter(|_| label.starts_with("Lossy?") || label.starts_with("Unsure")) {
         r.push(if e < 150.0 {

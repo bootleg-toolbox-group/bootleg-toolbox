@@ -41,24 +41,33 @@ impl Trace {
     }
 }
 
-/// Collects, while the file is read, the loudest windows of 2 granules (with the granules
-/// around them that the analysis needs), on the mid channel.
+/// Collects, while the file is read, the loudest windows of 2 codec frames (with the frames
+/// after them that the analysis needs), on the mid channel. MP3: frames of 576 samples
+/// (granules), 4 kept per window; AAC: frames of 1024, 3 kept.
 pub struct Collector {
-    channels: usize,
-    /// The last 2 granules read, per frame (L, R), circular from `head`.
+    pub(crate) channels: usize,
+    frame: usize,
+    /// Frames kept per window.
+    frames: usize,
+    /// The last 2 frames read (L, R), circular from `head`.
     ring: Vec<[f32; 2]>,
     head: usize,
-    /// Running energy of the current granule and the one before.
+    /// Running energy of the current frame and the one before.
     energy: [f64; 2],
-    granule_len: usize,
-    granules: usize,
-    /// (energy, samples collected so far: 4 granules wanted)
+    frame_len: usize,
+    count: usize,
+    /// (energy, samples collected so far)
     kept: Vec<(f64, Vec<[f32; 2]>)>,
 }
 
 impl Collector {
+    /// For the MP3 detector.
     pub fn new(channels: usize) -> Self {
-        Collector { channels: channels.min(2), ring: vec![[0.0; 2]; 2 * GRANULE], head: 0, energy: [0.0; 2], granule_len: 0, granules: 0, kept: Vec::new() }
+        Self::with(channels, GRANULE, 4)
+    }
+
+    pub(crate) fn with(channels: usize, frame: usize, frames: usize) -> Self {
+        Collector { channels: channels.min(2), frame, frames, ring: vec![[0.0; 2]; 2 * frame], head: 0, energy: [0.0; 2], frame_len: 0, count: 0, kept: Vec::new() }
     }
 
     /// One sample frame (one value per channel, -1.0..1.0).
@@ -66,20 +75,21 @@ impl Collector {
         let (l, r) = if self.channels == 2 { (values[0], values[1]) } else { (values[0], values[0]) };
         let frame = [l as f32, r as f32];
         let mid = if self.channels == 2 { (l + r) / 2.0 } else { l };
-        for (_, seg) in self.kept.iter_mut().filter(|(_, s)| s.len() < 4 * GRANULE) {
+        let full = self.frames * self.frame;
+        for (_, seg) in self.kept.iter_mut().filter(|(_, s)| s.len() < full) {
             seg.push(frame);
         }
         self.ring[self.head] = frame;
-        self.head = (self.head + 1) % (2 * GRANULE);
+        self.head = (self.head + 1) % (2 * self.frame);
         self.energy[1] += mid * mid;
-        self.granule_len += 1;
-        if self.granule_len == GRANULE {
-            self.granules += 1;
-            // A window of the last 2 granules is complete: keep it if it is among the loudest.
-            if self.granules >= 2 {
+        self.frame_len += 1;
+        if self.frame_len == self.frame {
+            self.count += 1;
+            // A window of the last 2 frames is complete: keep it if it is among the loudest.
+            if self.count >= 2 {
                 let e = self.energy[0] + self.energy[1];
                 let snapshot = || {
-                    let mut seg = Vec::with_capacity(4 * GRANULE);
+                    let mut seg = Vec::with_capacity(full);
                     seg.extend_from_slice(&self.ring[self.head..]);
                     seg.extend_from_slice(&self.ring[..self.head]);
                     seg
@@ -87,19 +97,19 @@ impl Collector {
                 let weakest = self.kept.iter().enumerate().min_by(|a, b| a.1 .0.total_cmp(&b.1 .0)).map(|(i, k)| (i, k.0));
                 if self.kept.len() < WINDOWS {
                     self.kept.push((e, snapshot()));
-                } else if let Some((i, low)) = weakest.filter(|(_, low)| e > *low) {
-                    let _ = low;
+                } else if let Some((i, _)) = weakest.filter(|(_, low)| e > *low) {
                     self.kept[i] = (e, snapshot());
                 }
             }
             self.energy = [self.energy[1], 0.0];
-            self.granule_len = 0;
+            self.frame_len = 0;
         }
     }
 
-    /// The windows that could be completed (4 granules each).
-    fn segments(self) -> Vec<Vec<[f32; 2]>> {
-        self.kept.into_iter().filter(|(e, s)| *e > 0.0 && s.len() == 4 * GRANULE).map(|(_, s)| s).collect()
+    /// The windows that could be completed.
+    pub(crate) fn segments(self) -> Vec<Vec<[f32; 2]>> {
+        let full = self.frames * self.frame;
+        self.kept.into_iter().filter(|(e, s)| *e > 0.0 && s.len() == full).map(|(_, s)| s).collect()
     }
 
     /// Runs the detector (44.1, 48 or 32 kHz only: the rates of MP3).
@@ -407,7 +417,7 @@ impl Tables {
             return 0;
         }
         let sf_max = 4.0 * max.log2() + 16.0 / 3.0 + 80.0;
-        let powered: Vec<f64> = band.iter().map(|x| x.abs().powf(0.75)).collect();
+        let powered: Vec<f64> = band.iter().map(|x| { let r = x.abs().sqrt(); r * r.sqrt() }).collect();
         self.scale
             .iter()
             .filter(|&&sf| {
@@ -424,7 +434,7 @@ impl Tables {
 }
 
 /// erf, to 1.2e-7 (Numerical Recipes, Chebyshev fit of erfc).
-fn erf(x: f64) -> f64 {
+pub(crate) fn erf(x: f64) -> f64 {
     let z = x.abs();
     let t = 1.0 / (1.0 + 0.5 * z);
     let poly = -z * z - 1.26551223
@@ -434,7 +444,7 @@ fn erf(x: f64) -> f64 {
 }
 
 /// Inverse of erf: an approximation refined by Newton's method.
-fn erfinv(y: f64) -> f64 {
+pub(crate) fn erfinv(y: f64) -> f64 {
     let y = y.clamp(-0.999_999_999, 0.999_999_999);
     let a = 0.147;
     let ln = (1.0 - y * y).ln();

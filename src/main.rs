@@ -11,6 +11,7 @@ mod fonts;
 mod help;
 mod integration;
 mod lossless;
+mod aactrace;
 mod mp3trace;
 mod mediainfo;
 mod ops;

@@ -33,8 +33,8 @@ ffmpeg or LAME. Every decoder and encoder is built in.
   `SBE-fixed` folder.
 - **Lossless?**: a spectral analysis that spots lossy sources (MP3/AAC transcodes),
   upsampled audio, 16-bit audio in 24-bit files (also after a level change), lossyWAV
-  files and FM broadcasts, plus a search for MP3 coding traces in the encoder's own filter
-  bank that catches MP3s up to 320 kbps; with a full report of the measurements and the
+  files and FM broadcasts, plus a search for MP3 and AAC coding traces with the encoders' own
+  transforms that catches MP3s and AACs up to 320 kbps; with a full report of the measurements and the
   reasoning.
 - **Speed?**: estimates whether a tape runs too fast or too slow (FM pilot tone, tuning
   against A440, mains hum), with the correction to apply.

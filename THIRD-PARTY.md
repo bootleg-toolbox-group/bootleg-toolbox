@@ -27,13 +27,15 @@ built from a modified copy in [vendor/ape-decoder](vendor/ape-decoder), with its
 files. The change adds the value coding of Monkey's Audio 3.95 to 3.98 files, which the
 original decodes as if they were 3.99 and later; it is listed in its CHANGELOG.md.
 
-## MP3 transcoding detector (Lossless?)
+## MP3 and AAC transcoding detectors (Lossless?)
 
-The search for MP3 coding traces in `src/mp3trace.rs` is a Rust port of the MP3 detector of
-Olivier Derrien (CNRS/PRISM, Marseille, 2018), https://github.com/craft-and-code/lac-transcoded,
-described in O. Derrien, "Detection of genuine lossless audio files. Application to the
-MPEG-AAC codec", Journal of the Audio Engineering Society 67(3), 2019. The tables (polyphase
-window, scale factor bands, aliasing butterflies) come from that code. Licence:
+The search for MP3 and AAC coding traces in `src/mp3trace.rs` and `src/aactrace.rs` is a
+Rust port of the MP3 and AAC detectors of Olivier Derrien (CNRS/PRISM, Marseille, 2018),
+https://github.com/craft-and-code/lac-transcoded, described in O. Derrien, "Detection of
+genuine lossless audio files. Application to the MPEG-AAC codec", Journal of the Audio
+Engineering Society 67(3), 2019. The tables (polyphase window, scale factor bands, aliasing
+butterflies) come from that code; Kaiser-Bessel-derived windows were added to the AAC
+detector. Licence:
 
 ```
 MIT License
