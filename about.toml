@@ -1,0 +1,22 @@
+# cargo-about: generates the list of crates and licence texts of THIRD-PARTY.md
+# (./third-party.sh). Same licences as deny.toml.
+targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-gnu"]
+ignore-build-dependencies = false
+ignore-dev-dependencies = true
+# Bootleg Toolbox itself (publish = false) is not a third party.
+private = { ignore = true }
+accepted = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "LGPL-3.0",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]

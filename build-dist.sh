@@ -10,8 +10,11 @@ export CARGO_TARGET_DIR=target/dist
 # LAME is built by a configure script that does not watch CFLAGS: rebuild it.
 cargo clean --release -p mp3lame-sys >/dev/null 2>&1 || true
 cargo clean --release --target x86_64-pc-windows-gnu -p mp3lame-sys >/dev/null 2>&1 || true
-cargo build --release
-cargo build --release --target x86_64-pc-windows-gnu
+# cargo-auditable (cargo install cargo-auditable) embeds the list of dependencies and their
+# versions, so that the executables can be checked later against new advisories
+# (cargo audit bin <file>). Names and versions only: no path.
+cargo auditable build --release
+cargo auditable build --release --target x86_64-pc-windows-gnu
 mkdir -p dist
 cp target/dist/release/bootleg-toolbox dist/bootleg-toolbox
 cp target/dist/x86_64-pc-windows-gnu/release/bootleg-toolbox.exe dist/bootleg-toolbox.exe

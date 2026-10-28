@@ -32,6 +32,7 @@ jobs:
           rustup update stable
           rustup default stable
           rustup target add x86_64-pc-windows-gnu
+          cargo install --locked cargo-auditable@0.7.7
 
       # Downloaded crates and compiled dependencies, reused while Cargo.lock does not change.
       # Not for releases: the published executables are always built from scratch.
