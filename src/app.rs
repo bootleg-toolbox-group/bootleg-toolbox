@@ -1636,13 +1636,37 @@ impl App {
                         ui.checkbox(&mut d.update_checksums, "Update the .md5 and .sfv files (whole-file checksums change with the tags)");
                     }
                     ui.label(RichText::new("The audio is not touched: FFP and ST5 stay valid. Renamed files are renamed in every checksum file.").weak());
-                    if d.draft.found != files {
+                    if d.draft.titles_from_names {
+                        ui.label(colored("No tracklist in this info file: the titles below come from the file names. Check them.", Level::Warn));
+                    } else if d.draft.found != files {
                         let text = if d.draft.found == 0 {
                             "No numbered tracklist found in this info file: type the titles below, or choose another file.".to_string()
                         } else {
                             format!("The info file lists {} titles for {files} files: check that each title is on the right file.", d.draft.found)
                         };
                         ui.label(colored(text, Level::Warn));
+                    }
+                    // Titles from the file names, for the files whose name has one.
+                    let named: Vec<Option<String>> = d.draft.tracks.iter().map(|t| crate::tagging::title_from_name(&t.path)).collect();
+                    let usable = named.iter().flatten().count();
+                    if usable > 0 && named.iter().zip(&d.draft.tracks).any(|(n, t)| n.as_ref().is_some_and(|n| *n != t.title)) {
+                        let tip = format!("\"01 - Title.flac\" gives \"Title\". {usable} of the {files} file names have a title; the other titles stay as they are.");
+                        if ui.button("Titles from file names").on_hover_text(tip).clicked() {
+                            for (t, n) in d.draft.tracks.iter_mut().zip(named) {
+                                if let Some(n) = n {
+                                    t.title = n;
+                                }
+                            }
+                        }
+                    }
+                    // Titles in capitals: "IT'S SO EASY" -> "It's So Easy", on request only.
+                    if d.draft.tracks.iter().any(|t| crate::tagging::title_case(&t.title) != t.title) {
+                        let tip = "\"IT'S SO EASY\" becomes \"It's So Easy\". Only words written in capitals change; initials (N.I.B.), Roman numerals (II) and AC/DC are kept.";
+                        if ui.button("Title Case").on_hover_text(tip).clicked() {
+                            for t in d.draft.tracks.iter_mut() {
+                                t.title = crate::tagging::title_case(&t.title);
+                            }
+                        }
                     }
                     if !d.draft.date.trim().is_empty() && !crate::tagging::full_date(&d.draft.date) {
                         ui.label(colored("The date is not written YYYY-MM-DD (1986-05-17, for instance): players sort and show dates best that way.", Level::Warn));
@@ -2225,7 +2249,7 @@ impl App {
             let dragging = self.drag_select.is_some();
             let compact = self.opt.compact;
             // Same windows taking the keys as for the shortcuts, plus the settings.
-            let keys_taken = ctx.wants_keyboard_input() || self.info_choice.is_some() || self.float_dialog.is_some() || self.settings.is_some() || self.tag_dialog.is_some() || self.tag_batch.is_some();
+            let keys_taken = ctx.wants_keyboard_input() || self.info_choice.is_some() || self.float_dialog.is_some() || self.settings.is_some();
             // A little air between columns fitted to their content.
             ui.spacing_mut().item_spacing.x = 16.0;
             egui::ScrollArea::horizontal().show(ui, |ui| {
@@ -2640,8 +2664,10 @@ impl App {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
-        // The info file choice window takes the keys (arrows, Enter, Escape).
-        if ctx.wants_keyboard_input() || self.info_choice.is_some() || self.float_dialog.is_some() || self.tag_dialog.is_some() || self.tag_batch.is_some() {
+        // The info file choice window takes the keys (arrows, Enter, Escape). The Tag and
+        // rename windows are system windows with keys of their own: they stay open while
+        // the list is used (Ctrl+A, Delete...).
+        if ctx.wants_keyboard_input() || self.info_choice.is_some() || self.float_dialog.is_some() {
             return;
         }
         let busy = self.running.is_some();

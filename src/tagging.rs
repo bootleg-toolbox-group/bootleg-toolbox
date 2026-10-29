@@ -62,6 +62,21 @@ fn file_name_re() -> &'static Regex {
 }
 
 /// A track line: (disc given by a "d1t01" prefix, number, title).
+/// The title in a file name: "01 - It's So Easy.flac", "d1t03 Dark Star.flac", "Band - 02 -
+/// Title.flac". None for names without one ("Track01.flac", "gnr1987-09-04d1t01.flac").
+pub fn title_from_name(path: &Path) -> Option<String> {
+    static ARTIST_FIRST: OnceLock<Regex> = OnceLock::new();
+    let stem = path.file_stem()?.to_string_lossy().replace('_', " ");
+    let title = match track_line(&stem) {
+        Some((_, _, title)) => title,
+        None => {
+            let re = ARTIST_FIRST.get_or_init(|| Regex::new(r"(?i)^.+? - (?:d\d{1,2})?t?\d{1,3} - (.+)$").unwrap());
+            clean_title(re.captures(&stem)?.get(1)?.as_str())
+        }
+    };
+    title.chars().any(char::is_alphabetic).then_some(title)
+}
+
 fn track_line(line: &str) -> Option<(Option<u32>, u32, String)> {
     let c = track_re().captures(line)?;
     let sep = c.get(3)?;
@@ -178,8 +193,33 @@ pub fn same_name(a: &str, b: &str) -> bool {
 /// the top, or a block of lines under the date), and the tracklist (as many titles as the
 /// files when a list has that many: `files` is their number). `hint` is the artist as the
 /// folder name or the tags give it, to recognise it in the text.
+/// A line holding several tracks ("01 Intro, 02 Move To The City, 03 Mr. Brownstone," or
+/// "1. Intro 2. It's So Easy 3. Move To The City", "1.INTRO 2.IT'S SO EASY"): one line per
+/// track. The next number starts the next track after a comma, semicolon or slash, or after
+/// a space when a dot or a parenthesis follows it (and no digit: "2.5 kHz" is not one);
+/// other numbers are part of a title.
+fn split_tracks(line: &str) -> Vec<String> {
+    static NEXT: OnceLock<Regex> = OnceLock::new();
+    let line = line.trim();
+    let Some((_, first, _)) = track_line(line) else { return vec![line.to_string()] };
+    let re = NEXT.get_or_init(|| Regex::new(r"[,;/]\s*(\d{1,3})[\s.):-]|\s(\d{1,3})[.)]\s*[^\d\s]").unwrap());
+    let mut parts = Vec::new();
+    let (mut start, mut expected) = (0, first + 1);
+    for c in re.captures_iter(line) {
+        let (sep, number) = (c.get(0).unwrap(), c.get(1).or_else(|| c.get(2)).unwrap());
+        if number.as_str().parse() == Ok(expected) {
+            parts.push(line[start..sep.start()].to_string());
+            start = number.start();
+            expected += 1;
+        }
+    }
+    parts.push(line[start..].to_string());
+    parts.into_iter().map(|p| p.trim().trim_end_matches([',', ';', '/']).trim_end().to_string()).collect()
+}
+
 pub fn parse_info(text: &str, files: usize, hint: Option<&str>) -> Parsed {
-    let lines: Vec<&str> = text.lines().map(|l| l.trim()).collect();
+    let split: Vec<String> = text.lines().flat_map(split_tracks).collect();
+    let lines: Vec<&str> = split.iter().map(String::as_str).collect();
     let titles = tracklist(&lines, files);
     let mut parsed = Parsed { titles, ..Parsed::default() };
     // The header is before the tracklist.
@@ -866,6 +906,8 @@ pub struct Draft {
     pub extra: Vec<String>,
     /// The date in the folder name, when there is one.
     pub folder_date: Option<String>,
+    /// No tracklist in the info file: the titles come from the file names.
+    pub titles_from_names: bool,
 }
 
 /// The folder whose name describes the show: the show folder, or the one above it when the
@@ -885,7 +927,14 @@ fn folder_fields(name: &str) -> (Option<String>, Option<String>, Option<String>)
     let Some(c) = re.captures(name.trim()) else { return (None, find_date(name), None) };
     static BRACKETS: OnceLock<Regex> = OnceLock::new();
     let brackets = BRACKETS.get_or_init(|| Regex::new(r"\[[^\]]*\]|\([^()]*(?:\([^()]*\)[^()]*)*\)").unwrap());
-    let place = c.get(3).map(|m| brackets.replace_all(m.as_str(), "").split_whitespace().collect::<Vec<_>>().join(" ")).map(|p| p.trim_matches([' ', ',', '-']).to_string()).filter(|p| !p.is_empty());
+    // Format words at the end are not part of the place ("Nottingham, England FLAC").
+    static FORMAT: OnceLock<Regex> = OnceLock::new();
+    let format = FORMAT.get_or_init(|| Regex::new(r"(?i)(?:[\s,-]+(?:flac|wav|shn|ape|wv|mp3|lossless|cd|(?:16|24)[\s-]?bits?|(?:16|24)[-/](?:44|48|88|96|176|192)(?:\.\d)?))+$").unwrap());
+    let place = c
+        .get(3)
+        .map(|m| brackets.replace_all(m.as_str(), "").split_whitespace().collect::<Vec<_>>().join(" "))
+        .map(|p| format.replace(&p, "").trim_matches([' ', ',', '-']).to_string())
+        .filter(|p| !p.is_empty());
     (Some(c[1].trim().to_string()), find_date(&c[2]), place)
 }
 
@@ -939,9 +988,39 @@ pub fn draft(show: &files::Show, info: &Path) -> Result<Draft, String> {
         .unwrap_or_default();
     let place = Some(parsed.place.clone()).filter(|p| !p.is_empty()).or(folder_place).unwrap_or_default();
     let album = format!("{date} {place}").trim().to_string();
-    let tracks = number_tracks(&show.files, &parsed.titles);
+    let mut tracks = number_tracks(&show.files, &parsed.titles);
     let extra = parsed.titles.iter().skip(show.files.len()).map(|t| t.1.clone()).collect();
-    Ok(Draft { root: show.root.clone(), artist, date, place, album, found: parsed.titles.len(), extra, tracks, folder_date })
+    // No tracklist, but titles in every file name: those, to be checked.
+    let named: Vec<Option<String>> = show.files.iter().map(|f| title_from_name(f)).collect();
+    let titles_from_names = parsed.titles.is_empty() && !named.is_empty() && named.iter().all(Option::is_some);
+    if titles_from_names {
+        for (t, title) in tracks.iter_mut().zip(named) {
+            t.title = title.unwrap_or_default();
+        }
+    }
+    Ok(Draft { root: show.root.clone(), artist, date, place, album, found: parsed.titles.len(), extra, tracks, folder_date, titles_from_names })
+}
+
+/// "IT'S SO EASY" -> "It's So Easy": the words written in capitals only; mixed-case words,
+/// initials ("N.I.B."), Roman numerals ("PART II") and "AC/DC" are kept.
+pub fn title_case(title: &str) -> String {
+    static KEEP: OnceLock<Regex> = OnceLock::new();
+    let keep = KEEP.get_or_init(|| Regex::new(r"^\(?(?:(?:\p{L}\.)+\p{L}?|[IVXLC]{2,}|\p{L}{1,2}(?:/\p{L}{1,2})+)[)\],.:;!?]*$").unwrap());
+    let word = |w: &str| -> String {
+        let letters = w.chars().filter(|c| c.is_alphabetic()).count();
+        if letters < 2 || w.chars().any(char::is_lowercase) || keep.is_match(w) {
+            return w.to_string();
+        }
+        let mut out = String::new();
+        let mut start = true;
+        for c in w.chars() {
+            out.extend(if start { c.to_uppercase().collect::<Vec<_>>() } else { c.to_lowercase().collect() });
+            // A capital again after a hyphen, a slash, a dot or a bracket, not after an apostrophe.
+            start = !(c.is_alphanumeric() || c == '\'' || c == '’');
+        }
+        out
+    };
+    title.split(' ').map(word).collect::<Vec<_>>().join(" ")
 }
 
 /// A date written as YYYY-MM-DD, the form players sort and show best.
@@ -956,7 +1035,9 @@ pub fn full_date(date: &str) -> bool {
 pub fn doubts(show: &files::Show, draft: &Draft, infos: &[(PathBuf, usize)]) -> Vec<String> {
     let files = draft.tracks.len();
     let mut out = Vec::new();
-    if draft.found != files {
+    if draft.titles_from_names {
+        out.push("no tracklist: titles taken from the file names".into());
+    } else if draft.found != files {
         out.push(if draft.found == 0 { "no tracklist found".to_string() } else { format!("{} titles for {files} files", draft.found) });
     } else {
         // Other info files with as many titles, but other titles (a copy of the same one is fine).
@@ -1192,6 +1273,79 @@ mod tests {
     }
 
     #[test]
+    fn several_tracks_on_a_line() {
+        let text = "disc 1 : \n01 Introduction > It's So Easy, 02 Move To The City, 03 Mr. Brownstone, 04 Out Ta Get Me, \n\
+                    05 Sweet Child O' Mine, 06 Used To Love Her, 07 My Michelle, 08 Rocket Queen,\n09 Knockin' On Heaven's Door \n\n\
+                    disc 2 : \n01 Welcome To The Jungle, 02 Nightrain, 03 Patience, 04 Paradise City, 05 Mama Kin \n\n\
+                    06 Introduction > Welcome To The Jungle, 07 Out Ta Get Me, 08 Think About You, \n09 Mr. Brownstone\n";
+        let titles = parse_info(text, 18, None).titles;
+        assert_eq!(titles.len(), 18, "{titles:?}");
+        assert_eq!(titles[0], (Some(1), "Introduction > It's So Easy".to_string()));
+        assert_eq!(titles[3], (Some(1), "Out Ta Get Me".to_string()));
+        assert_eq!(titles[8], (Some(1), "Knockin' On Heaven's Door".to_string()));
+        assert_eq!(titles[9], (Some(2), "Welcome To The Jungle".to_string()));
+        assert_eq!(titles[17], (Some(2), "Mr. Brownstone".to_string()));
+        let text = "Disc 1 \n\n1. Intro(My Way) 2. It's So Easy 3. Move To The City 4. Outta Get Me \n\
+                    5. Mr. Brownstone 6. My Michelle 7. Rocket Queen \n8. Welcome To The Jungle 9. Nightrain 10. You're Crazy \n\
+                    11. Paradise City \n\nDisc 2 \n\n1. MC 2. Knockin' On Heaven's Door 3. Reckless Life 4. Mama Kin \n\
+                    5. Sweet Child O' Mine 6. Whole Lotta Rosie\n \n";
+        let titles = parse_info(text, 17, None).titles;
+        assert_eq!(titles.len(), 17, "{titles:?}");
+        assert_eq!(titles[0], (Some(1), "Intro(My Way)".to_string()));
+        assert_eq!(titles[4], (Some(1), "Mr. Brownstone".to_string()));
+        assert_eq!(titles[10], (Some(1), "Paradise City".to_string()));
+        assert_eq!(titles[11], (Some(2), "MC".to_string()));
+        assert_eq!(titles[16], (Some(2), "Whole Lotta Rosie".to_string()));
+        let text = "disc one\n\n1.INTRO 2.IT'S SO EASY 3.MOVE TO THE CITY 4.MR.BROWNSTONE 5.OUT TA GET ME 6.SWEET CHILD'O MINE\n\
+                    7.I USED TO LOVE HER 8.MY MICHELLE 9.ROCKET QUEEN \n\ndisc two\n\n\
+                    1.KNOCKIN' ON HEAVEN'S DOOR 2.WELCOME TO THE JUNGLE 3.NIGHTRAIN 4.PATIENCE 5.PARADISE CITY 6.MAMA KIN\n";
+        let titles = parse_info(text, 15, None).titles;
+        assert_eq!(titles.len(), 15, "{titles:?}");
+        assert_eq!(titles[3], (Some(1), "MR.BROWNSTONE".to_string()));
+        assert_eq!(titles[9], (Some(2), "KNOCKIN' ON HEAVEN'S DOOR".to_string()));
+        assert_eq!(split_tracks("1. Intro 2.5 kHz test 2. Next"), vec!["1. Intro 2.5 kHz test", "2. Next"]);
+        // Numbers inside a title, or not following on, do not cut it.
+        assert_eq!(split_tracks("1. Love Potion No. 9 2. Next"), vec!["1. Love Potion No. 9", "2. Next"]);
+        assert_eq!(split_tracks("1. Intro 5. Encore"), vec!["1. Intro 5. Encore"]);
+        assert_eq!(split_tracks("9. 22, Acacia Avenue (6:21)"), vec!["9. 22, Acacia Avenue (6:21)"]);
+        assert_eq!(split_tracks("01 Intro, 1999 Live, 02 Song"), vec!["01 Intro, 1999 Live", "02 Song"]);
+        assert_eq!(split_tracks("Recorded 1988, 3 mics"), vec!["Recorded 1988, 3 mics"]);
+    }
+
+    #[test]
+    fn titles_in_file_names() {
+        let t = |name: &str| title_from_name(Path::new(name));
+        assert_eq!(t("01 - It's So Easy.flac").as_deref(), Some("It's So Easy"));
+        assert_eq!(t("05. Sweet Child O' Mine.flac").as_deref(), Some("Sweet Child O' Mine"));
+        assert_eq!(t("d1t03 Dark Star.flac").as_deref(), Some("Dark Star"));
+        assert_eq!(t("Dire Straits - 02 - Follow Me Home.flac").as_deref(), Some("Follow Me Home"));
+        assert_eq!(t("Track01.flac"), None);
+        assert_eq!(t("gnr1987-09-04d1t01.flac"), None);
+        assert_eq!(t("01.flac"), None);
+    }
+
+    #[test]
+    fn place_without_format_words() {
+        let place = |name: &str| folder_fields(name).2;
+        assert_eq!(place("Guns N' Roses - 1987-10-05 - Nottingham, England FLAC (source 1) [59m29s]").as_deref(), Some("Nottingham, England"));
+        assert_eq!(place("Band - 1990-01-01 - The Hall, Springfield 24-96").as_deref(), Some("The Hall, Springfield"));
+        assert_eq!(place("Band - 1990-01-01 - Flack Arena").as_deref(), Some("Flack Arena"));
+    }
+
+    #[test]
+    fn title_cases() {
+        assert_eq!(title_case("IT'S SO EASY"), "It's So Easy");
+        assert_eq!(title_case("MR.BROWNSTONE"), "Mr.Brownstone");
+        assert_eq!(title_case("ROSE-COLOURED GLASSES (LIVE)"), "Rose-Coloured Glasses (Live)");
+        assert_eq!(title_case("I USED TO LOVE HER"), "I Used To Love Her");
+        assert_eq!(title_case("N.I.B."), "N.I.B.");
+        assert_eq!(title_case("PART II"), "Part II");
+        assert_eq!(title_case("AC/DC MEDLEY"), "AC/DC Medley");
+        assert_eq!(title_case("Sweet Child O' Mine"), "Sweet Child O' Mine");
+        assert_eq!(title_case("KNOCKIN' ON HEAVEN'S DOOR"), "Knockin' On Heaven's Door");
+    }
+
+    #[test]
     fn full_dates() {
         assert!(full_date("1986-05-17"));
         assert!(full_date(" 2026-01-23 "));
@@ -1214,6 +1368,7 @@ mod tests {
             found: 2,
             extra: Vec::new(),
             folder_date: None,
+            titles_from_names: false,
         };
         let both = draft.job(NameScheme::NumberTitle, true, true);
         assert!(both.files.iter().all(|(_, fields, name)| !fields.is_empty() && name.is_some()));
