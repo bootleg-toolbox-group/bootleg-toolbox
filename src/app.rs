@@ -1295,110 +1295,127 @@ impl App {
         let conflicts = d.draft.name_conflicts(scheme);
         let files = d.draft.tracks.len();
         let not_flac = d.draft.tracks.iter().filter(|t| !crate::tagging::taggable(&t.path)).count();
-        egui::Window::new("Tag and rename from info file")
-            .collapsible(false)
-            .default_size([940.0, 560.0])
-            .open(&mut open)
-            .show(ctx, |ui| {
-                ui.label(RichText::new(file_name(&root)).strong());
-                ui.add_space(4.0);
-                egui::Grid::new("tag_fields").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-                    ui.label("Info file");
-                    egui::ComboBox::from_id_salt("tag_info").width(560.0).selected_text(info_label(&d.infos[d.info])).show_ui(ui, |ui| {
-                        for (i, info) in d.infos.iter().enumerate() {
-                            if ui.selectable_label(i == d.info, info_label(info)).clicked() {
-                                reload = Some(i);
-                            }
-                        }
-                    });
-                    ui.end_row();
-                    ui.label("Artist");
-                    ui.add(egui::TextEdit::singleline(&mut d.draft.artist).desired_width(560.0));
-                    ui.end_row();
-                    ui.label("Date");
-                    let date = ui.add(egui::TextEdit::singleline(&mut d.draft.date).hint_text("YYYY-MM-DD").desired_width(120.0));
-                    ui.end_row();
-                    ui.label("Place");
-                    let place = ui.add(egui::TextEdit::singleline(&mut d.draft.place).hint_text("Venue, City, Country").desired_width(560.0));
-                    ui.end_row();
-                    ui.label("Album");
-                    let album = ui.add(egui::TextEdit::singleline(&mut d.draft.album).desired_width(560.0))
-                        .on_hover_text("The date and the place by default (the eTree custom); edit it to write something else.");
-                    ui.end_row();
-                    if album.changed() {
-                        d.album_auto = false;
-                    }
-                    if d.album_auto && (date.changed() || place.changed()) {
-                        d.draft.album = format!("{} {}", d.draft.date.trim(), d.draft.place.trim()).trim().to_string();
-                    }
-                    ui.label("File names");
-                    egui::ComboBox::from_id_salt("tag_scheme").width(240.0).selected_text(scheme.label()).show_ui(ui, |ui| {
-                        for s in NameScheme::ALL {
-                            ui.selectable_value(&mut scheme, s, s.label());
-                        }
-                    });
-                    ui.end_row();
-                });
-                if d.whole_checksums {
-                    ui.checkbox(&mut d.update_checksums, "Update the .md5 and .sfv files (whole-file checksums change with the tags)");
-                }
-                ui.label(RichText::new("The audio is not touched: FFP and ST5 stay valid. Renamed files are renamed in every checksum file.").weak());
-                if d.draft.found != files {
-                    let text = if d.draft.found == 0 {
-                        "No numbered tracklist found in this info file: type the titles below, or choose another file.".to_string()
-                    } else {
-                        format!("The info file lists {} titles for {files} files: check that each title is on the right file.", d.draft.found)
-                    };
-                    ui.label(colored(text, Level::Warn));
-                }
-                if let Some(folder) = d.draft.folder_date.as_ref().filter(|f| **f != d.draft.date.trim()) {
-                    ui.label(colored(format!("The folder name says {folder}: check the date."), Level::Warn));
-                }
-                if !d.draft.extra.is_empty() {
-                    ui.label(colored(format!("Not used (no file left for them): {}", d.draft.extra.join(" / ")), Level::Warn));
-                }
-                if not_flac > 0 {
-                    ui.label(colored(format!("{not_flac} file(s) are not FLAC: they can be renamed, not tagged."), Level::Warn));
-                }
-                for c in &conflicts {
-                    ui.label(colored(format!("Cannot rename: {c}."), Level::Error));
-                }
-                ui.add_space(4.0);
-                egui::TopBottomPanel::bottom("tag_buttons").show_inside(ui, |ui| {
+        // A system window of its own: it may be larger than the main window and go past it.
+        let id = egui::ViewportId::from_hash_of("tag and rename");
+        let title = "Tag and rename from info file";
+        let builder = egui::ViewportBuilder::default()
+            .with_icon(app_icon())
+            .with_window_level(window_level(self.on_top()))
+            .with_title(title)
+            .with_inner_size([960.0, 640.0])
+            .with_min_inner_size([520.0, 360.0]);
+        ctx.show_viewport_immediate(id, builder, |vctx, class| {
+            let content = |ui: &mut egui::Ui| {
+                    ui.label(RichText::new(file_name(&root)).strong());
                     ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        let ready = conflicts.is_empty() && !busy;
-                        apply |= ui.add_enabled(ready, egui::Button::new(RichText::new("Apply").strong())).clicked();
-                        cancel |= ui.button("Cancel").clicked();
-                        if busy {
-                            ui.label(RichText::new("Wait for the running task to finish.").weak());
-                        }
-                    });
-                });
-                let width = d.draft.width();
-                egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
-                    egui::Grid::new("tag_tracks").num_columns(4).striped(true).spacing([12.0, 4.0]).show(ui, |ui| {
-                        ui.strong("#");
-                        ui.strong("File");
-                        ui.strong("Title");
-                        ui.strong("New name");
+                    egui::Grid::new("tag_fields").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+                        ui.label("Info file");
+                        egui::ComboBox::from_id_salt("tag_info").width(560.0).selected_text(info_label(&d.infos[d.info])).show_ui(ui, |ui| {
+                            for (i, info) in d.infos.iter().enumerate() {
+                                if ui.selectable_label(i == d.info, info_label(info)).clicked() {
+                                    reload = Some(i);
+                                }
+                            }
+                        });
                         ui.end_row();
-                        let artist = d.draft.artist.trim().to_string();
-                        let date = d.draft.date.trim().to_string();
-                        for t in d.draft.tracks.iter_mut() {
-                            ui.label(match t.disc {
-                                Some(disc) => format!("d{disc}t{:02}", t.track),
-                                None => format!("{:02}", t.track),
-                            });
-                            ui.label(rel_posix(&t.path, &root));
-                            ui.add(egui::TextEdit::singleline(&mut t.title).desired_width(320.0));
-                            let new = crate::tagging::new_name(scheme, t, &artist, &date, width).filter(|n| *n != file_name(&t.path));
-                            ui.label(new.unwrap_or_else(|| "(unchanged)".into()));
-                            ui.end_row();
+                        ui.label("Artist");
+                        ui.add(egui::TextEdit::singleline(&mut d.draft.artist).desired_width(560.0));
+                        ui.end_row();
+                        ui.label("Date");
+                        let date = ui.add(egui::TextEdit::singleline(&mut d.draft.date).hint_text("YYYY-MM-DD").desired_width(120.0));
+                        ui.end_row();
+                        ui.label("Place");
+                        let place = ui.add(egui::TextEdit::singleline(&mut d.draft.place).hint_text("Venue, City, Country").desired_width(560.0));
+                        ui.end_row();
+                        ui.label("Album");
+                        let album = ui.add(egui::TextEdit::singleline(&mut d.draft.album).desired_width(560.0))
+                            .on_hover_text("The date and the place by default (the eTree custom); edit it to write something else.");
+                        ui.end_row();
+                        if album.changed() {
+                            d.album_auto = false;
                         }
+                        if d.album_auto && (date.changed() || place.changed()) {
+                            d.draft.album = format!("{} {}", d.draft.date.trim(), d.draft.place.trim()).trim().to_string();
+                        }
+                        ui.label("File names");
+                        egui::ComboBox::from_id_salt("tag_scheme").width(240.0).selected_text(scheme.label()).show_ui(ui, |ui| {
+                            for s in NameScheme::ALL {
+                                ui.selectable_value(&mut scheme, s, s.label());
+                            }
+                        });
+                        ui.end_row();
                     });
-                });
-            });
+                    if d.whole_checksums {
+                        ui.checkbox(&mut d.update_checksums, "Update the .md5 and .sfv files (whole-file checksums change with the tags)");
+                    }
+                    ui.label(RichText::new("The audio is not touched: FFP and ST5 stay valid. Renamed files are renamed in every checksum file.").weak());
+                    if d.draft.found != files {
+                        let text = if d.draft.found == 0 {
+                            "No numbered tracklist found in this info file: type the titles below, or choose another file.".to_string()
+                        } else {
+                            format!("The info file lists {} titles for {files} files: check that each title is on the right file.", d.draft.found)
+                        };
+                        ui.label(colored(text, Level::Warn));
+                    }
+                    if let Some(folder) = d.draft.folder_date.as_ref().filter(|f| **f != d.draft.date.trim()) {
+                        ui.label(colored(format!("The folder name says {folder}: check the date."), Level::Warn));
+                    }
+                    if !d.draft.extra.is_empty() {
+                        ui.label(colored(format!("Not used (no file left for them): {}", d.draft.extra.join(" / ")), Level::Warn));
+                    }
+                    if not_flac > 0 {
+                        ui.label(colored(format!("{not_flac} file(s) are not FLAC: they can be renamed, not tagged."), Level::Warn));
+                    }
+                    for c in &conflicts {
+                        ui.label(colored(format!("Cannot rename: {c}."), Level::Error));
+                    }
+                    ui.add_space(4.0);
+                    egui::TopBottomPanel::bottom("tag_buttons").show_inside(ui, |ui| {
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            let ready = conflicts.is_empty() && !busy;
+                            apply |= ui.add_enabled(ready, egui::Button::new(RichText::new("Apply").strong())).clicked();
+                            cancel |= ui.button("Cancel").clicked();
+                            if busy {
+                                ui.label(RichText::new("Wait for the running task to finish.").weak());
+                            }
+                        });
+                    });
+                    let width = d.draft.width();
+                    egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
+                        egui::Grid::new("tag_tracks").num_columns(4).striped(true).spacing([12.0, 4.0]).show(ui, |ui| {
+                            ui.strong("#");
+                            ui.strong("File");
+                            ui.strong("Title");
+                            ui.strong("New name");
+                            ui.end_row();
+                            let artist = d.draft.artist.trim().to_string();
+                            let date = d.draft.date.trim().to_string();
+                            for t in d.draft.tracks.iter_mut() {
+                                ui.label(match t.disc {
+                                    Some(disc) => format!("d{disc}t{:02}", t.track),
+                                    None => format!("{:02}", t.track),
+                                });
+                                ui.label(rel_posix(&t.path, &root));
+                                // Sized by hand: inside a grid, a text field shrinks to a few letters.
+                                let height = ui.spacing().interact_size.y;
+                                ui.add_sized([320.0, height], egui::TextEdit::singleline(&mut t.title));
+                                let new = crate::tagging::new_name(scheme, t, &artist, &date, width).filter(|n| *n != file_name(&t.path));
+                                ui.label(new.unwrap_or_else(|| "(unchanged)".into()));
+                                ui.end_row();
+                            }
+                        });
+                    });
+            };
+            if class == egui::ViewportClass::Embedded {
+                egui::Window::new(title).id(egui::Id::new(id)).collapsible(false).default_size([940.0, 560.0]).open(&mut open).show(vctx, content);
+            } else {
+                egui::CentralPanel::default().show(vctx, content);
+                if vctx.input(|i| i.viewport().close_requested()) {
+                    open = false;
+                }
+            }
+        });
         self.opt.tag_scheme = scheme;
         if let Some(i) = reload {
             match crate::tagging::draft(&d.show, &d.infos[i].0) {
