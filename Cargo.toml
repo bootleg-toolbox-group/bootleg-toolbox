@@ -1,6 +1,6 @@
 [package]
 name = "bootleg-toolbox"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2021"
 rust-version = "1.89"
 # Distributed as executables, not on crates.io.
