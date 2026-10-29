@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `FileInfo::frame_byte_count`: a seek table that goes backwards (damaged file) gives 0
   bytes instead of an integer overflow (found by fuzzing). Change in `src/format.rs`; in
   `src/decoder.rs`, `seek_remainder` and `read_frame_data` no longer overflow on it either.
+- The 16-bit dot product of the NN filter wraps on overflow, as the reference decoder and
+  release builds do; debug builds panicked on some valid files. Change in `src/nn_filter.rs`.
 
 ## [0.3.1] - 2026-03-18
 

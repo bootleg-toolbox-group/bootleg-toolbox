@@ -40,12 +40,13 @@ fn get_saturated_short_from_i64(value: i64) -> i16 {
 // Dot-product functions
 // ---------------------------------------------------------------------------
 
-/// Dot product for <i32, i16> path: i16*i16 accumulated in i32.
+/// Dot product for <i32, i16> path: i16*i16 accumulated in i32, wrapping on overflow as
+/// the reference decoder does (a checked add panics in debug builds on some files).
 #[inline(always)]
 fn calculate_dot_product_16(a: &[i16], b: &[i16], order: usize) -> i32 {
     let mut dot: i32 = 0;
     for i in 0..order {
-        dot += (a[i] as i32) * (b[i] as i32);
+        dot = dot.wrapping_add((a[i] as i32) * (b[i] as i32));
     }
     dot
 }
