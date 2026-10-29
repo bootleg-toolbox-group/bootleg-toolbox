@@ -29,14 +29,15 @@ fn cli(dir: &Path, command: &str, paths: &[&str], env: &[(&str, &str)]) -> Strin
     normalise(&text, dir)
 }
 
-/// Lines in a fixed order (files are processed in parallel), without the temporary folder;
+/// Lines in a fixed order (files are processed in parallel), without the temporary folder
+/// nor the program's version;
 /// the growing "MD5 OK, ST5 OK" lines of Verify are reduced to their final state.
 fn normalise(text: &str, dir: &Path) -> String {
     let dir = dir.display().to_string();
     let mut finals: Vec<(String, String)> = Vec::new();
     let mut lines = Vec::new();
     for line in text.lines() {
-        let line = line.replace(&dir, "<dir>");
+        let line = line.replace(&dir, "<dir>").replace(env!("CARGO_PKG_VERSION"), "<version>");
         if let Some((head, checks)) = verify_marks(&line) {
             match finals.iter_mut().find(|(h, _)| *h == head) {
                 Some((_, c)) if checks.len() > c.len() => *c = checks,
@@ -65,8 +66,9 @@ fn verify_marks(line: &str) -> Option<(String, String)> {
     Some((format!("{head}] "), marks.join(", ")))
 }
 
-/// MD5 of every file under `dir` (relative paths, sorted). In a .torrent, the creation
-/// date is left out; MP3 files are left out (LAME's float maths may differ between CPUs).
+/// MD5 of every file under `dir` (relative paths, sorted), with the program's version
+/// replaced (FLAC vendor field, torrent "created by"). In a .torrent, the creation date is
+/// left out; MP3 files are left out (LAME's float maths may differ between CPUs).
 fn file_sums(dir: &Path) -> String {
     let mut files = Vec::new();
     walk(dir, &mut files);
@@ -78,6 +80,7 @@ fn file_sums(dir: &Path) -> String {
             if p.extension().is_some_and(|e| e == "torrent") {
                 data = strip_creation_date(&data);
             }
+            data = replace_bytes(&data, env!("CARGO_PKG_VERSION").as_bytes(), b"<version>");
             let rel = p.strip_prefix(dir).unwrap().to_string_lossy().replace('\\', "/");
             format!("{}  {rel}", hex(&Md5::digest(&data)))
         })
@@ -95,6 +98,21 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
             out.push(path);
         }
     }
+}
+
+fn replace_bytes(data: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len());
+    let mut i = 0;
+    while i < data.len() {
+        if data[i..].starts_with(from) {
+            out.extend_from_slice(to);
+            i += from.len();
+        } else {
+            out.push(data[i]);
+            i += 1;
+        }
+    }
+    out
 }
 
 fn strip_creation_date(data: &[u8]) -> Vec<u8> {
@@ -200,6 +218,19 @@ fn make_shows(dir: &Path) {
     write_wav(&dir.join(WAVS).join("02 - Plain.wav"), &signal(220_500, 44100, 8, true), 44100, 16, false);
 }
 
+/// The FLAC files written by to-flac hold the program's version (vendor field): it is
+/// overwritten with as many "x", so that the checksums, torrents and SBE copies made from
+/// them do not change with each version (only when the version's length changes).
+fn unversion_flacs(dir: &Path) {
+    let version = env!("CARGO_PKG_VERSION").as_bytes();
+    let mut files = Vec::new();
+    walk(dir, &mut files);
+    for f in files.iter().filter(|p| p.extension().is_some_and(|e| e == "flac")) {
+        let data = replace_bytes(&fs::read(f).unwrap(), version, &vec![b'x'; version.len()]);
+        fs::write(f, data).unwrap();
+    }
+}
+
 fn remove_wavs(dir: &Path) {
     let mut files = Vec::new();
     walk(dir, &mut files);
@@ -221,6 +252,7 @@ fn synthetic_shows() {
     for show in [SHOW, HIRES, MUFFLED] {
         remove_wavs(&dir.join(show));
     }
+    unversion_flacs(dir);
     snap("details", cli(dir, "details", &all, &[]));
     snap("test", cli(dir, "test", &all, &[]));
     snap("create", cli(dir, "create", &[SHOW, HIRES], &[("BT_MD5", "1"), ("BT_SFV", "1")]));

@@ -23,5 +23,5 @@ expression: text
 2 torrent(s) checked: 2 match
 OK   Synthetic Band 1990-01-01: Matches Synthetic Band 1990-01-01 [DIME].torrent (134 pieces checked)
 OK   Synthetic Band 1990-01-01: Matches Synthetic Band 1990-01-01 [TTD].torrent (134 pieces checked)
-Synthetic Band 1990-01-01 [DIME].torrent: "Synthetic Band 1990-01-01", 9 file(s), 4.2 MB, pieces of 32.0 KB, private, source DIME, tracker bt.dimeadozen.org, made with Bootleg Toolbox 0.1.7, info hash 24de45ef89151b13afa10ca833250ab046ef008b
-Synthetic Band 1990-01-01 [TTD].torrent: "Synthetic Band 1990-01-01", 9 file(s), 4.2 MB, pieces of 32.0 KB, private, source TTD, tracker www.thetradersden.org, made with Bootleg Toolbox 0.1.7, info hash 1be837bb83b808c1ea411839bfc2d15d51d14c3b
+Synthetic Band 1990-01-01 [DIME].torrent: "Synthetic Band 1990-01-01", 9 file(s), 4.2 MB, pieces of 32.0 KB, private, source DIME, tracker bt.dimeadozen.org, made with Bootleg Toolbox <version>, info hash d7bfe178fa8b10b569f663b3c1edef4b85b21568
+Synthetic Band 1990-01-01 [TTD].torrent: "Synthetic Band 1990-01-01", 9 file(s), 4.2 MB, pieces of 32.0 KB, private, source TTD, tracker www.thetradersden.org, made with Bootleg Toolbox <version>, info hash 7da312dd46da35c7f67029d3234de950ddf587bc
