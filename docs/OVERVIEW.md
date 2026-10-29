@@ -166,8 +166,13 @@ Most shows arrive with a text file describing them; Bootleg Toolbox turns it int
 
 - **What is read:** the artist, date and place from the top of the file or from "Artist:", "Date:", "Venue:" fields; the tracklist, numbered ("01 - Title", "1. Title", "[01] Title", "d1t01 Title") or plain, across "Disc 1", "CD 2:" or "Set 2" headings, with running times, footnote marks and fingerprint lines left out. Several text files: the one whose tracklist matches the number of files comes first.
 - **A window to check everything** before it is written: artist, date, place, album (the eTree "date place" by default), each title next to its file and its new name. It warns when the list and the files do not have the same count, when the folder name gives another date, and when a new name would clash.
-- **Written:** TITLE, ARTIST, ALBUM, DATE, TRACKNUMBER, TRACKTOTAL, and DISCNUMBER/DISCTOTAL for several discs; the other tags are kept. Names: "01 - Title", "d1t01 - Title", "Artist YYYY-MM-DD d1t01", or unchanged.
-- **The audio is never rewritten:** only the FLAC header changes, in place when its padding has room. The audio signature is checked after every file. FFP and ST5 stay valid; .md5 and .sfv lines of the tagged files are computed again, and new names are written into every checksum file. A .torrent made before is reported as out of date.
+- **Written:** TITLE, ARTIST, ALBUM, DATE, TRACKNUMBER, TRACKTOTAL, and DISCNUMBER/DISCTOTAL for several discs; the other tags are kept. Names: "01 - Title", "d1t01 - Title" or "Artist YYYY-MM-DD d1t01".
+- **Tags, names or both:** "Write the tags" and "Rename the files" are two boxes, ticked by default in Settings and changeable for each show. Renaming alone does not write in the files, so it works on read-only files too. A date not written YYYY-MM-DD is pointed out.
+- **Where the show is named:** when the audio sits in an "AUDIO" (or "FLAC", "24-bit"...) folder, or below a dated folder ("Artist - 1995-11-21 - Place/1995-11-21 - Madrid (Version 2)"), the artist, date, place and info file are looked for in the folder above, and the list shows both names.
+- **Several shows at once:** select them and open Tag and rename. Each show's plan is prepared and listed. The clear ones are ticked: a single info file whose tracklist fits the files, as many titles as files, the artist and a full date there, agreeing with the folder name. The others say what to check ("29 titles for 4 files", "no date", "2 info files fit, with other titles"...) and open one by one in the usual window, whose OK ticks them. Apply writes the ticked shows in one go; the rest can wait. Shows without an info file are listed as such and left alone.
+- **The audio is never rewritten:** only the FLAC header changes, in place when its padding has room. The audio signature is checked after every file. FFP and ST5 stay valid; .md5 and .sfv lines of the tagged files are computed again, and new names are written into every checksum file. Lines that did not match the files before tagging are reported, as tagging rewrites them. A .torrent made before is reported as out of date.
+- **Nothing is changed when a file is read-only** (a torrent client may still hold it): you are told which files to unlock, so a show never ends up with names but no tags.
+- **Undo:** before a show is changed, its FLAC headers, former names and checksum files are kept for 30 days in the program's data folder (not in the show's folder). Tools > Undo tagging lists each Apply with its shows; rolling back gives the files back byte for byte, so the checksums and torrents made before match again. A file changed since by another program, or whose former name is taken, is left as it is and reported, and the checksum files are then kept as they are. From the command line: `undo-tagging`.
 
 ### Lossy files (MP3, MP2, AAC)
 
@@ -338,7 +343,7 @@ Bootleg Toolbox runs on 64-bit Windows and Linux from a single file, with nothin
 
 ### Safety of your files
 
-- **Originals are never modified** by conversions, MP3 copies, SBE fixes and WAV clean-ups: they write new files. Tag and rename changes tags and names in place, only after you have checked them, and never the audio.
+- **Originals are never modified** by conversions, MP3 copies, SBE fixes and WAV clean-ups: they write new files. Tag and rename changes tags and names in place, only after you have checked them, never the audio, and Tools > Undo tagging gives the files back byte for byte.
 - **Nothing half-written:** new files are written as ".part" and renamed only once complete and verified; a stopped or failed job removes them.
 - **Existing files are not overwritten** without your say: an existing FLAC, MP3 or checksum file is skipped and reported.
 - **Nothing is deleted:** the after-conversion window moves files to the system trash (Recycle Bin, or the desktop trash on Linux), only if you tick the box, so they can be restored.

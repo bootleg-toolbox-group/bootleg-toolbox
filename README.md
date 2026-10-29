@@ -47,16 +47,19 @@ ffmpeg or LAME. Every decoder and encoder is built in.
 - **Tag and rename from the info file**: the artist, date, place and titles are read from
   the show's text file (numbered or plain tracklists, discs and sets, "Artist:" fields),
   shown in a window to check and correct, then written as FLAC tags; the files can be
-  renamed ("01 - Title", "d1t01 - Title" or eTree style). The audio is not touched, so FFP
-  and ST5 stay valid; `.md5` and `.sfv` lines are computed again, and new names are carried
-  into every checksum file.
+  renamed ("01 - Title", "d1t01 - Title" or eTree style), or only renamed. The audio is not
+  touched, so FFP and ST5 stay valid; `.md5` and `.sfv` lines are computed again, and new
+  names are carried into every checksum file. Several shows at once: the clear ones are
+  ready to go, the doubtful ones are checked one by one. **Tools > Undo tagging** gives the
+  files back byte for byte (30 days).
 - **Upload helpers**: copy a show's FFP or its info file to the clipboard.
 - **File manager integration** (optional): "Open in Bootleg Toolbox" in the right-click
   menu of Explorer, Dolphin, Nautilus and Nemo.
 
 Conversions, MP3 copies, SBE fixes and cleaned WAVs are written next to the originals,
 which are never changed. Only "Tag and rename from info file" changes files in place, after
-you have checked what it will write: tags and names only, never the audio.
+you have checked what it will write: tags and names only, never the audio, and it can be
+undone.
 
 The program makes no network connection, unless you ask it to check for a new version
 (Help > Check for updates, or the Settings option, off by default): it then asks
