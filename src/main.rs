@@ -225,7 +225,8 @@ fn tag_jobs(paths: &[String]) -> Option<Vec<tagging::TagJob>> {
     let mut jobs = Vec::new();
     for show in files::scan_paths(&paths, &Default::default()) {
         let name = files::show_name(&show.root);
-        let Some((info, _)) = tagging::info_files(&show).into_iter().next() else {
+        let infos = tagging::info_files(&show);
+        let Some((info, _)) = infos.first().cloned() else {
             println!("{}{name}: no info file", prefix(Level::Warn));
             continue;
         };
@@ -240,6 +241,10 @@ fn tag_jobs(paths: &[String]) -> Option<Vec<tagging::TagJob>> {
         println!("  info file: {}", files::file_name(&info));
         println!("  artist: {}\n  date: {}\n  place: {}\n  album: {}", draft.artist, draft.date, draft.place, draft.album);
         println!("  titles found: {} for {} files", draft.found, draft.tracks.len());
+        match tagging::doubts(&show, &draft, &infos).join("; ") {
+            d if d.is_empty() => println!("  clear"),
+            d => println!("  {}to check: {d}", prefix(Level::Warn)),
+        }
         if let Some(d) = draft.folder_date.as_ref().filter(|d| **d != draft.date) {
             println!("  {}the folder name says {d}", prefix(Level::Warn));
         }

@@ -77,6 +77,7 @@ const TAG_TIP: &str = "Read the artist, date, place and titles from the show's i
 const UNDO_TIP: &str = "Give shows changed by Tag and rename back their former tags, names and checksum files.";
 
 /// "Tag and rename from info file": what will be written, open for corrections.
+#[derive(Clone)]
 struct TagDialog {
     show: Show,
     /// The possible info files and their number of titles, the best first.
@@ -91,6 +92,72 @@ struct TagDialog {
     /// For this show only (the defaults are in Settings).
     write_tags: bool,
     rename: bool,
+    /// Opened from the batch window to check this row: OK gives the plan back to it.
+    batch_row: Option<usize>,
+}
+
+/// Tag and rename of several shows: each plan prepared, the clear ones ticked, the others
+/// to check one by one in the Tag and rename window before they are ticked.
+struct TagBatch {
+    rows: Vec<BatchRow>,
+}
+
+struct BatchRow {
+    show: Show,
+    /// None when the show cannot be tagged (`problem` says why).
+    plan: Option<TagDialog>,
+    problem: String,
+    /// What to check (empty: clear); emptied once checked in the window.
+    doubts: Vec<String>,
+    checked: bool,
+    ticked: bool,
+    applied: bool,
+}
+
+impl TagDialog {
+    /// The plan of a show from its best info file, with the default choices of Settings.
+    fn prepare(show: &Show, opt: &Options) -> Result<TagDialog, String> {
+        let infos = crate::tagging::info_files(show);
+        if infos.is_empty() {
+            return Err("no info file (.txt or .nfo)".into());
+        }
+        let draft = crate::tagging::draft(show, &infos[0].0)?;
+        let whole_checksums = crate::tagging::checksum_files(&show.root).iter().any(|p| matches!(crate::files::ext_lower(p).as_str(), "md5" | "sfv"));
+        Ok(TagDialog {
+            show: show.clone(),
+            infos,
+            info: 0,
+            draft,
+            album_auto: true,
+            update_checksums: true,
+            whole_checksums,
+            write_tags: opt.tag_write,
+            rename: opt.tag_rename,
+            batch_row: None,
+        })
+    }
+
+    fn names(&self, scheme: crate::tagging::NameScheme) -> crate::tagging::NameScheme {
+        if self.rename { scheme } else { crate::tagging::NameScheme::Keep }
+    }
+
+    /// What prevents writing the plan with these file names, if anything.
+    fn blocked(&self, scheme: crate::tagging::NameScheme) -> Option<String> {
+        if !self.write_tags && !self.rename {
+            return Some("nothing ticked".into());
+        }
+        if let Some(c) = self.draft.name_conflicts(self.names(scheme)).first() {
+            return Some(format!("cannot rename: {c}"));
+        }
+        if !self.write_tags && self.draft.tracks.iter().all(|t| self.draft.new_name(t, scheme).is_none()) {
+            return Some("nothing to change: the files already have these names".into());
+        }
+        None
+    }
+
+    fn job(&self, scheme: crate::tagging::NameScheme) -> crate::tagging::TagJob {
+        self.draft.job(self.names(scheme), self.write_tags, self.update_checksums || !self.whole_checksums)
+    }
 }
 
 /// "Undo tagging": the runs of the undo journal, the shows ticked to be rolled back.
@@ -338,6 +405,7 @@ pub struct App {
     /// "Tag and rename from info file" window.
     tag_dialog: Option<TagDialog>,
     undo_dialog: Option<UndoDialog>,
+    tag_batch: Option<TagBatch>,
     /// The saved "Always on top" choice was applied to the window.
     window_level_set: bool,
     /// A file dialog to open, and since when it waits for the window to leave the top.
@@ -519,6 +587,7 @@ impl App {
             info_choice: None,
             tag_dialog: None,
             undo_dialog: None,
+            tag_batch: None,
             window_level_set: false,
             dialog: None,
             parent: None,
@@ -1280,33 +1349,220 @@ impl App {
 
     fn open_tag_dialog(&mut self) {
         let (shows, _) = self.selection();
-        if shows.len() != 1 {
-            self.flash("Select a single show to tag it from its info file.");
+        if shows.len() > 1 {
+            self.open_tag_batch(shows);
             return;
         }
-        let show = shows[0].clone();
+        let Some(show) = shows.into_iter().next() else {
+            self.flash("Select a show to tag it from its info file.");
+            return;
+        };
         let name = crate::files::show_name(&show.root);
-        let infos = crate::tagging::info_files(&show);
-        if infos.is_empty() {
-            let msg = format!("No info file (.txt or .nfo) in {name}: nothing to read the tags from.");
-            self.log(msg.clone(), Level::Warn);
-            self.flash(msg);
+        match TagDialog::prepare(&show, &self.opt) {
+            Ok(d) => self.tag_dialog = Some(d),
+            Err(e) => {
+                let msg = format!("{name}: {e}, nothing to read the tags from.");
+                self.log(msg.clone(), Level::Warn);
+                self.flash(msg);
+            }
+        }
+    }
+
+    /// Prepares the plan of every show (in parallel), the clear ones first and ticked.
+    fn open_tag_batch(&mut self, shows: Vec<Show>) {
+        use rayon::prelude::*;
+        let opt = self.opt.clone();
+        let mut rows: Vec<BatchRow> = shows
+            .par_iter()
+            .map(|show| {
+                let row = BatchRow { show: show.clone(), plan: None, problem: String::new(), doubts: Vec::new(), checked: false, ticked: false, applied: false };
+                match TagDialog::prepare(show, &opt) {
+                    Ok(plan) => {
+                        let doubts = crate::tagging::doubts(show, &plan.draft, &plan.infos);
+                        let ticked = doubts.is_empty() && plan.blocked(opt.tag_scheme).is_none();
+                        BatchRow { plan: Some(plan), doubts, ticked, ..row }
+                    }
+                    Err(e) => BatchRow { problem: e, ..row },
+                }
+            })
+            .collect();
+        // Clear, then to check, then those that cannot be tagged; in the order of the list within each.
+        rows.sort_by_key(|r| if r.plan.is_none() { 2 } else if r.doubts.is_empty() { 0 } else { 1 });
+        self.tag_batch = Some(TagBatch { rows });
+    }
+
+    /// Opens the next row to check of the batch in the Tag and rename window.
+    fn review_next(&mut self, after: Option<usize>) {
+        let Some(batch) = self.tag_batch.as_ref() else { return };
+        let start = after.map_or(0, |i| i + 1);
+        let next = (start..batch.rows.len()).chain(0..start).find(|&i| {
+            let r = &batch.rows[i];
+            r.plan.is_some() && !r.applied && !r.checked && !r.doubts.is_empty()
+        });
+        self.review(next);
+    }
+
+    fn review(&mut self, row: Option<usize>) {
+        let Some(i) = row else {
+            self.tag_dialog = None;
+            return;
+        };
+        if let Some(plan) = self.tag_batch.as_ref().and_then(|b| b.rows[i].plan.clone()) {
+            self.tag_dialog = Some(TagDialog { batch_row: Some(i), ..plan });
+        }
+    }
+
+    fn tag_batch_window(&mut self, ctx: &egui::Context) {
+        use crate::tagging::NameScheme;
+        let Some(mut b) = self.tag_batch.take() else { return };
+        let (mut open, mut close, mut apply) = (true, false, false);
+        let mut review = None;
+        let mut next = false;
+        let mut scheme = self.opt.tag_scheme;
+        let busy = self.running.is_some();
+        let id = egui::ViewportId::from_hash_of("tag batch");
+        let title = "Tag and rename several shows";
+        let builder = egui::ViewportBuilder::default()
+            .with_icon(app_icon())
+            .with_window_level(window_level(self.on_top()))
+            .with_title(title)
+            .with_inner_size([1100.0, 640.0])
+            .with_min_inner_size([600.0, 360.0]);
+        ctx.show_viewport_immediate(id, builder, |vctx, class| {
+            let content = |ui: &mut egui::Ui| {
+                let live = |r: &BatchRow| r.plan.is_some() && !r.applied;
+                let clear = b.rows.iter().filter(|r| live(r) && (r.doubts.is_empty() || r.checked)).count();
+                let to_check = b.rows.iter().filter(|r| live(r) && !r.doubts.is_empty() && !r.checked).count();
+                let cannot = b.rows.iter().filter(|r| r.plan.is_none()).count();
+                ui.label(format!(
+                    "{} shows: {clear} clear, {to_check} to check, {cannot} that cannot be tagged. The clear ones are ticked; \
+                     check the others in the Tag and rename window (Check) before ticking them. Nothing is written before Apply, \
+                     and Tools > Undo tagging gives the files back as they were.",
+                    b.rows.len()
+                ));
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label("File names");
+                    egui::ComboBox::from_id_salt("batch_scheme").width(240.0).selected_text(scheme.label()).show_ui(ui, |ui| {
+                        for s in NameScheme::ALL {
+                            ui.selectable_value(&mut scheme, s, s.label());
+                        }
+                    });
+                    ui.separator();
+                    ui.label("For every show:");
+                    for (label, tags) in [("Write the tags", true), ("Rename the files", false)] {
+                        let rows = b.rows.iter().filter_map(|r| r.plan.as_ref().filter(|_| !r.applied));
+                        let mut all = rows.clone().all(|p| if tags { p.write_tags } else { p.rename });
+                        if ui.checkbox(&mut all, label).changed() {
+                            for p in b.rows.iter_mut().filter(|r| !r.applied).filter_map(|r| r.plan.as_mut()) {
+                                if tags { p.write_tags = all } else { p.rename = all }
+                            }
+                        }
+                    }
+                });
+                egui::TopBottomPanel::bottom("batch_buttons").show_inside(ui, |ui| {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        let n = b.rows.iter().filter(|r| r.ticked && !r.applied && r.plan.as_ref().is_some_and(|p| p.blocked(scheme).is_none())).count();
+                        apply = ui.add_enabled(n > 0 && !busy, egui::Button::new(RichText::new(format!("Apply to the {} ticked", ops::plural(n, "show", "shows"))).strong())).clicked();
+                        next = ui.add_enabled(to_check > 0, egui::Button::new(format!("Check the next show ({to_check} left)"))).clicked();
+                        close = ui.button("Close").clicked();
+                        if busy {
+                            ui.label(RichText::new("Wait for the running task to finish.").weak());
+                        }
+                    });
+                });
+                egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
+                    egui::Grid::new("batch_rows").num_columns(8).striped(true).spacing([12.0, 4.0]).show(ui, |ui| {
+                        for h in ["", "Show", "Artist", "Date", "Titles", "Tags", "Rename", "Status"] {
+                            ui.strong(h);
+                        }
+                        ui.end_row();
+                        for (i, r) in b.rows.iter_mut().enumerate() {
+                            let blocked = r.plan.as_ref().and_then(|p| p.blocked(scheme));
+                            ui.add_enabled_ui(r.plan.is_some() && !r.applied && blocked.is_none(), |ui| ui.checkbox(&mut r.ticked, ""));
+                            ui.label(crate::files::show_name(&r.show.root)).on_hover_text(r.show.root.display().to_string());
+                            match r.plan.as_mut() {
+                                Some(p) => {
+                                    ui.label(&p.draft.artist);
+                                    ui.label(&p.draft.date);
+                                    ui.label(format!("{}/{}", p.draft.found, p.draft.tracks.len()));
+                                    ui.add_enabled_ui(!r.applied, |ui| ui.checkbox(&mut p.write_tags, ""));
+                                    ui.add_enabled_ui(!r.applied, |ui| ui.checkbox(&mut p.rename, ""));
+                                }
+                                None => {
+                                    for _ in 0..5 {
+                                        ui.label("");
+                                    }
+                                }
+                            }
+                            ui.horizontal(|ui| {
+                                let (text, level) = if r.applied {
+                                    ("Applied".to_string(), Level::Info)
+                                } else if r.plan.is_none() {
+                                    (format!("Cannot be tagged: {}", r.problem), Level::Error)
+                                } else if let Some(why) = &blocked {
+                                    (format!("Not ready: {why}"), Level::Error)
+                                } else if r.checked {
+                                    ("Checked".to_string(), Level::Ok)
+                                } else if r.doubts.is_empty() {
+                                    ("Clear".to_string(), Level::Ok)
+                                } else {
+                                    (format!("To check: {}", r.doubts.join("; ")), Level::Warn)
+                                };
+                                if r.plan.is_some() && !r.applied && ui.small_button("Check...").on_hover_text("Open it in the Tag and rename window").clicked() {
+                                    review = Some(i);
+                                }
+                                if r.applied { ui.label(RichText::new(text).weak()) } else { ui.label(colored(text, level)) };
+                            });
+                            ui.end_row();
+                        }
+                    });
+                });
+            };
+            if class == egui::ViewportClass::Embedded {
+                egui::Window::new(title).id(egui::Id::new(id)).collapsible(false).default_size([1080.0, 560.0]).open(&mut open).show(vctx, content);
+            } else {
+                egui::CentralPanel::default().show(vctx, content);
+                if vctx.input(|i| i.viewport().close_requested()) {
+                    open = false;
+                }
+            }
+        });
+        self.opt.tag_scheme = scheme;
+        if apply {
+            let ready: Vec<usize> = (0..b.rows.len())
+                .filter(|&i| b.rows[i].ticked && !b.rows[i].applied && b.rows[i].plan.as_ref().is_some_and(|p| p.blocked(scheme).is_none()))
+                .collect();
+            let jobs = ready.iter().filter_map(|&i| b.rows[i].plan.as_ref()).map(|p| p.job(scheme)).collect();
+            let shows: Vec<Show> = ready.iter().map(|&i| b.rows[i].show.clone()).collect();
+            let files = shows.iter().flat_map(|s| s.files.clone()).collect();
+            for &i in &ready {
+                b.rows[i].applied = true;
+            }
+            self.start(Op::Tag(jobs), shows, files, false);
+        }
+        if !open || close {
+            // The window of a row of this batch goes with it.
+            if self.tag_dialog.as_ref().is_some_and(|d| d.batch_row.is_some()) {
+                self.tag_dialog = None;
+            }
             return;
         }
-        match crate::tagging::draft(&show, &infos[0].0) {
-            Ok(draft) => {
-                let whole_checksums = crate::tagging::checksum_files(&show.root).iter().any(|p| matches!(crate::files::ext_lower(p).as_str(), "md5" | "sfv"));
-                let (write_tags, rename) = (self.opt.tag_write, self.opt.tag_rename);
-                self.tag_dialog = Some(TagDialog { show, infos, info: 0, draft, album_auto: true, update_checksums: true, whole_checksums, write_tags, rename });
-            }
-            Err(e) => self.log(format!("{name}: {e}"), Level::Error),
+        self.tag_batch = Some(b);
+        if next {
+            self.review_next(None);
+        } else if review.is_some() {
+            self.review(review);
         }
     }
 
     fn tag_window(&mut self, ctx: &egui::Context) {
         use crate::tagging::NameScheme;
         let Some(mut d) = self.tag_dialog.take() else { return };
-        let (mut apply, mut cancel) = (false, false);
+        let (mut apply, mut cancel, mut then_next) = (false, false, false);
+        // Checking a show of a batch: nothing is written here, the plan goes back to its row.
+        let in_batch = d.batch_row.is_some();
         let mut reload = None;
         let mut open = true;
         let mut scheme = self.opt.tag_scheme;
@@ -1388,6 +1644,9 @@ impl App {
                         };
                         ui.label(colored(text, Level::Warn));
                     }
+                    if !d.draft.date.trim().is_empty() && !crate::tagging::full_date(&d.draft.date) {
+                        ui.label(colored("The date is not written YYYY-MM-DD (1986-05-17, for instance): players sort and show dates best that way.", Level::Warn));
+                    }
                     if let Some(folder) = d.draft.folder_date.as_ref().filter(|f| **f != d.draft.date.trim()) {
                         ui.label(colored(format!("The folder name says {folder}: check the date."), Level::Warn));
                     }
@@ -1404,10 +1663,16 @@ impl App {
                     egui::TopBottomPanel::bottom("tag_buttons").show_inside(ui, |ui| {
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
-                            let ready = conflicts.is_empty() && !busy && (d.write_tags || d.rename) && !same_names;
-                            apply |= ui.add_enabled(ready, egui::Button::new(RichText::new("Apply").strong())).clicked();
+                            let ready = conflicts.is_empty() && (!busy || in_batch) && (d.write_tags || d.rename) && !same_names;
+                            if in_batch {
+                                let tip = "Nothing is written yet: the show is ticked in the batch window, written with the others by its Apply.";
+                                then_next = ui.add_enabled(ready, egui::Button::new(RichText::new("OK, next show to check").strong())).on_hover_text(tip).clicked();
+                                apply |= then_next || ui.add_enabled(ready, egui::Button::new("OK")).on_hover_text(tip).clicked();
+                            } else {
+                                apply |= ui.add_enabled(ready, egui::Button::new(RichText::new("Apply").strong())).clicked();
+                            }
                             cancel |= ui.button("Cancel").clicked();
-                            if busy {
+                            if busy && !in_batch {
                                 ui.label(RichText::new("Wait for the running task to finish.").weak());
                             } else if !d.write_tags && !d.rename {
                                 ui.label(RichText::new("Tick Write the tags, Rename the files or both.").weak());
@@ -1463,9 +1728,18 @@ impl App {
                 Err(e) => self.log(e, Level::Error),
             }
         }
-        if apply {
-            let names = if d.rename { scheme } else { NameScheme::Keep };
-            let job = d.draft.job(names, d.write_tags, d.update_checksums || !d.whole_checksums);
+        if apply && in_batch {
+            let i = d.batch_row.unwrap_or_default();
+            if let Some(row) = self.tag_batch.as_mut().and_then(|b| b.rows.get_mut(i)) {
+                row.plan = Some(TagDialog { batch_row: None, ..d });
+                row.checked = true;
+                row.ticked = true;
+            }
+            if then_next {
+                self.review_next(Some(i));
+            }
+        } else if apply {
+            let job = d.job(scheme);
             self.start(Op::Tag(vec![job]), vec![d.show.clone()], d.show.files.clone(), false);
         } else if open && !cancel {
             self.tag_dialog = Some(d);
@@ -1951,7 +2225,7 @@ impl App {
             let dragging = self.drag_select.is_some();
             let compact = self.opt.compact;
             // Same windows taking the keys as for the shortcuts, plus the settings.
-            let keys_taken = ctx.wants_keyboard_input() || self.info_choice.is_some() || self.float_dialog.is_some() || self.settings.is_some() || self.tag_dialog.is_some();
+            let keys_taken = ctx.wants_keyboard_input() || self.info_choice.is_some() || self.float_dialog.is_some() || self.settings.is_some() || self.tag_dialog.is_some() || self.tag_batch.is_some();
             // A little air between columns fitted to their content.
             ui.spacing_mut().item_spacing.x = 16.0;
             egui::ScrollArea::horizontal().show(ui, |ui| {
@@ -2367,7 +2641,7 @@ impl App {
 
     fn shortcuts(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         // The info file choice window takes the keys (arrows, Enter, Escape).
-        if ctx.wants_keyboard_input() || self.info_choice.is_some() || self.float_dialog.is_some() || self.tag_dialog.is_some() {
+        if ctx.wants_keyboard_input() || self.info_choice.is_some() || self.float_dialog.is_some() || self.tag_dialog.is_some() || self.tag_batch.is_some() {
             return;
         }
         let busy = self.running.is_some();
@@ -3296,6 +3570,7 @@ impl eframe::App for App {
         self.about_window(ctx);
         self.help_window(ctx);
         self.info_window(ctx);
+        self.tag_batch_window(ctx);
         self.tag_window(ctx);
         self.undo_window(ctx);
         self.float_window(ctx);

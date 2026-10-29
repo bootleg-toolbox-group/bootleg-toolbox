@@ -1988,7 +1988,7 @@ pub fn op_tag(ctx: &Ctx, jobs: &[crate::tagging::TagJob]) -> String {
     if ctx.cancelled() {
         return "Stopped.".into();
     }
-    let undo = if journal { " To undo: Tools > Undo tagging." } else { "" };
+    let undo = if journal { " To undo: Tools > Undo tagging (or --cli undo-tagging)." } else { "" };
     format!("{} tagged, {} renamed.{undo}", plural(tagged, "file", "files"), renamed)
 }
 
@@ -2064,6 +2064,25 @@ fn tag_show(ctx: &Ctx, job: &crate::tagging::TagJob, undo: &mut crate::undo::Rec
         ctx.log(format!("{show}: nothing changed, {e}"), Level::Error);
         return (0, 0);
     }
+    // 0b. Whole-file digests before tagging, when a .md5 or .sfv lists the files: the lines
+    // that were already wrong are reported (tagging rewrites them).
+    let whole = checksums.iter().any(|p| matches!(ext_lower(p).as_str(), "md5" | "sfv"));
+    let to_tag: Vec<PathBuf> = job.files.iter().filter(|(p, f, _)| !f.is_empty() && tagging::taggable(p)).map(|(p, _, _)| p.clone()).collect();
+    let mut before = HashMap::new();
+    if job.update_checksums && whole && !to_tag.is_empty() {
+        ctx.add_total(to_tag.len());
+        let computed = par_map(ctx, &to_tag, |p| p.clone(), |p| {
+            Ok((hex(&audio::file_md5(p, &ctx.cancel)?), format!("{:08x}", audio::file_crc32(p, &ctx.cancel)?)))
+        });
+        for (p, d) in to_tag.iter().zip(computed) {
+            if let Some(d) = d {
+                before.insert(p.clone(), d);
+            }
+        }
+        if ctx.cancelled() {
+            return (0, 0);
+        }
+    }
     // 1. Tags, FLAC only; the audio signature and length must be the same afterwards.
     let mut tagged = Vec::new();
     let mut untagged = Vec::new();
@@ -2113,7 +2132,6 @@ fn tag_show(ctx: &Ctx, job: &crate::tagging::TagJob, undo: &mut crate::undo::Rec
     }
 
     // 2. Whole-file digests of the tagged files, when a .md5 or .sfv lists them.
-    let whole = checksums.iter().any(|p| matches!(ext_lower(p).as_str(), "md5" | "sfv"));
     let mut digests = HashMap::new();
     if job.update_checksums && whole && !tagged.is_empty() {
         let computed = par_map(ctx, &tagged, |p| p.clone(), |p| {
@@ -2167,11 +2185,20 @@ fn tag_show(ctx: &Ctx, job: &crate::tagging::TagJob, undo: &mut crate::undo::Rec
     }
 
     // 4. Checksum files.
-    let changes = tagging::Changes { renamed, digests };
+    let changes = tagging::Changes { renamed, digests, before };
     for sum in &checksums {
         match tagging::update_checksum_file(sum, &changes, &tagged) {
-            Ok((0, 0)) => {}
-            Ok((changed, stale)) => {
+            Ok(tagging::ChecksumUpdate { changed, stale, wrong_before }) => {
+                if wrong_before > 0 {
+                    ctx.log(
+                        format!(
+                            "{}: {} already wrong before tagging (the files did not match them); they now hold the checksums of the tagged files",
+                            rel_posix(sum, &job.root),
+                            plural(wrong_before, "line was", "lines were")
+                        ),
+                        Level::Warn,
+                    );
+                }
                 if changed > 0 {
                     ctx.log(format!("Updated {}: {}", rel_posix(sum, &job.root), plural(changed, "line", "lines")), Level::Ok);
                 }

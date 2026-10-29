@@ -754,18 +754,30 @@ pub struct Changes {
     pub renamed: HashMap<PathBuf, PathBuf>,
     /// Tagged files (old paths) -> new whole-file MD5 and CRC32 (lowercase hex), when computed.
     pub digests: HashMap<PathBuf, (String, String)>,
+    /// The same, before tagging: lines that did not match the files already are counted.
+    pub before: HashMap<PathBuf, (String, String)>,
+}
+
+/// What `update_checksum_file` did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ChecksumUpdate {
+    /// Lines rewritten.
+    pub changed: usize,
+    /// Lines of tagged files that still hold the former digest (not computed).
+    pub stale: usize,
+    /// Lines of tagged files whose digest was already wrong before tagging.
+    pub wrong_before: usize,
 }
 
 /// Rewrites one checksum file: renamed files get their new name (the folder part as
-/// written), tagged files their new MD5 (.md5) or CRC32 (.sfv). Returns the number of
-/// lines changed, and of lines that still hold an old digest (not computed).
-pub fn update_checksum_file(path: &Path, changes: &Changes, tagged: &[PathBuf]) -> Result<(usize, usize), String> {
+/// written), tagged files their new MD5 (.md5) or CRC32 (.sfv).
+pub fn update_checksum_file(path: &Path, changes: &Changes, tagged: &[PathBuf]) -> Result<ChecksumUpdate, String> {
     let kind = ext_lower(path);
     let base = path.parent().unwrap_or(Path::new(""));
     let text = files::read_text(path).map_err(|e| e.to_string())?;
     let known: Vec<PathBuf> = changes.renamed.keys().chain(tagged.iter()).cloned().collect();
     let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
-    let (mut changed, mut stale) = (0, 0);
+    let (mut changed, mut stale, mut wrong_before) = (0, 0, 0);
     let mut out = Vec::new();
     for line in text.lines() {
         let Some((name_r, digest_r)) = checksum_line(&kind, line) else {
@@ -778,6 +790,11 @@ pub fn update_checksum_file(path: &Path, changes: &Changes, tagged: &[PathBuf]) 
         };
         let mut digest = line[digest_r.clone()].to_string();
         if tagged.contains(old) && matches!(kind.as_str(), "md5" | "sfv") {
+            if let Some((md5, crc)) = changes.before.get(old) {
+                if !digest.eq_ignore_ascii_case(if kind == "md5" { md5 } else { crc }) {
+                    wrong_before += 1;
+                }
+            }
             match changes.digests.get(old) {
                 Some((md5, crc)) => {
                     let new = if kind == "md5" { md5.clone() } else { crc.clone() };
@@ -814,7 +831,7 @@ pub fn update_checksum_file(path: &Path, changes: &Changes, tagged: &[PathBuf]) 
         }
         fs::write(path, content).map_err(|e| e.to_string())?;
     }
-    Ok((changed, stale))
+    Ok(ChecksumUpdate { changed, stale, wrong_before })
 }
 
 /// The checksum files of a show (in its folder and sub-folders).
@@ -925,6 +942,46 @@ pub fn draft(show: &files::Show, info: &Path) -> Result<Draft, String> {
     let tracks = number_tracks(&show.files, &parsed.titles);
     let extra = parsed.titles.iter().skip(show.files.len()).map(|t| t.1.clone()).collect();
     Ok(Draft { root: show.root.clone(), artist, date, place, album, found: parsed.titles.len(), extra, tracks, folder_date })
+}
+
+/// A date written as YYYY-MM-DD, the form players sort and show best.
+pub fn full_date(date: &str) -> bool {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^(19|20)\d\d-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$").unwrap()).is_match(date.trim())
+}
+
+/// Why the plan of a show needs a look before it is written (none: it can be written as it
+/// is). The info file must be the only one whose tracklist fits the files, and the artist,
+/// the date and every title must be there and agree with the folder name.
+pub fn doubts(show: &files::Show, draft: &Draft, infos: &[(PathBuf, usize)]) -> Vec<String> {
+    let files = draft.tracks.len();
+    let mut out = Vec::new();
+    if draft.found != files {
+        out.push(if draft.found == 0 { "no tracklist found".to_string() } else { format!("{} titles for {files} files", draft.found) });
+    } else {
+        // Other info files with as many titles, but other titles (a copy of the same one is fine).
+        let titles = |p: &Path| files::read_text(p).map(|t| parse_info(&t, show.files.len(), None).titles).unwrap_or_default();
+        let lists: Vec<_> = infos.iter().filter(|(_, n)| *n == files).map(|(p, _)| titles(p)).collect();
+        let other = lists.iter().filter(|l| **l != lists[0]).count();
+        if other > 0 {
+            out.push(format!("{} info files fit, with other titles", other + 1));
+        }
+    }
+    if draft.artist.trim().is_empty() {
+        out.push("no artist".into());
+    }
+    if draft.date.trim().is_empty() {
+        out.push("no date".into());
+    } else if !full_date(&draft.date) {
+        out.push("date not YYYY-MM-DD".into());
+    } else if let Some(folder) = draft.folder_date.as_ref().filter(|f| **f != draft.date.trim()) {
+        out.push(format!("the folder name says {folder}"));
+    }
+    let untitled = draft.tracks.iter().filter(|t| t.title.trim().is_empty()).count();
+    if untitled > 0 && draft.found == files {
+        out.push(format!("{untitled} without a title"));
+    }
+    out
 }
 
 /// A file, the fields to write in it, its new name.
@@ -1111,11 +1168,13 @@ mod tests {
         let changes = Changes {
             renamed: HashMap::from([(old.clone(), new.clone())]),
             digests: HashMap::from([(old.clone(), ("0123456789abcdef0123456789abcdef".to_string(), "89abcdef".to_string()))]),
+            before: HashMap::from([(old.clone(), ("ffffffffffffffffffffffffffffffff".to_string(), "00000000".to_string()))]),
         };
         let tagged = vec![old.clone()];
         let md5 = dir.join("s.md5");
         fs::write(&md5, "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF *CD1\\01.flac\r\nffffffffffffffffffffffffffffffff  other.flac\r\n").unwrap();
-        assert_eq!(update_checksum_file(&md5, &changes, &tagged).unwrap(), (1, 0));
+        // The .md5 line matched the file before tagging (the case aside); the .sfv one did not.
+        assert_eq!(update_checksum_file(&md5, &changes, &tagged).unwrap(), ChecksumUpdate { changed: 1, stale: 0, wrong_before: 0 });
         assert_eq!(fs::read_to_string(&md5).unwrap(), "0123456789ABCDEF0123456789ABCDEF *CD1\\01 - A.flac\r\nffffffffffffffffffffffffffffffff  other.flac\r\n");
         let ffp = dir.join("s.ffp");
         fs::write(&ffp, "CD1/01.flac:ffffffffffffffffffffffffffffffff\n").unwrap();
@@ -1127,9 +1186,18 @@ mod tests {
         assert_eq!(fs::read_to_string(&st5).unwrap(), "ffffffffffffffffffffffffffffffff  [shntool]  CD1/01 - A.flac\n");
         let sfv = dir.join("s.sfv");
         fs::write(&sfv, "; comment\nCD1\\01.flac 01234567\n").unwrap();
-        update_checksum_file(&sfv, &changes, &tagged).unwrap();
+        assert_eq!(update_checksum_file(&sfv, &changes, &tagged).unwrap().wrong_before, 1);
         assert_eq!(fs::read_to_string(&sfv).unwrap(), "; comment\nCD1\\01 - A.flac 89abcdef\n");
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn full_dates() {
+        assert!(full_date("1986-05-17"));
+        assert!(full_date(" 2026-01-23 "));
+        for d in ["2026", "1986-05", "1986-13-01", "1986-05-32", "17/05/1986", "1986-5-17"] {
+            assert!(!full_date(d), "{d}");
+        }
     }
 
     #[test]

@@ -4,6 +4,7 @@ expression: text
 ---
   album: 1990-01-01 The Hall, Springfield
   artist: Synthetic Band
+  clear
   d1t01 "Opening"  [01 - Opening.flac]
   d1t02 "Second Song"  [02 - Second Song.flac]
   d1t03 "Long Jam"  [03 - Long Jam.flac]
