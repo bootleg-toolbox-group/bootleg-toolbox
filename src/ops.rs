@@ -1973,9 +1973,32 @@ pub fn op_tag(ctx: &Ctx, jobs: &[crate::tagging::TagJob]) -> String {
 fn tag_show(ctx: &Ctx, job: &crate::tagging::TagJob) -> (usize, usize) {
     use crate::tagging;
     let show = file_name(&job.root);
+    // 0. Write-protected files (read-only copies, files a torrent client keeps locked):
+    // nothing is changed at all, rather than names without tags.
+    let checksums = tagging::checksum_files(&job.root);
+    let locked: Vec<String> = job
+        .files
+        .iter()
+        .map(|(p, _, _)| p)
+        .filter(|p| tagging::taggable(p))
+        .chain(&checksums)
+        .filter(|p| fs::OpenOptions::new().write(true).open(p).is_err())
+        .map(|p| rel_posix(p, &job.root))
+        .collect();
+    if !locked.is_empty() {
+        let text = format!(
+            "{show}: nothing changed, {} cannot be written (read-only or locked): {}. Make them writable (file properties on Windows, chmod u+w on Linux) and try again.",
+            plural(locked.len(), "file", "files"),
+            if locked.len() > 10 { format!("{}... and {} more", locked[..10].join(", "), locked.len() - 10) } else { locked.join(", ") }
+        );
+        ctx.status(&job.root, "Nothing changed: read-only files", Level::Error, "");
+        ctx.log(text, Level::Error);
+        return (0, 0);
+    }
     // 1. Tags, FLAC only; the audio signature and length must be the same afterwards.
     let mut tagged = Vec::new();
     let mut untagged = Vec::new();
+    let mut failed = HashSet::new();
     for (path, fields, _) in &job.files {
         if ctx.cancelled() {
             return (tagged.len(), 0);
@@ -1996,7 +2019,8 @@ fn tag_show(ctx: &Ctx, job: &crate::tagging::TagJob) -> (usize, usize) {
             Ok(()) => tagged.push(path.clone()),
             Err(e) => {
                 ctx.status(path, format!("Not tagged: {e}"), Level::Error, "");
-                ctx.log(format!("{}: not tagged: {e}", file_name(path)), Level::Error);
+                ctx.log(format!("{}: not tagged, not renamed: {e}", file_name(path)), Level::Error);
+                failed.insert(path.clone());
             }
         }
     }
@@ -2005,7 +2029,6 @@ fn tag_show(ctx: &Ctx, job: &crate::tagging::TagJob) -> (usize, usize) {
     }
 
     // 2. Whole-file digests of the tagged files, when a .md5 or .sfv lists them.
-    let checksums = tagging::checksum_files(&job.root);
     let whole = checksums.iter().any(|p| matches!(ext_lower(p).as_str(), "md5" | "sfv"));
     let mut digests = HashMap::new();
     if job.update_checksums && whole && !tagged.is_empty() {
@@ -2028,6 +2051,7 @@ fn tag_show(ctx: &Ctx, job: &crate::tagging::TagJob) -> (usize, usize) {
     let moves: Vec<(PathBuf, PathBuf)> = job
         .files
         .iter()
+        .filter(|(p, _, _)| !failed.contains(p))
         .filter_map(|(p, _, name)| name.as_ref().map(|n| (p.clone(), p.with_file_name(n))))
         .filter(|(old, new)| old != new)
         .collect();
@@ -2086,8 +2110,10 @@ fn tag_show(ctx: &Ctx, job: &crate::tagging::TagJob) -> (usize, usize) {
             ctx.log(format!("{show}: the .torrent files made before no longer match the files; make them again before seeding."), Level::Warn);
         }
     }
-    ctx.status(&job.root, format!("Tagged {}, renamed {}", tagged.len(), changes.renamed.len()), Level::Ok, "");
-    ctx.log(format!("{show}: {} tagged, {} renamed.", plural(tagged.len(), "file", "files"), changes.renamed.len()), Level::Ok);
+    let level = if failed.is_empty() { Level::Ok } else { Level::Warn };
+    let failures = if failed.is_empty() { String::new() } else { format!(" ({} failed, left as they were)", failed.len()) };
+    ctx.status(&job.root, format!("Tagged {}, renamed {}{failures}", tagged.len(), changes.renamed.len()), level, "");
+    ctx.log(format!("{show}: {} tagged, {} renamed{failures}.", plural(tagged.len(), "file", "files"), changes.renamed.len()), level);
     (tagged.len(), changes.renamed.len())
 }
 
