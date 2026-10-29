@@ -508,6 +508,19 @@ pub fn new_name(scheme: NameScheme, t: &TrackPlan, artist: &str, date: &str, wid
 pub fn write_flac_tags(path: &Path, fields: &[(&str, String)]) -> Result<(), String> {
     let io = |e: std::io::Error| e.to_string();
     let mut file = File::open(path).map_err(io)?;
+    let (start, blocks, audio_start) = read_flac_head(&mut file)?;
+    let old_meta = (audio_start - start - 4) as usize;
+    write_flac_blocks(path, file, start, blocks, audio_start, old_meta, fields)
+}
+
+/// Metadata blocks of a FLAC file: type, content.
+type Blocks = Vec<(u8, Vec<u8>)>;
+
+/// Where the metadata of a FLAC file starts (after an ID3v2 tag some taggers put in front),
+/// its blocks (type, content), and where the audio frames start.
+fn read_flac_head(file: &mut File) -> Result<(u64, Blocks, u64), String> {
+    let io = |e: std::io::Error| e.to_string();
+    file.seek(SeekFrom::Start(0)).map_err(io)?;
     let mut magic = [0u8; 4];
     file.read_exact(&mut magic).map_err(io)?;
     // An ID3v2 tag in front (some taggers put one) is kept as it is.
@@ -523,7 +536,7 @@ pub fn write_flac_tags(path: &Path, fields: &[(&str, String)]) -> Result<(), Str
     if &magic != b"fLaC" {
         return Err("not a FLAC file".into());
     }
-    let mut blocks: Vec<(u8, Vec<u8>)> = Vec::new();
+    let mut blocks: Blocks = Vec::new();
     loop {
         let mut header = [0u8; 4];
         file.read_exact(&mut header).map_err(|_| "damaged FLAC header".to_string())?;
@@ -539,7 +552,65 @@ pub fn write_flac_tags(path: &Path, fields: &[(&str, String)]) -> Result<(), Str
     if blocks.first().map(|b| b.0) != Some(0) {
         return Err("damaged FLAC header (no STREAMINFO first)".into());
     }
-    let old_meta = (audio_start - start - 4) as usize;
+    Ok((start, blocks, audio_start))
+}
+
+/// Everything before the audio frames of a FLAC file (an ID3v2 tag in front included): what
+/// tagging changes, saved by the undo journal.
+pub fn flac_head(path: &Path) -> Result<Vec<u8>, String> {
+    let mut file = File::open(path).map_err(|e| e.to_string())?;
+    let (_, _, audio_start) = read_flac_head(&mut file)?;
+    let mut head = vec![0u8; audio_start as usize];
+    file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+    file.read_exact(&mut head).map_err(|e| e.to_string())?;
+    Ok(head)
+}
+
+/// Puts `head` back in front of the audio frames of a FLAC file: in place when it has the
+/// size of the current one, otherwise by writing the file again beside it.
+pub fn restore_flac_head(path: &Path, head: &[u8]) -> Result<(), String> {
+    let io = |e: std::io::Error| e.to_string();
+    let mut file = File::open(path).map_err(io)?;
+    let (_, _, audio_start) = read_flac_head(&mut file)?;
+    drop(file);
+    if head.len() as u64 == audio_start {
+        let mut f = OpenOptions::new().write(true).open(path).map_err(io)?;
+        f.write_all(head).map_err(io)?;
+        return f.sync_all().map_err(io);
+    }
+    replace_head(path, head, audio_start)
+}
+
+/// Writes `head` then the audio frames of `path` (from `audio_start`) beside it, checks the
+/// copy, then puts it in place of the original.
+fn replace_head(path: &Path, head: &[u8], audio_start: u64) -> Result<(), String> {
+    let io = |e: std::io::Error| e.to_string();
+    let part = path.with_file_name(format!(".{}.part", file_name(path)));
+    let result = (|| -> Result<(), String> {
+        let mut src = File::open(path).map_err(io)?;
+        let mut out = File::create(&part).map_err(io)?;
+        out.write_all(head).map_err(io)?;
+        src.seek(SeekFrom::Start(audio_start)).map_err(io)?;
+        let copied = std::io::copy(&mut src, &mut out).map_err(io)?;
+        out.sync_all().map_err(io)?;
+        let total = src.metadata().map_err(io)?.len();
+        if copied != total - audio_start || out.metadata().map_err(io)?.len() != head.len() as u64 + copied {
+            return Err("the copy is incomplete".into());
+        }
+        Ok(())
+    })();
+    if let Err(e) = result {
+        let _ = fs::remove_file(&part);
+        return Err(e);
+    }
+    fs::rename(&part, path).map_err(|e| {
+        let _ = fs::remove_file(&part);
+        e.to_string()
+    })
+}
+
+fn write_flac_blocks(path: &Path, file: File, start: u64, blocks: Blocks, audio_start: u64, old_meta: usize, fields: &[(&str, String)]) -> Result<(), String> {
+    let io = |e: std::io::Error| e.to_string();
 
     // The new VORBIS_COMMENT: the encoder's vendor string and the other fields kept.
     let old = blocks.iter().find(|b| b.0 == 4).map(|b| b.1.clone()).unwrap_or_default();
@@ -598,31 +669,10 @@ pub fn write_flac_tags(path: &Path, fields: &[(&str, String)]) -> Result<(), Str
         return Ok(());
     }
     // Written again beside the original, checked, then put in its place.
-    let part = path.with_file_name(format!(".{}.part", file_name(path)));
-    let result = (|| -> Result<(), String> {
-        let mut src = File::open(path).map_err(io)?;
-        let mut out = File::create(&part).map_err(io)?;
-        let mut prefix = vec![0u8; start as usize + 4];
-        src.read_exact(&mut prefix).map_err(io)?;
-        out.write_all(&prefix).map_err(io)?;
-        out.write_all(&meta).map_err(io)?;
-        src.seek(SeekFrom::Start(audio_start)).map_err(io)?;
-        let copied = std::io::copy(&mut src, &mut out).map_err(io)?;
-        out.sync_all().map_err(io)?;
-        let total = src.metadata().map_err(io)?.len();
-        if copied != total - audio_start || out.metadata().map_err(io)?.len() != start + 4 + meta.len() as u64 + copied {
-            return Err("the copy is incomplete".into());
-        }
-        Ok(())
-    })();
-    if let Err(e) = result {
-        let _ = fs::remove_file(&part);
-        return Err(e);
-    }
-    fs::rename(&part, path).map_err(|e| {
-        let _ = fs::remove_file(&part);
-        e.to_string()
-    })
+    let mut head = vec![0u8; start as usize + 4];
+    File::open(path).and_then(|mut src| src.read_exact(&mut head)).map_err(io)?;
+    head.extend_from_slice(&meta);
+    replace_head(path, &head, audio_start)
 }
 
 fn vorbis_vendor(d: &[u8]) -> Option<String> {

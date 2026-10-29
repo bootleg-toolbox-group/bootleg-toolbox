@@ -271,6 +271,39 @@ fn synthetic_shows() {
     snap("files", file_sums(dir));
 }
 
+/// Tag and rename (tags, new names, .md5 and .sfv updated), then undo-tagging: every file
+/// of the show is back byte for byte.
+#[test]
+fn tag_and_undo() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    make_shows(dir);
+    cli(dir, "to-flac", &[SHOW], &[]);
+    remove_wavs(&dir.join(SHOW));
+    cli(dir, "create", &[SHOW], &[("BT_MD5", "1"), ("BT_SFV", "1")]);
+    let undo = dir.join("undo").display().to_string();
+    let env = [("BT_UNDO_DIR", undo.as_str()), ("BT_RENAME", "disc")];
+    let before = file_sums(&dir.join(SHOW));
+    let tagged = cli(dir, "tag-info", &[SHOW], &env);
+    assert!(tagged.contains("4 files tagged, 4 renamed"), "{tagged}");
+    assert_ne!(file_sums(&dir.join(SHOW)), before);
+    let undone = cli(dir, "undo-tagging", &[], &env);
+    assert!(undone.contains("4 files rolled back in 1 show"), "{undone}");
+    assert_eq!(file_sums(&dir.join(SHOW)), before);
+    // Done once: the second time there is nothing left to roll back.
+    assert!(cli(dir, "undo-tagging", &[], &env).contains("0 files rolled back"));
+
+    // A file tagged again by another program after Tag and rename is left as it is, and so
+    // are the checksum files (they would no longer match it).
+    cli(dir, "tag-info", &[SHOW], &env);
+    let retagged = dir.join(SHOW).join("CD2/d2t01 - Encore.flac");
+    bootleg_toolbox::tagging::write_flac_tags(&retagged, &[("COMMENT", "edited elsewhere".into())]).unwrap();
+    let partly = cli(dir, "undo-tagging", &[], &env);
+    assert!(partly.contains("d2t01 - Encore.flac not rolled back: changed since"), "{partly}");
+    assert!(partly.contains("3 files rolled back in 1 show"), "{partly}");
+    assert!(retagged.exists() && dir.join(SHOW).join("CD1/01 - Opening.flac").exists());
+}
+
 // ---------------------------------------------------------------- real shows (local)
 
 /// The copies of real shows in testdata/, as the before/after comparison used them.

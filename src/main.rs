@@ -125,6 +125,14 @@ fn run_cli(args: &[String]) -> i32 {
             Some(jobs) => Op::Tag(jobs),
             None => return 0,
         },
+        // The latest Tag and rename, all its shows.
+        "undo-tagging" => match bootleg_toolbox::undo::list().into_iter().next() {
+            Some((run, batch)) => Op::Rollback { run, shows: (0..batch.shows.len()).collect() },
+            None => {
+                println!("Nothing to undo.");
+                return 0;
+            }
+        },
         // .torrent files among the paths, checked against the folders (or the folders next to them).
         "torrent-check" => Op::TorrentCheck(args[1..].iter().map(PathBuf::from).filter(|p| bootleg_toolbox::files::ext_lower(p) == "torrent").collect()),
         // DVDs (VIDEO_TS folders, VOB files) found in the paths as well as the audio files.

@@ -24,3 +24,4 @@ pub mod speed;
 pub mod wv;
 pub mod spectrogram;
 pub mod tagging;
+pub mod undo;

@@ -243,6 +243,8 @@ pub enum Op {
     MediaInfo(Vec<PathBuf>),
     /// Tags and new names from the info file (the choices of its window).
     Tag(Vec<crate::tagging::TagJob>),
+    /// Gives these shows of an undo journal run back as they were.
+    Rollback { run: PathBuf, shows: Vec<usize> },
     /// Follow-up of a conversion to FLAC (the choices of its window).
     AfterFlac { roots: Vec<PathBuf>, sources: Vec<PathBuf>, trash_sources: bool, trash_checksums: Vec<PathBuf>, create_ffp: bool },
 }
@@ -288,6 +290,7 @@ impl Op {
             Op::TorrentCheck(_) => "Checking against the torrent",
             Op::MediaInfo(_) => "Reading media info",
             Op::Tag(_) => "Tagging from the info file",
+            Op::Rollback { .. } => "Rolling back tagging",
             Op::AfterFlac { .. } => "Tidying up after the conversion",
         }
     }
@@ -364,6 +367,7 @@ pub fn spawn(op: Op, shows: Vec<Show>, files: Vec<PathBuf>, opt: Options, tx: Se
                 Op::TorrentCheck(torrents) => op_torrent_check(&ctx, &shows, torrents),
                 Op::MediaInfo(dvds) => op_media_info(&ctx, &shows, &files, dvds),
                 Op::Tag(jobs) => op_tag(&ctx, jobs),
+                Op::Rollback { run, shows } => op_rollback(&ctx, run, shows),
                 Op::AfterFlac { roots, sources, trash_sources, trash_checksums, create_ffp } => {
                     op_after_flac(&ctx, roots, sources, *trash_sources, trash_checksums, *create_ffp)
                 }
@@ -421,7 +425,7 @@ fn par_map<T: Sync, R: Send>(
         .collect()
 }
 
-fn plural(count: usize, singular: &str, many: &str) -> String {
+pub fn plural(count: usize, singular: &str, many: &str) -> String {
     format!("{count} {}", if count == 1 { singular } else { many })
 }
 
@@ -1720,7 +1724,7 @@ fn op_media_info(ctx: &Ctx, shows: &[Show], files: &[PathBuf], dvds: &[PathBuf])
     })
 }
 
-fn human_size(bytes: u64) -> String {
+pub fn human_size(bytes: u64) -> String {
     let (value, unit) = match bytes {
         b if b >= 1 << 30 => (b as f64 / (1u64 << 30) as f64, "GB"),
         b if b >= 1 << 20 => (b as f64 / (1u64 << 20) as f64, "MB"),
@@ -1964,18 +1968,71 @@ pub fn op_tag(ctx: &Ctx, jobs: &[crate::tagging::TagJob]) -> String {
     ctx.add_total(jobs.iter().map(|j| j.files.len()).sum());
     ctx.rescan.store(true, Ordering::SeqCst);
     let (mut tagged, mut renamed) = (0, 0);
+    let mut undo = crate::undo::Recorder::new();
+    if !undo.active() {
+        ctx.log("The undo journal cannot be kept (no data folder): these changes could not be rolled back.", Level::Warn);
+    }
     for job in jobs {
         if ctx.cancelled() {
-            return "Stopped.".into();
+            break;
         }
-        let (t, r) = tag_show(ctx, job);
+        let (t, r) = tag_show(ctx, job, &mut undo);
+        if let Err(e) = undo.end_show() {
+            ctx.log(format!("{}: undo journal not saved: {e}", files::show_name(&job.root)), Level::Error);
+        }
         tagged += t;
         renamed += r;
     }
-    format!("{} tagged, {} renamed.", plural(tagged, "file", "files"), renamed)
+    let journal = undo.active() && tagged + renamed > 0;
+    undo.finish();
+    if ctx.cancelled() {
+        return "Stopped.".into();
+    }
+    let undo = if journal { " To undo: Tools > Undo tagging." } else { "" };
+    format!("{} tagged, {} renamed.{undo}", plural(tagged, "file", "files"), renamed)
 }
 
-fn tag_show(ctx: &Ctx, job: &crate::tagging::TagJob) -> (usize, usize) {
+/// Rolls back shows of an undo journal run, then keeps in the journal what could not be.
+fn op_rollback(ctx: &Ctx, run: &Path, which: &[usize]) -> String {
+    let Some(mut batch) = fs::read_to_string(run.join("journal.ron")).ok().and_then(|t| ron::from_str::<crate::undo::Batch>(&t).ok()) else {
+        return "The undo journal cannot be read.".into();
+    };
+    ctx.add_total(which.iter().filter_map(|&i| batch.shows.get(i)).map(|s| s.files.len()).sum());
+    ctx.rescan.store(true, Ordering::SeqCst);
+    let (mut restored, mut shows) = (0, 0);
+    for &i in which {
+        let Some(show) = batch.shows.get(i).filter(|s| !s.rolled_back).cloned() else { continue };
+        if ctx.cancelled() {
+            break;
+        }
+        let out = crate::undo::roll_back(run, &show, &ctx.cancel);
+        ctx.advance(show.files.len());
+        for (path, why) in &out.skipped {
+            ctx.log(format!("{}: {} not rolled back: {why}", show.name, rel_posix(path, &show.root)), Level::Error);
+        }
+        // What is left to roll back: the files that could not be (with the checksum files).
+        let left: Vec<crate::undo::FileEntry> = show.files.iter().filter(|f| out.skipped.iter().any(|(p, _)| *p == f.new)).cloned().collect();
+        let entry = &mut batch.shows[i];
+        entry.rolled_back = left.is_empty() && out.skipped.is_empty();
+        entry.files = left;
+        let level = if out.skipped.is_empty() { Level::Ok } else { Level::Warn };
+        let checksums = if out.checksums > 0 { format!(", {} restored", plural(out.checksums, "checksum file", "checksum files")) } else { String::new() };
+        let text = format!("{}: {} given back as they were{checksums}", show.name, plural(out.restored, "file", "files"));
+        ctx.status(&show.root, &text, level, "");
+        ctx.log(text, level);
+        restored += out.restored;
+        shows += 1;
+    }
+    if let Err(e) = crate::undo::save(run, &batch) {
+        ctx.log(format!("Undo journal not updated: {e}"), Level::Error);
+    }
+    if ctx.cancelled() {
+        return "Stopped.".into();
+    }
+    format!("{} rolled back in {}.", plural(restored, "file", "files"), plural(shows, "show", "shows"))
+}
+
+fn tag_show(ctx: &Ctx, job: &crate::tagging::TagJob, undo: &mut crate::undo::Recorder) -> (usize, usize) {
     use crate::tagging;
     let show = files::show_name(&job.root);
     // 0. Write-protected files (read-only copies, files a torrent client keeps locked):
@@ -2001,6 +2058,12 @@ fn tag_show(ctx: &Ctx, job: &crate::tagging::TagJob) -> (usize, usize) {
         ctx.log(text, Level::Error);
         return (0, 0);
     }
+    // What brings the show back: the checksum files, then each header before it changes.
+    if let Err(e) = undo.begin_show(&job.root, &checksums) {
+        ctx.status(&job.root, "Nothing changed: undo journal", Level::Error, "");
+        ctx.log(format!("{show}: nothing changed, {e}"), Level::Error);
+        return (0, 0);
+    }
     // 1. Tags, FLAC only; the audio signature and length must be the same afterwards.
     let mut tagged = Vec::new();
     let mut untagged = Vec::new();
@@ -2016,6 +2079,16 @@ fn tag_show(ctx: &Ctx, job: &crate::tagging::TagJob) -> (usize, usize) {
             untagged.push(file_name(path));
             continue;
         }
+        let size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        let head = match undo.save_head(path) {
+            Ok(head) => head,
+            Err(e) => {
+                ctx.status(path, format!("Not tagged: {e}"), Level::Error, "");
+                ctx.log(format!("{}: not tagged, not renamed: {e}", file_name(path)), Level::Error);
+                failed.insert(path.clone());
+                continue;
+            }
+        };
         let before = audio::probe(path).map(|i| (i.md5, i.samples));
         let result = tagging::write_flac_tags(path, fields).and_then(|()| {
             let after = audio::probe(path).map(|i| (i.md5, i.samples));
@@ -2024,6 +2097,8 @@ fn tag_show(ctx: &Ctx, job: &crate::tagging::TagJob) -> (usize, usize) {
             }
             Ok(())
         });
+        // Even after an error: the file may have changed, its header is back with a rollback.
+        undo.changed(path, path, head, size);
         match result {
             Ok(()) => tagged.push(path.clone()),
             Err(e) => {
@@ -2081,6 +2156,7 @@ fn tag_show(ctx: &Ctx, job: &crate::tagging::TagJob) -> (usize, usize) {
         }
         match fs::rename(&temp, new) {
             Ok(()) => {
+                undo.changed(old, new, None, fs::metadata(new).map(|m| m.len()).unwrap_or(0));
                 renamed.insert(old.clone(), new.clone());
             }
             Err(e) => {

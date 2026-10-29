@@ -74,6 +74,8 @@ const TAG_TIP: &str = "Read the artist, date, place and titles from the show's i
                        then write them as tags in the FLAC files and, if you like, rename the files. The audio is not touched: \
                        the FFP and ST5 stay valid; the .md5 and .sfv are brought up to date.";
 
+const UNDO_TIP: &str = "Give shows changed by Tag and rename back their former tags, names and checksum files.";
+
 /// "Tag and rename from info file": what will be written, open for corrections.
 struct TagDialog {
     show: Show,
@@ -89,6 +91,14 @@ struct TagDialog {
     /// For this show only (the defaults are in Settings).
     write_tags: bool,
     rename: bool,
+}
+
+/// "Undo tagging": the runs of the undo journal, the shows ticked to be rolled back.
+struct UndoDialog {
+    runs: Vec<(PathBuf, crate::undo::Batch, u64)>,
+    ticked: std::collections::HashSet<(usize, usize)>,
+    /// "Roll back" was clicked once: the second click confirms.
+    confirm: bool,
 }
 
 /// Linux: whether the former name (Bootleg Helper) had an applications menu entry.
@@ -327,6 +337,7 @@ pub struct App {
     info_choice: Option<InfoChoice>,
     /// "Tag and rename from info file" window.
     tag_dialog: Option<TagDialog>,
+    undo_dialog: Option<UndoDialog>,
     /// The saved "Always on top" choice was applied to the window.
     window_level_set: bool,
     /// A file dialog to open, and since when it waits for the window to leave the top.
@@ -507,6 +518,7 @@ impl App {
             help: false,
             info_choice: None,
             tag_dialog: None,
+            undo_dialog: None,
             window_level_set: false,
             dialog: None,
             parent: None,
@@ -903,7 +915,7 @@ impl App {
             return;
         }
         let without_files = match &op {
-            Op::TorrentCheck(_) => true,
+            Op::TorrentCheck(_) | Op::Rollback { .. } => true,
             Op::MediaInfo(dvds) => !dvds.is_empty(),
             _ => false,
         };
@@ -1460,6 +1472,99 @@ impl App {
         }
     }
 
+    fn open_undo_dialog(&mut self) {
+        let runs: Vec<(PathBuf, crate::undo::Batch, u64)> = crate::undo::list().into_iter().map(|(run, batch)| {
+            let size = crate::undo::size(&run);
+            (run, batch, size)
+        }).collect();
+        self.undo_dialog = Some(UndoDialog { runs, ticked: Default::default(), confirm: false });
+    }
+
+    fn undo_window(&mut self, ctx: &egui::Context) {
+        let Some(mut d) = self.undo_dialog.take() else { return };
+        let (mut open, mut close, mut go) = (true, false, false);
+        let busy = self.running.is_some();
+        egui::Window::new("Undo tagging").collapsible(false).default_size([720.0, 480.0]).open(&mut open).show(ctx, |ui| {
+            ui.label(format!(
+                "Each Tag and rename is kept {} days: rolling back gives the files their former tags and names, byte for byte, \
+                 and the checksum files as they were (the checksums and torrents made before match again).",
+                crate::undo::KEEP_DAYS
+            ));
+            ui.add_space(4.0);
+            egui::TopBottomPanel::bottom("undo_buttons").show_inside(ui, |ui| {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    let n = d.ticked.len();
+                    let text = if d.confirm { format!("Click again to roll back {}", ops::plural(n, "show", "shows")) } else { format!("Roll back {}", ops::plural(n, "ticked show", "ticked shows")) };
+                    if ui.add_enabled(n > 0 && !busy, egui::Button::new(RichText::new(text).strong())).clicked() {
+                        go = d.confirm;
+                        d.confirm = true;
+                    }
+                    close = ui.button("Close").clicked();
+                    if busy {
+                        ui.label(RichText::new("Wait for the running task to finish.").weak());
+                    }
+                });
+            });
+            if d.runs.is_empty() {
+                ui.label(RichText::new("Nothing to undo: no Tag and rename in the last days.").weak());
+            }
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                for (r, (_, batch, size)) in d.runs.iter().enumerate() {
+                    let open_shows: Vec<usize> = (0..batch.shows.len()).filter(|&s| !batch.shows[s].rolled_back).collect();
+                    // The show itself when there is only one, so that runs of the same minute differ.
+                    let what = match batch.shows.as_slice() {
+                        [one] => one.name.clone(),
+                        shows => ops::plural(shows.len(), "show", "shows"),
+                    };
+                    let done = if open_shows.is_empty() { ", rolled back" } else { "" };
+                    let title = format!("{} ({}): {what}  [{}{done}]", crate::undo::date(batch.created), crate::undo::age(batch.created), ops::human_size(*size));
+                    let title = if open_shows.is_empty() { RichText::new(title).weak() } else { RichText::new(title).strong() };
+                    egui::CollapsingHeader::new(title).id_salt(("undo run", r)).default_open(!open_shows.is_empty()).show(ui, |ui| {
+                        if open_shows.len() > 1 {
+                            let mut all = open_shows.iter().all(|&s| d.ticked.contains(&(r, s)));
+                            if ui.checkbox(&mut all, "All the shows of this run").changed() {
+                                for &s in &open_shows {
+                                    if all { d.ticked.insert((r, s)); } else { d.ticked.remove(&(r, s)); }
+                                }
+                                d.confirm = false;
+                            }
+                        }
+                        for (s, show) in batch.shows.iter().enumerate() {
+                            let renamed = show.files.iter().filter(|f| f.old != f.new).count();
+                            let tagged = show.files.iter().filter(|f| f.head.is_some()).count();
+                            let what = format!("   ({tagged} tagged, {renamed} renamed)");
+                            if show.rolled_back {
+                                ui.label(RichText::new(format!("{}: rolled back", show.name)).weak());
+                                continue;
+                            }
+                            let mut on = d.ticked.contains(&(r, s));
+                            if ui.checkbox(&mut on, format!("{}{what}", show.name)).on_hover_text(show.root.display().to_string()).changed() {
+                                if on { d.ticked.insert((r, s)); } else { d.ticked.remove(&(r, s)); }
+                                d.confirm = false;
+                            }
+                        }
+                    });
+                }
+            });
+        });
+        if go {
+            // One run at a time: the first run with ticked shows (the others stay ticked).
+            let mut runs: Vec<usize> = d.ticked.iter().map(|(r, _)| *r).collect();
+            runs.sort_unstable();
+            if let Some(&r) = runs.first() {
+                let mut shows: Vec<usize> = d.ticked.iter().filter(|(rr, _)| *rr == r).map(|(_, s)| *s).collect();
+                shows.sort_unstable();
+                self.start(Op::Rollback { run: d.runs[r].0.clone(), shows }, Vec::new(), Vec::new(), false);
+            }
+            self.undo_dialog = None;
+            return;
+        }
+        if open && !close {
+            self.undo_dialog = Some(d);
+        }
+    }
+
     fn save_log(&mut self) {
         self.ask(Dialog::SaveLog);
     }
@@ -1522,6 +1627,10 @@ impl App {
                     menu_open = true;
                     ops_menu(ui, busy || !has, self.opt.flac_level, &tracker_entries(&self.opt), actions);
                     ui.separator();
+                    if ui.add_enabled(!busy, egui::Button::new("↶ Undo tagging...")).on_hover_text(UNDO_TIP).clicked() {
+                        ui.close_menu();
+                        self.open_undo_dialog();
+                    }
                     if ui.add_enabled(busy, egui::Button::new("Stop")).clicked() {
                         ui.close_menu();
                         self.stop();
@@ -3188,6 +3297,7 @@ impl eframe::App for App {
         self.help_window(ctx);
         self.info_window(ctx);
         self.tag_window(ctx);
+        self.undo_window(ctx);
         self.float_window(ctx);
         self.after_flac_window(ctx);
         self.spectrogram_windows(ctx);

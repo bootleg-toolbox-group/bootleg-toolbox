@@ -103,6 +103,7 @@ bootleg-toolbox --cli <command> <folders or files...>
 | `fix-sbe` | SBE fix |
 | `clean-wav` | WAV clean-up |
 | `tag-info` | Tag and rename the FLAC files from the info file (`BT_RENAME=number`, `disc`, `etree` or `keep`; `BT_DRY=1` only prints what it read) |
+| `undo-tagging` | Roll back the latest Tag and rename: former tags, names and checksum files, byte for byte |
 | `torrent-check` | Check the `.torrent` files given against their shows |
 | `media-info` | Media info of the shows and of the DVDs (`VIDEO_TS` folders, VOB files) |
 | `check-update` | Look for a newer release |

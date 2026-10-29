@@ -53,6 +53,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("fix-sbe", "Fix sector boundary errors (copies in an SBE-fixed folder)"),
     ("clean-wav", "Clean WAV headers (copies in a WAV-cleaned folder)"),
     ("tag-info", "Tag and rename the FLAC files from the info file (prints what it read first)"),
+    ("undo-tagging", "Roll back the latest tag-info or Tag and rename (every show of it)"),
     ("media-info", "Media info of the shows, and of the DVDs (VIDEO_TS folders, VOB files)"),
     ("check-update", "Look for a newer release on GitHub"),
     ("shell-menu-add", "Add \"Open in Bootleg Toolbox\" to the file manager's right-click menu"),
