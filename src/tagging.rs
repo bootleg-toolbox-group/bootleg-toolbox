@@ -413,11 +413,13 @@ pub enum NameScheme {
     DiscTrackTitle,
     /// "Artist 1974-01-19 d1t01" (eTree style).
     Etree,
+    /// No new names (the Rename box unticked; the command line's BT_RENAME=keep).
     Keep,
 }
 
 impl NameScheme {
-    pub const ALL: [NameScheme; 4] = [NameScheme::NumberTitle, NameScheme::DiscTrackTitle, NameScheme::Etree, NameScheme::Keep];
+    /// The choices of the window (not renaming is the Rename box).
+    pub const ALL: [NameScheme; 3] = [NameScheme::NumberTitle, NameScheme::DiscTrackTitle, NameScheme::Etree];
     pub fn label(self) -> &'static str {
         match self {
             NameScheme::NumberTitle => "01 - Title",
@@ -799,17 +801,11 @@ pub struct Draft {
     pub folder_date: Option<String>,
 }
 
-/// Folders that only hold the audio of a show ("AUDIO", "music", "24-bit"): its name and
-/// its info file are in the folder above.
-fn holder_folder(name: &str) -> bool {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?i)^(audio|music|flac|wav|files|tracks|songs|lossless|(16|24)[\s_-]?bits?( version)?)$").unwrap()).is_match(name.trim())
-}
-
-/// The folder whose name describes the show: the show folder, or the one above an "AUDIO" folder.
+/// The folder whose name describes the show: the show folder, or the one above it when the
+/// show folder is an "AUDIO" folder or has no "Artist - date" name of its own.
 fn named_folder(show: &files::Show) -> PathBuf {
-    match show.root.parent() {
-        Some(parent) if holder_folder(&file_name(&show.root)) => parent.to_path_buf(),
+    match files::outer_folder(&show.root) {
+        Some(parent) if files::holder_folder(&file_name(&show.root)) || folder_fields(&file_name(&show.root)).0.is_none() => parent.to_path_buf(),
         _ => show.root.clone(),
     }
 }
@@ -903,7 +899,9 @@ impl Draft {
         new_name(scheme, t, self.artist.trim(), self.date.trim(), self.width()).filter(|n| *n != file_name(&t.path))
     }
 
-    pub fn job(&self, scheme: NameScheme, update_checksums: bool) -> TagJob {
+    /// The plan to carry out: the tags unless `write_tags` is false (no fields then), the new
+    /// names of `scheme` (none with `NameScheme::Keep`).
+    pub fn job(&self, scheme: NameScheme, write_tags: bool, update_checksums: bool) -> TagJob {
         let discs: Vec<Option<u32>> = {
             let mut d: Vec<Option<u32>> = self.tracks.iter().map(|t| t.disc).collect();
             d.dedup();
@@ -937,6 +935,9 @@ impl Draft {
                 if several {
                     fields.push(("DISCNUMBER", t.disc.unwrap_or(1).to_string()));
                     fields.push(("DISCTOTAL", discs.len().to_string()));
+                }
+                if !write_tags {
+                    fields.clear();
                 }
                 (t.path.clone(), fields, self.new_name(t, scheme))
             })
@@ -1079,5 +1080,29 @@ mod tests {
         update_checksum_file(&sfv, &changes, &tagged).unwrap();
         assert_eq!(fs::read_to_string(&sfv).unwrap(), "; comment\nCD1\\01 - A.flac 89abcdef\n");
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn tags_only_or_names_only() {
+        let files = vec![PathBuf::from("/s/a.flac"), PathBuf::from("/s/b.flac")];
+        let titles = vec![(None, "One".to_string()), (None, "Two".to_string())];
+        let draft = Draft {
+            root: "/s".into(),
+            artist: "Band".into(),
+            date: "1974-01-19".into(),
+            place: "Here".into(),
+            album: "1974-01-19 Here".into(),
+            tracks: number_tracks(&files, &titles),
+            found: 2,
+            extra: Vec::new(),
+            folder_date: None,
+        };
+        let both = draft.job(NameScheme::NumberTitle, true, true);
+        assert!(both.files.iter().all(|(_, fields, name)| !fields.is_empty() && name.is_some()));
+        let names = draft.job(NameScheme::NumberTitle, false, true);
+        assert!(names.files.iter().all(|(_, fields, _)| fields.is_empty()));
+        assert_eq!(names.files[1].2.as_deref(), Some("02 - Two.flac"));
+        let tags = draft.job(NameScheme::Keep, true, true);
+        assert!(tags.files.iter().all(|(_, fields, name)| !fields.is_empty() && name.is_none()));
     }
 }

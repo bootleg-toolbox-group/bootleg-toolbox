@@ -86,6 +86,9 @@ struct TagDialog {
     update_checksums: bool,
     /// The show has .md5 or .sfv files.
     whole_checksums: bool,
+    /// For this show only (the defaults are in Settings).
+    write_tags: bool,
+    rename: bool,
 }
 
 /// Linux: whether the former name (Bootleg Helper) had an applications menu entry.
@@ -478,7 +481,12 @@ struct Spectrogram {
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, paths: Vec<PathBuf>) -> Self {
-        let opt: Options = cc.storage.and_then(|s| eframe::get_value(s, "options")).unwrap_or_default();
+        let mut opt: Options = cc.storage.and_then(|s| eframe::get_value(s, "options")).unwrap_or_default();
+        // "Do not rename" was a file name choice before the Rename box.
+        if opt.tag_scheme == crate::tagging::NameScheme::Keep {
+            opt.tag_scheme = Default::default();
+            opt.tag_rename = false;
+        }
         let mut app = App {
             opt,
             roots: Vec::new(),
@@ -1145,7 +1153,7 @@ impl App {
             return;
         }
         let show = shows[0].clone();
-        let name = file_name(&show.root);
+        let name = crate::files::show_name(&show.root);
         if let Some(text) = ops::ffp_text(&show.root) {
             ctx.copy_text(text);
             let msg = format!("FFP of {name} copied to the clipboard.");
@@ -1180,7 +1188,7 @@ impl App {
             return;
         }
         let root = shows[0].root.clone();
-        let name = file_name(&root);
+        let name = crate::files::show_name(&root);
         let candidates = ops::info_candidates(&root);
         match candidates.len() {
             0 => {
@@ -1200,7 +1208,7 @@ impl App {
         match crate::files::read_text(path) {
             Ok(text) => {
                 ctx.copy_text(text);
-                let msg = format!("Info file of {} copied to the clipboard: {}", file_name(root), rel_posix(path, root));
+                let msg = format!("Info file of {} copied to the clipboard: {}", crate::files::show_name(root), rel_posix(path, root));
                 self.log(msg.clone(), Level::Ok);
                 self.flash(msg);
             }
@@ -1265,7 +1273,7 @@ impl App {
             return;
         }
         let show = shows[0].clone();
-        let name = file_name(&show.root);
+        let name = crate::files::show_name(&show.root);
         let infos = crate::tagging::info_files(&show);
         if infos.is_empty() {
             let msg = format!("No info file (.txt or .nfo) in {name}: nothing to read the tags from.");
@@ -1276,7 +1284,8 @@ impl App {
         match crate::tagging::draft(&show, &infos[0].0) {
             Ok(draft) => {
                 let whole_checksums = crate::tagging::checksum_files(&show.root).iter().any(|p| matches!(crate::files::ext_lower(p).as_str(), "md5" | "sfv"));
-                self.tag_dialog = Some(TagDialog { show, infos, info: 0, draft, album_auto: true, update_checksums: true, whole_checksums });
+                let (write_tags, rename) = (self.opt.tag_write, self.opt.tag_rename);
+                self.tag_dialog = Some(TagDialog { show, infos, info: 0, draft, album_auto: true, update_checksums: true, whole_checksums, write_tags, rename });
             }
             Err(e) => self.log(format!("{name}: {e}"), Level::Error),
         }
@@ -1292,7 +1301,9 @@ impl App {
         let busy = self.running.is_some();
         let root = d.draft.root.clone();
         let info_label = |(path, titles): &(PathBuf, usize)| format!("{}   ({} titles)", rel_posix(path, &root), titles);
-        let conflicts = d.draft.name_conflicts(scheme);
+        let conflicts = d.draft.name_conflicts(if d.rename { scheme } else { NameScheme::Keep });
+        // Renaming only, to the names the files already have: nothing would change.
+        let same_names = !d.write_tags && d.rename && d.draft.tracks.iter().all(|t| d.draft.new_name(t, scheme).is_none());
         let files = d.draft.tracks.len();
         let not_flac = d.draft.tracks.iter().filter(|t| !crate::tagging::taggable(&t.path)).count();
         // A system window of its own: it may be larger than the main window and go past it.
@@ -1306,7 +1317,7 @@ impl App {
             .with_min_inner_size([520.0, 360.0]);
         ctx.show_viewport_immediate(id, builder, |vctx, class| {
             let content = |ui: &mut egui::Ui| {
-                    ui.label(RichText::new(file_name(&root)).strong());
+                    ui.label(RichText::new(crate::files::show_name(&root)).strong());
                     ui.add_space(4.0);
                     egui::Grid::new("tag_fields").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
                         ui.label("Info file");
@@ -1337,15 +1348,23 @@ impl App {
                         if d.album_auto && (date.changed() || place.changed()) {
                             d.draft.album = format!("{} {}", d.draft.date.trim(), d.draft.place.trim()).trim().to_string();
                         }
+                        ui.label("Change");
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut d.write_tags, "Write the tags").on_hover_text("Untick it to rename the files only: their content is not touched.");
+                            ui.checkbox(&mut d.rename, "Rename the files").on_hover_text("Untick it to write the tags only: the names stay as they are.");
+                        });
+                        ui.end_row();
                         ui.label("File names");
-                        egui::ComboBox::from_id_salt("tag_scheme").width(240.0).selected_text(scheme.label()).show_ui(ui, |ui| {
-                            for s in NameScheme::ALL {
-                                ui.selectable_value(&mut scheme, s, s.label());
-                            }
+                        ui.add_enabled_ui(d.rename, |ui| {
+                            egui::ComboBox::from_id_salt("tag_scheme").width(240.0).selected_text(scheme.label()).show_ui(ui, |ui| {
+                                for s in NameScheme::ALL {
+                                    ui.selectable_value(&mut scheme, s, s.label());
+                                }
+                            });
                         });
                         ui.end_row();
                     });
-                    if d.whole_checksums {
+                    if d.whole_checksums && d.write_tags {
                         ui.checkbox(&mut d.update_checksums, "Update the .md5 and .sfv files (whole-file checksums change with the tags)");
                     }
                     ui.label(RichText::new("The audio is not touched: FFP and ST5 stay valid. Renamed files are renamed in every checksum file.").weak());
@@ -1373,11 +1392,15 @@ impl App {
                     egui::TopBottomPanel::bottom("tag_buttons").show_inside(ui, |ui| {
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
-                            let ready = conflicts.is_empty() && !busy;
+                            let ready = conflicts.is_empty() && !busy && (d.write_tags || d.rename) && !same_names;
                             apply |= ui.add_enabled(ready, egui::Button::new(RichText::new("Apply").strong())).clicked();
                             cancel |= ui.button("Cancel").clicked();
                             if busy {
                                 ui.label(RichText::new("Wait for the running task to finish.").weak());
+                            } else if !d.write_tags && !d.rename {
+                                ui.label(RichText::new("Tick Write the tags, Rename the files or both.").weak());
+                            } else if same_names {
+                                ui.label(RichText::new("Nothing to change: the files already have these names. Choose another file name format, or tick Write the tags.").weak());
                             }
                         });
                     });
@@ -1391,6 +1414,7 @@ impl App {
                             ui.end_row();
                             let artist = d.draft.artist.trim().to_string();
                             let date = d.draft.date.trim().to_string();
+                            let shown = if d.rename { scheme } else { NameScheme::Keep };
                             for t in d.draft.tracks.iter_mut() {
                                 ui.label(match t.disc {
                                     Some(disc) => format!("d{disc}t{:02}", t.track),
@@ -1400,7 +1424,7 @@ impl App {
                                 // Sized by hand: inside a grid, a text field shrinks to a few letters.
                                 let height = ui.spacing().interact_size.y;
                                 ui.add_sized([320.0, height], egui::TextEdit::singleline(&mut t.title));
-                                let new = crate::tagging::new_name(scheme, t, &artist, &date, width).filter(|n| *n != file_name(&t.path));
+                                let new = crate::tagging::new_name(shown, t, &artist, &date, width).filter(|n| *n != file_name(&t.path));
                                 ui.label(new.unwrap_or_else(|| "(unchanged)".into()));
                                 ui.end_row();
                             }
@@ -1428,7 +1452,8 @@ impl App {
             }
         }
         if apply {
-            let job = d.draft.job(scheme, d.update_checksums || !d.whole_checksums);
+            let names = if d.rename { scheme } else { NameScheme::Keep };
+            let job = d.draft.job(names, d.write_tags, d.update_checksums || !d.whole_checksums);
             self.start(Op::Tag(vec![job]), vec![d.show.clone()], d.show.files.clone(), false);
         } else if open && !cancel {
             self.tag_dialog = Some(d);
@@ -2042,7 +2067,7 @@ impl App {
                     let label = if parent_is_show {
                         format!("{}/{}", show.root.parent().map(file_name).unwrap_or_default(), file_name(&show.root))
                     } else {
-                        file_name(&show.root)
+                        crate::files::show_name(&show.root)
                     };
                     ui.label(RichText::new(label).strong()).on_hover_text(show.root.display().to_string());
                 }).1),
@@ -2387,6 +2412,13 @@ impl App {
                                     The analysis then takes several times longer: about 10 seconds of processor time \
                                     per track, spread over the files processed in parallel.\n\
                                     MP3 coding traces are always looked for.");
+                ui.horizontal(|ui| {
+                    ui.label("Tag and rename from info file:");
+                    ui.checkbox(&mut draft.tag_write, "write the tags");
+                    ui.checkbox(&mut draft.tag_rename, "rename the files");
+                })
+                .response
+                .on_hover_text("What the Tag and rename window does by default. Each show can still be changed in the window.");
                 ui.checkbox(&mut draft.check_updates, "Check for a new version at startup")
                     .on_hover_text("Asks github.com once at each start whether a newer version has been released. \
                                     Nothing is sent but the program's name and version. \

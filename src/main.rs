@@ -216,7 +216,7 @@ fn tag_jobs(paths: &[String]) -> Option<Vec<tagging::TagJob>> {
     let paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
     let mut jobs = Vec::new();
     for show in files::scan_paths(&paths, &Default::default()) {
-        let name = files::file_name(&show.root);
+        let name = files::show_name(&show.root);
         let Some((info, _)) = tagging::info_files(&show).into_iter().next() else {
             println!("{}{name}: no info file", prefix(Level::Warn));
             continue;
@@ -248,7 +248,7 @@ fn tag_jobs(paths: &[String]) -> Option<Vec<tagging::TagJob>> {
             println!("  {}{c}", prefix(Level::Error));
         }
         if conflicts.is_empty() {
-            jobs.push(draft.job(scheme, true));
+            jobs.push(draft.job(scheme, true, true));
         }
     }
     (std::env::var_os("BT_DRY").is_none() && !jobs.is_empty()).then_some(jobs)

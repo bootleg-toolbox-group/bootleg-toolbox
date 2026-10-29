@@ -18,6 +18,32 @@ pub struct Show {
     pub files: Vec<PathBuf>,
 }
 
+/// Folders that only hold the audio of a show ("AUDIO", "music", "24-bit"): its name and
+/// its info file are in the folder above.
+pub fn holder_folder(name: &str) -> bool {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r"(?i)^(audio|music|flac|wav|files|tracks|songs|lossless|(16|24)[\s_-]?bits?( version)?)$").unwrap()).is_match(name.trim())
+}
+
+/// The folder above a show folder that names the show: above an "AUDIO" folder, or a
+/// folder with a date ("Artist - 1995-11-21 - Place [taper]/1995-11-21 - Madrid (Version 2)").
+pub fn outer_folder(root: &Path) -> Option<&Path> {
+    static DATE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let date = DATE.get_or_init(|| regex::Regex::new(r"(19|20)\d\d[-.]\d\d[-.]\d\d").unwrap());
+    let parent = root.parent()?;
+    let name = file_name(parent);
+    (!name.is_empty() && (holder_folder(&file_name(root)) || date.is_match(&name))).then_some(parent)
+}
+
+/// The name of a show for the list and the messages: its folder, after the folder above
+/// when that one names the show (see `outer_folder`).
+pub fn show_name(root: &Path) -> String {
+    match outer_folder(root) {
+        Some(parent) => format!("{}/{}", file_name(parent), file_name(root)),
+        None => file_name(root),
+    }
+}
+
 pub fn ext_lower(path: &Path) -> String {
     path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase()
 }
@@ -301,6 +327,18 @@ pub fn resolve_entry(base: &Path, name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn show_names() {
+        let show = "Iron Maiden - 1995-11-21 - Real Madrid Pavilion, Madrid, Spain [taped by EGH] NFT [1h53m16s]";
+        assert_eq!(show_name(&Path::new("/m").join(show).join("AUDIO")), format!("{show}/AUDIO"));
+        assert_eq!(show_name(&Path::new("/m").join(show)), show);
+        assert_eq!(show_name(Path::new("/m/Show/CD1")), "CD1");
+        let outer = "Iron Maiden - 1995-11-21 - Real Madrid Pavilion, Madrid, Spain [taped by MetalPriest] [AUD] [1h53m35s]";
+        let inner = "1995-11-21 - Madrid (Version 2)";
+        assert_eq!(show_name(&Path::new("/m").join(outer).join(inner)), format!("{outer}/{inner}"));
+        assert_eq!(show_name(&Path::new("/m/Iron Maiden").join(inner)), inner);
+    }
 
     #[test]
     fn resolve_keeps_the_real_name() {

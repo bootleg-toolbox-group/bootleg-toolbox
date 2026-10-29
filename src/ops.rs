@@ -161,6 +161,9 @@ pub struct Options {
     pub check_updates: bool,
     /// File names chosen in "Tag and rename from info file".
     pub tag_scheme: crate::tagging::NameScheme,
+    /// Default choices of "Tag and rename from info file": write the tags, rename the files.
+    pub tag_write: bool,
+    pub tag_rename: bool,
     /// The entries of the former name (Bootleg Helper) have been looked for and removed.
     pub legacy_cleaned: bool,
     /// Compact view: fewer columns (Format then gives bits and rate), tighter rows.
@@ -204,6 +207,8 @@ impl Default for Options {
             after_flac_ffp: true,
             hidden_columns: Vec::new(),
             tag_scheme: Default::default(),
+            tag_write: true,
+            tag_rename: true,
             log_open: false,
             compact: false,
             always_on_top: false,
@@ -613,7 +618,7 @@ pub fn op_details(ctx: &Ctx, shows: &[Show], files: &[PathBuf], verbose: bool) -
             (text, Level::Ok)
         };
         if verbose {
-            ctx.log(format!("{}: {text}", file_name(&show.root)), level);
+            ctx.log(format!("{}: {text}", files::show_name(&show.root)), level);
             for f in &show.files {
                 if let Some(r) = by_path.get(f) {
                     ctx.log(format!("    {}: {}", rel_posix(f, &show.root), r.2), r.3);
@@ -677,7 +682,7 @@ pub fn op_verify(ctx: &Ctx, shows: &[Show]) -> String {
     for show in shows {
         let checksum_files: Vec<PathBuf> = files::all_files(&show.root, true).into_iter().filter(|p| files::is_checksum_file(p)).collect();
         if checksum_files.is_empty() {
-            ctx.log(format!("{}: no checksum file (.ffp, .md5, .st5, .sfv) found", file_name(&show.root)), Level::Warn);
+            ctx.log(format!("{}: no checksum file (.ffp, .md5, .st5, .sfv) found", files::show_name(&show.root)), Level::Warn);
             ctx.status(&show.root, "No checksum file", Level::Warn, "");
             for f in &show.files {
                 ctx.status(f, "No checksum file", Level::Warn, "");
@@ -757,7 +762,7 @@ pub fn op_verify(ctx: &Ctx, shows: &[Show]) -> String {
             continue;
         }
         let problems = mine.iter().filter(|r| !matches!(r, Some(Level::Ok))).count();
-        let name = file_name(&show.root);
+        let name = files::show_name(&show.root);
         if problems > 0 {
             let text = format!("{problems} problem(s) in {} checksums", mine.len());
             ctx.status(&show.root, &text, Level::Error, "");
@@ -960,7 +965,7 @@ pub fn op_lossless(ctx: &Ctx, shows: &[Show], files: &[PathBuf]) -> String {
         }
         let report = crate::lossless::Report {
             heading: "Lossless analysis".into(),
-            title: file_name(&show.root),
+            title: files::show_name(&show.root),
             label: shown.clone(),
             level,
             sentence: example.map(|r| r.sentence.clone()).unwrap_or_default(),
@@ -1172,7 +1177,7 @@ pub fn op_mp3(ctx: &Ctx, shows: &[Show], files: &[PathBuf], mode: crate::encode:
         if bad > 0 { parts.push(format!("{bad} failed")); }
         let level = if bad > 0 { Level::Error } else if new == 0 { Level::Warn } else { Level::Ok };
         let place = if out_root.exists() { format!(" -> {}", out_root.display()) } else { ", nothing written".to_string() };
-        let text = format!("{tag} copy of {}: {}{place}", file_name(&show.root), parts.join(", "));
+        let text = format!("{tag} copy of {}: {}{place}", files::show_name(&show.root), parts.join(", "));
         ctx.status(&show.root, parts.join(", "), level, out_root.display().to_string());
         ctx.log(text, level);
     }
@@ -1300,7 +1305,7 @@ pub fn op_fix_sbe(ctx: &Ctx, shows: &[Show], files: &[PathBuf]) -> String {
             ctx.status(f, "Not CD audio (16-bit/44.1 kHz stereo): SBEs do not apply", Level::Info, "");
         }
         if !not_cd.is_empty() {
-            ctx.log(format!("{}: {} file(s) ignored, as SBEs only concern CD audio (16-bit/44.1 kHz stereo)", file_name(&show.root), not_cd.len()), Level::Info);
+            ctx.log(format!("{}: {} file(s) ignored, as SBEs only concern CD audio (16-bit/44.1 kHz stereo)", files::show_name(&show.root), not_cd.len()), Level::Info);
         }
         // Discs: the CD audio files of each folder, in track order.
         let mut discs: Vec<(PathBuf, Vec<(PathBuf, u64)>)> = Vec::new();
@@ -1324,7 +1329,7 @@ pub fn op_fix_sbe(ctx: &Ctx, shows: &[Show], files: &[PathBuf]) -> String {
             if let Some(i) = cuts.iter().position(|c| c.is_some_and(|c| c.end <= c.start)) {
                 let msg = "Too short: no audio left once the boundaries are moved to whole sectors";
                 ctx.status(&tracks[i].0, msg, Level::Error, "");
-                ctx.log(format!("{}: disc not fixed, {} is shorter than a CD sector (1/75 s)", file_name(&show.root), rel_posix(&tracks[i].0, &show.root)), Level::Error);
+                ctx.log(format!("{}: disc not fixed, {} is shorter than a CD sector (1/75 s)", files::show_name(&show.root), rel_posix(&tracks[i].0, &show.root)), Level::Error);
                 failures += 1;
                 continue;
             }
@@ -1345,7 +1350,7 @@ pub fn op_fix_sbe(ctx: &Ctx, shows: &[Show], files: &[PathBuf]) -> String {
     }
     for show in &nothing {
         ctx.status(&show.root, "Nothing to fix", Level::Ok, "No SBE, or only on the last track of a disc, which is normal.");
-        ctx.log(format!("{}: nothing to fix (no SBE, or only on the last track of a disc)", file_name(&show.root)), Level::Ok);
+        ctx.log(format!("{}: nothing to fix (no SBE, or only on the last track of a disc)", files::show_name(&show.root)), Level::Ok);
     }
     ctx.add_total(jobs.len());
     let results = par_map(ctx, &jobs, |j| j.path.clone(), |job| {
@@ -1368,11 +1373,11 @@ pub fn op_fix_sbe(ctx: &Ctx, shows: &[Show], files: &[PathBuf]) -> String {
         if ok == mine.len() {
             fixed += 1;
             ctx.status(&show.root, format!("SBEs fixed: {ok} track(s) in SBE-fixed"), Level::Ok, out_dir.display().to_string());
-            ctx.log(format!("{}: {ok} corrected track(s) written to {}. Check them, replace the originals, then create new checksum files.", file_name(&show.root), out_dir.display()), Level::Ok);
+            ctx.log(format!("{}: {ok} corrected track(s) written to {}. Check them, replace the originals, then create new checksum files.", files::show_name(&show.root), out_dir.display()), Level::Ok);
         } else {
             let bad = mine.len() - ok;
             ctx.status(&show.root, format!("SBE fix incomplete: {bad} track(s) failed"), Level::Error, "");
-            ctx.log(format!("{}: SBE fix incomplete, {bad} track(s) failed; the tracks in {} do not form a whole disc.", file_name(&show.root), out_dir.display()), Level::Error);
+            ctx.log(format!("{}: SBE fix incomplete, {bad} track(s) failed; the tracks in {} do not form a whole disc.", files::show_name(&show.root), out_dir.display()), Level::Error);
         }
     }
     let failed = results.iter().filter(|r| r.is_none()).count() + failures;
@@ -1473,8 +1478,8 @@ pub fn op_speed(ctx: &Ctx, shows: &[Show], files: &[PathBuf]) -> String {
         if tracks.is_empty() {
             continue;
         }
-        let verdict = crate::speed::show_verdict(file_name(&show.root), &tracks);
-        ctx.log(format!("{}: speed {}", file_name(&show.root), verdict.sentence.to_lowercase()), verdict.level);
+        let verdict = crate::speed::show_verdict(files::show_name(&show.root), &tracks);
+        ctx.log(format!("{}: speed {}", files::show_name(&show.root), verdict.sentence.to_lowercase()), verdict.level);
         summary_levels.push(Some(verdict.level));
         send(&show.root, &verdict);
     }
@@ -1691,7 +1696,7 @@ fn op_media_info(ctx: &Ctx, shows: &[Show], files: &[PathBuf], dvds: &[PathBuf])
             }
         }
         let text = crate::mediainfo::audio_text(&show.root, &ok, &failed);
-        let _ = ctx.tx.send(Msg::MediaInfo { title: file_name(&show.root), text });
+        let _ = ctx.tx.send(Msg::MediaInfo { title: files::show_name(&show.root), text });
         done += 1;
     }
     for root in dvds {
@@ -1704,7 +1709,7 @@ fn op_media_info(ctx: &Ctx, shows: &[Show], files: &[PathBuf], dvds: &[PathBuf])
                 let _ = ctx.tx.send(Msg::MediaInfo { title: dvd.name.clone(), text });
                 done += 1;
             }
-            Err(e) => ctx.log(format!("{}: {e}", file_name(root)), Level::Error),
+            Err(e) => ctx.log(format!("{}: {e}", files::show_name(root)), Level::Error),
         }
         ctx.tick();
     }
@@ -1838,7 +1843,7 @@ pub fn op_torrent_check(ctx: &Ctx, shows: &[Show], torrents: &[PathBuf]) -> Stri
         if shows.iter().any(|s| s.root == root) {
             ctx.status(&root, &show_text, level, "");
         }
-        ctx.log(format!("{}: {show_text}", file_name(&root)), level);
+        ctx.log(format!("{}: {show_text}", files::show_name(&root)), level);
     }
     let mut summary = format!("{} torrent(s) checked: {matching} match", torrents.len());
     if differing > 0 {
@@ -1867,7 +1872,7 @@ pub fn op_torrent(ctx: &Ctx, shows: &[Show], trackers: &[Tracker]) -> String {
     }
     let mut plan = Vec::new();
     for show in shows {
-        let name = file_name(&show.root);
+        let name = files::show_name(&show.root);
         let (paths, skipped) = torrent_files(&show.root);
         for p in &skipped {
             ctx.log(format!("{name}: left out of the torrent: {}", rel_posix(p, &show.root)), Level::Info);
@@ -1972,15 +1977,16 @@ pub fn op_tag(ctx: &Ctx, jobs: &[crate::tagging::TagJob]) -> String {
 
 fn tag_show(ctx: &Ctx, job: &crate::tagging::TagJob) -> (usize, usize) {
     use crate::tagging;
-    let show = file_name(&job.root);
+    let show = files::show_name(&job.root);
     // 0. Write-protected files (read-only copies, files a torrent client keeps locked):
-    // nothing is changed at all, rather than names without tags.
+    // nothing is changed at all, rather than names without tags. Renaming alone does not
+    // write in the files.
     let checksums = tagging::checksum_files(&job.root);
     let locked: Vec<String> = job
         .files
         .iter()
+        .filter(|(p, fields, _)| !fields.is_empty() && tagging::taggable(p))
         .map(|(p, _, _)| p)
-        .filter(|p| tagging::taggable(p))
         .chain(&checksums)
         .filter(|p| fs::OpenOptions::new().write(true).open(p).is_err())
         .map(|p| rel_posix(p, &job.root))
@@ -2002,6 +2008,9 @@ fn tag_show(ctx: &Ctx, job: &crate::tagging::TagJob) -> (usize, usize) {
     for (path, fields, _) in &job.files {
         if ctx.cancelled() {
             return (tagged.len(), 0);
+        }
+        if fields.is_empty() {
+            continue;
         }
         if !tagging::taggable(path) {
             untagged.push(file_name(path));
