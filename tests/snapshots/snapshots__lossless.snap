@@ -74,14 +74,14 @@ expression: text
   A lossy file converted back has digital silence there (about 0 dB). Steady hiss well above 0 dB was added by an analog stage (tuner, sound card) after any encoder.
   A true hi-res recording has content (or at least hiss) up there; an upsampled 44.1/48 kHz file is empty above 22-24 kHz.
   An FM or analog capture keeps its hiss up to the converter's filter (+20 dB and more); an encoder after that stage leaves silence there.
-  Below about -60 dB there is too little treble to see encoder traces (common with audience and cassette recordings).
-  Below about -60 dB there is too little treble to see encoder traces (common with audience and cassette recordings).
-  Below about -60 dB there is too little treble to see encoder traces (common with audience and cassette recordings).
-  Below about -60 dB there is too little treble to see encoder traces (common with audience and cassette recordings).
-  Below about -60 dB there is too little treble to see encoder traces (common with audience and cassette recordings).
-  Below about -60 dB there is too little treble to see encoder traces (common with audience and cassette recordings).
-  Below about -60 dB there is too little treble to see encoder traces (common with audience and cassette recordings).
-  Below about -60 dB there is too little treble to see encoder traces (common with audience and cassette recordings).
+  Below about -55 dB an encoder's lowpass shows less, and below about -67 dB there is too little treble to see it at all (common with audience, cassette and FM recordings).
+  Below about -55 dB an encoder's lowpass shows less, and below about -67 dB there is too little treble to see it at all (common with audience, cassette and FM recordings).
+  Below about -55 dB an encoder's lowpass shows less, and below about -67 dB there is too little treble to see it at all (common with audience, cassette and FM recordings).
+  Below about -55 dB an encoder's lowpass shows less, and below about -67 dB there is too little treble to see it at all (common with audience, cassette and FM recordings).
+  Below about -55 dB an encoder's lowpass shows less, and below about -67 dB there is too little treble to see it at all (common with audience, cassette and FM recordings).
+  Below about -55 dB an encoder's lowpass shows less, and below about -67 dB there is too little treble to see it at all (common with audience, cassette and FM recordings).
+  Below about -55 dB an encoder's lowpass shows less, and below about -67 dB there is too little treble to see it at all (common with audience, cassette and FM recordings).
+  Below about -55 dB an encoder's lowpass shows less, and below about -67 dB there is too little treble to see it at all (common with audience, cassette and FM recordings).
   Concert mixes usually sit 4 to 10 dB below; 20 dB and more is nearly mono.
   Concert mixes usually sit 4 to 10 dB below; 20 dB and more is nearly mono.
   Concert mixes usually sit 4 to 10 dB below; 20 dB and more is nearly mono.

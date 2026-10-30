@@ -31,6 +31,15 @@ pub use crate::report::{Measure, Report};
 
 pub const FM_15K: &str = "FM (15 kHz)";
 pub const LOSSY_UPSTREAM: &str = "Lossy upstream";
+pub const LIKELY_LOSSLESS: &str = "Likely lossless";
+/// Treble above 15 kHz (relative to 1-4 kHz) below which the lack of an encoder lowpass
+/// proves less: "Likely lossless" when the MP3 coding traces were looked for in vain, and
+/// "Unclear" below `TREBLE_UNCLEAR` (set in gaps of the measures of real shows, so that
+/// tracks of one show do not fall on both sides).
+const TREBLE_LIKELY: f64 = -55.0;
+const TREBLE_UNCLEAR: f64 = -67.0;
+/// Without the MP3 traces (other sample rates): one limit, as before.
+const TREBLE_PLAIN: f64 = -60.0;
 pub const LOSSLESS_UPSAMPLED: &str = "Lossless (upsampled)";
 pub const LOSSLESS_PADDED: &str = "Lossless (16-bit in 24)";
 
@@ -668,11 +677,18 @@ fn analyse_signal(path: &Path, info: &AudioInfo, aac_check: bool, cancel: &Atomi
             Level::Warn,
             details,
         )
-    } else if matches!((reference, hf), (Some(r), Some(h)) if h - r < -60.0) {
+    } else if matches!((reference, hf), (Some(r), Some(h)) if h - r < if mp3_trace.is_some() { TREBLE_UNCLEAR } else { TREBLE_PLAIN }) {
         Verdict::new(
             "Unclear",
             "Inconclusive: almost no content above 15 kHz (common with audience and analog-tape recordings), so encoder traces cannot be seen",
             Level::Info,
+            details,
+        )
+    } else if mp3_trace.is_some() && matches!((reference, hf), (Some(r), Some(h)) if h - r < TREBLE_LIKELY) {
+        Verdict::new(
+            LIKELY_LOSSLESS,
+            "Probably lossless: no encoder lowpass and no MP3 coding traces, but little treble above 15 kHz, where an encoder's lowpass shows best",
+            Level::Ok,
             details,
         )
     } else {
@@ -889,8 +905,8 @@ fn build_report(title: String, verdict: &Verdict, f: &Facts) -> Report {
         add(
             "Content above 15 kHz",
             format!("{h:.0} dB relative to 1-4 kHz"),
-            "Below about -60 dB there is too little treble to see encoder traces (common with audience and cassette recordings).",
-            if h < -60.0 { Level::Warn } else { Level::Info },
+            "Below about -55 dB an encoder's lowpass shows less, and below about -67 dB there is too little treble to see it at all (common with audience, cassette and FM recordings).",
+            if h < TREBLE_UNCLEAR { Level::Warn } else { Level::Info },
         );
     }
     if let Some(h) = f.holes {
@@ -1150,6 +1166,12 @@ fn reasoning(verdict: &Verdict, f: &Facts) -> Vec<String> {
     } else if label == "Unclear" {
         r.push(format!("There is almost nothing above 15 kHz ({:.0} dB relative to 1-4 kHz).", f.hf.unwrap_or(0.0)));
         r.push("Encoder traces live up there, so neither lossy nor lossless can be shown. Audience and cassette recordings often look like this; the spectrogram and the lineage are the best clues.".into());
+    } else if label == LIKELY_LOSSLESS {
+        r.push("No brick-wall lowpass, and the sound does not fall back onto an MP3 encoder's rounding grid (no MP3 coding traces).".into());
+        r.push(format!(
+            "But there is little treble above 15 kHz ({:.0} dB relative to 1-4 kHz), where an encoder's lowpass shows best: probably lossless rather than certain. Audience, cassette and FM recordings often look like this.",
+            f.hf.unwrap_or(0.0)
+        ));
     } else if label == "Lossless" && f.cutoff.is_some() {
         r.push(format!("A lowpass at {cut}, but no encoder holes ({holes:.0} dB) and hiss goes on above it ({above:+.0} dB over digital silence)."));
         r.push("That is the converter's anti-alias filter, not an encoder's lowpass.".into());

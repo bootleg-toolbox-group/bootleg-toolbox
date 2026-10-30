@@ -957,7 +957,7 @@ pub fn op_lossless(ctx: &Ctx, shows: &[Show], files: &[PathBuf]) -> String {
         counts.sort_by_key(|a| std::cmp::Reverse(a.1));
         let text = counts.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", ");
         let flagged: usize =
-            counts.iter().filter(|(k, _)| !["Lossless", "FM broadcast", crate::lossless::FM_15K, "Unclear", "Silent"].contains(&k.as_str())).map(|(_, n)| n).sum();
+            counts.iter().filter(|(k, _)| !["Lossless", crate::lossless::LIKELY_LOSSLESS, "FM broadcast", crate::lossless::FM_15K, "Unclear", "Silent"].contains(&k.as_str())).map(|(_, n)| n).sum();
         // "Lossy" (encoder holes found) in red; "Lossy?" alone is only a doubt.
         let level = if counts.iter().any(|(k, _)| k == "Lossy") {
             Level::Error
