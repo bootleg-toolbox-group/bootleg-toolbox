@@ -908,6 +908,8 @@ pub struct Draft {
     pub folder_date: Option<String>,
     /// No tracklist in the info file: the titles come from the file names.
     pub titles_from_names: bool,
+    /// The titles come from setlist.fm.
+    pub setlist: bool,
 }
 
 /// The folder whose name describes the show: the show folder, or the one above it when the
@@ -963,11 +965,39 @@ pub fn info_files(show: &files::Show) -> Vec<(PathBuf, usize)> {
 /// Reads the info file of a show and prepares what will be written.
 pub fn draft(show: &files::Show, info: &Path) -> Result<Draft, String> {
     let text = files::read_text(info).map_err(|e| format!("cannot read {}: {e}", file_name(info)))?;
+    Ok(draft_from(show, &text))
+}
+
+/// A plan without info file: the artist, date and place from the folder name and the tags,
+/// the titles from the file names when they have them (setlist.fm may give them).
+pub fn draft_without_info(show: &files::Show) -> Draft {
+    draft_from(show, "")
+}
+
+/// The artist, date and place of a show: from its best info file when there is one,
+/// otherwise from the folder name and the tags.
+pub fn identity(show: &files::Show) -> (String, String, String) {
+    let d = info_files(show).first().and_then(|(info, _)| draft(show, info).ok()).unwrap_or_else(|| draft_without_info(show));
+    let mut artist = d.artist;
+    // "Dire Straits 1979-03-06": the words before the date.
+    if artist.trim().is_empty() {
+        let name = file_name(&named_folder(show));
+        if let Some((_, at)) = date_in(&name) {
+            let before = name[..at.start].trim().trim_end_matches(['-', ',', '_', '(', '[']).trim();
+            if before.chars().filter(|c| c.is_alphabetic()).count() >= 2 {
+                artist = before.to_string();
+            }
+        }
+    }
+    (artist, d.date, d.place)
+}
+
+fn draft_from(show: &files::Show, text: &str) -> Draft {
     let existing = existing_tags(&show.files);
     let tag = |name: &str| existing.iter().find(|(k, _)| k == name).map(|(_, v)| v.trim().to_string()).filter(|v| !v.is_empty());
     let (folder_artist, folder_date, folder_place) = folder_fields(&file_name(&named_folder(show)));
     let hint = folder_artist.clone().or_else(|| tag("ARTIST"));
-    let parsed = parse_info(&text, show.files.len(), hint.as_deref());
+    let parsed = parse_info(text, show.files.len(), hint.as_deref());
     // The artist of the info file, unless the folder name says otherwise (a first line
     // that is not the artist); its spelling from the folder name or the tags when they
     // agree ("BLACK SABBATH" -> "Black Sabbath", "Paradise Lost (UK)" -> "Paradise Lost").
@@ -998,7 +1028,7 @@ pub fn draft(show: &files::Show, info: &Path) -> Result<Draft, String> {
             t.title = title.unwrap_or_default();
         }
     }
-    Ok(Draft { root: show.root.clone(), artist, date, place, album, found: parsed.titles.len(), extra, tracks, folder_date, titles_from_names })
+    Draft { root: show.root.clone(), artist, date, place, album, found: parsed.titles.len(), extra, tracks, folder_date, titles_from_names, setlist: false }
 }
 
 /// "IT'S SO EASY" -> "It's So Easy": the words written in capitals only; mixed-case words,
@@ -1078,6 +1108,21 @@ pub struct TagJob {
 }
 
 impl Draft {
+    /// The titles (and the place) of a setlist.fm setlist, in the order of the files; the
+    /// files beyond the setlist keep their titles.
+    pub fn use_setlist(&mut self, titles: &[String], place: &str) {
+        for (t, title) in self.tracks.iter_mut().zip(titles) {
+            t.title = title.clone();
+        }
+        self.found = titles.len();
+        self.extra = titles.iter().skip(self.tracks.len()).cloned().collect();
+        self.titles_from_names = false;
+        self.setlist = true;
+        if !place.trim().is_empty() {
+            self.place = place.trim().to_string();
+        }
+    }
+
     /// Digits of the numbers in "01 - Title" names.
     pub fn width(&self) -> usize {
         self.tracks.iter().map(|t| t.index).max().unwrap_or(1).to_string().len().max(2)
@@ -1369,6 +1414,7 @@ mod tests {
             extra: Vec::new(),
             folder_date: None,
             titles_from_names: false,
+            setlist: false,
         };
         let both = draft.job(NameScheme::NumberTitle, true, true);
         assert!(both.files.iter().all(|(_, fields, name)| !fields.is_empty() && name.is_some()));

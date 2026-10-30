@@ -52,6 +52,11 @@ ffmpeg or LAME. Every decoder and encoder is built in.
   names are carried into every checksum file. Several shows at once: the clear ones are
   ready to go, the doubtful ones are checked one by one. **Tools > Undo tagging** gives the
   files back byte for byte (30 days).
+- **Setlists from setlist.fm** (with your own free API key, in Settings): the setlist of
+  each show is written in its folder as "Artist - YYYY-MM-DD - Venue, City, Country.txt"
+  (tour and numbered songs), ready for Tag and rename; when setlist.fm has several shows
+  that day, the venue in the folder name decides, or you choose. The Tag and rename window
+  can also take its titles straight from setlist.fm.
 - **Upload helpers**: copy a show's FFP or its info file to the clipboard.
 - **File manager integration** (optional): "Open in Bootleg Toolbox" in the right-click
   menu of Explorer, Dolphin, Nautilus and Nemo.
@@ -61,9 +66,10 @@ which are never changed. Only "Tag and rename from info file" changes files in p
 you have checked what it will write: tags and names only, never the audio, and it can be
 undone.
 
-The program makes no network connection, unless you ask it to check for a new version
-(Help > Check for updates, or the Settings option, off by default): it then asks
-github.com for the latest release, sending nothing but its name and version.
+The program makes no network connection unless you ask for one: to check for a new
+version (Help > Check for updates, or the Settings option, off by default), it asks
+github.com for the latest release, sending nothing but its name and version; to get a
+setlist, it asks setlist.fm with your API key, the artist and the date of the show.
 
 ## Download
 
@@ -107,6 +113,7 @@ bootleg-toolbox --cli <command> <folders or files...>
 | `clean-wav` | WAV clean-up |
 | `tag-info` | Tag and rename the FLAC files from the info file (`BT_RENAME=number`, `disc`, `etree` or `keep`; `BT_DRY=1` only prints what it read) |
 | `undo-tagging` | Roll back the latest Tag and rename: former tags, names and checksum files, byte for byte |
+| `setlist` | Write the setlist of each show from setlist.fm in its folder (`BT_SETLISTFM_KEY` = your API key) |
 | `torrent-check` | Check the `.torrent` files given against their shows |
 | `media-info` | Media info of the shows and of the DVDs (`VIDEO_TS` folders, VOB files) |
 | `check-update` | Look for a newer release |
@@ -151,9 +158,11 @@ is in progress: until it is accepted, the Windows executables are not signed.
 This program will not transfer any information to other networked systems unless
 specifically requested by the user or the person installing or operating it.
 
-The only network access is the update check, off by default: when the user asks for it
-(Help > Check for updates, or the Settings option), the program asks github.com for the
-latest release, sending nothing but its name and version.
+The program connects to the network only when the user asks for it: the update check, off
+by default (Help > Check for updates, or the Settings option), asks github.com for the
+latest release, sending nothing but its name and version; Get setlist from setlist.fm and
+the Tag and rename window's setlist.fm button send the user's own setlist.fm API key, the
+artist and the date of the show to api.setlist.fm.
 
 ## Licence
 

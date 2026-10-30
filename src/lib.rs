@@ -17,6 +17,7 @@ pub mod mediainfo;
 pub mod ops;
 pub mod report;
 pub mod sbe;
+pub mod setlistfm;
 pub mod torrent_check;
 pub mod update;
 pub mod shn;

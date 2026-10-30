@@ -57,6 +57,8 @@ pub enum Msg {
     FloatScan(Vec<(PathBuf, crate::encode::FloatScan)>),
     /// A media info summary: its name (show or DVD) and text.
     MediaInfo { title: String, text: String },
+    /// setlist.fm has several shows of the artist that day: the user chooses one.
+    SetlistChoice { root: PathBuf, shows: Vec<crate::setlistfm::Show> },
     Finished { summary: String, rescan: bool },
 }
 
@@ -157,8 +159,10 @@ pub struct Options {
     pub always_on_top: bool,
     /// "Open in Bootleg Toolbox" in the file manager's right-click menu.
     pub shell_integration: bool,
-    /// Look for a newer release on GitHub at startup (the only network access; off by default).
+    /// Look for a newer release on GitHub at startup (off by default).
     pub check_updates: bool,
+    /// The user's own setlist.fm API key (empty: no setlist search).
+    pub setlistfm_key: String,
     /// File names chosen in "Tag and rename from info file".
     pub tag_scheme: crate::tagging::NameScheme,
     /// Default choices of "Tag and rename from info file": write the tags, rename the files.
@@ -215,6 +219,7 @@ impl Default for Options {
             shell_integration: false,
             legacy_cleaned: false,
             check_updates: false,
+            setlistfm_key: String::new(),
         }
     }
 }
@@ -243,6 +248,8 @@ pub enum Op {
     MediaInfo(Vec<PathBuf>),
     /// Tags and new names from the info file (the choices of its window).
     Tag(Vec<crate::tagging::TagJob>),
+    /// The setlist of each show from setlist.fm, written to a text file in its folder.
+    Setlist,
     /// Gives these shows of an undo journal run back as they were.
     Rollback { run: PathBuf, shows: Vec<usize> },
     /// Follow-up of a conversion to FLAC (the choices of its window).
@@ -290,6 +297,7 @@ impl Op {
             Op::TorrentCheck(_) => "Checking against the torrent",
             Op::MediaInfo(_) => "Reading media info",
             Op::Tag(_) => "Tagging from the info file",
+            Op::Setlist => "Getting setlists from setlist.fm",
             Op::Rollback { .. } => "Rolling back tagging",
             Op::AfterFlac { .. } => "Tidying up after the conversion",
         }
@@ -367,6 +375,7 @@ pub fn spawn(op: Op, shows: Vec<Show>, files: Vec<PathBuf>, opt: Options, tx: Se
                 Op::TorrentCheck(torrents) => op_torrent_check(&ctx, &shows, torrents),
                 Op::MediaInfo(dvds) => op_media_info(&ctx, &shows, &files, dvds),
                 Op::Tag(jobs) => op_tag(&ctx, jobs),
+                Op::Setlist => op_setlist(&ctx, &shows),
                 Op::Rollback { run, shows } => op_rollback(&ctx, run, shows),
                 Op::AfterFlac { roots, sources, trash_sources, trash_checksums, create_ffp } => {
                     op_after_flac(&ctx, roots, sources, *trash_sources, trash_checksums, *create_ffp)
@@ -1990,6 +1999,117 @@ pub fn op_tag(ctx: &Ctx, jobs: &[crate::tagging::TagJob]) -> String {
     }
     let undo = if journal { " To undo: Tools > Undo tagging (or --cli undo-tagging)." } else { "" };
     format!("{} tagged, {} renamed.{undo}", plural(tagged, "file", "files"), renamed)
+}
+
+/// The setlist of each show from setlist.fm (artist and date from the info file, the folder
+/// name or the tags), written to "Artist - YYYY-MM-DD - Venue, City, Country.txt" in its
+/// folder. Several shows of the artist that day: the one whose venue the folder name or the
+/// info file gives, otherwise the user chooses (`Msg::SetlistChoice`).
+fn op_setlist(ctx: &Ctx, shows: &[Show]) -> String {
+    ctx.add_total(shows.len());
+    let (mut written, mut there, mut choose, mut missing) = (0, 0, 0, 0);
+    for show in shows {
+        if ctx.cancelled() {
+            break;
+        }
+        let name = files::show_name(&show.root);
+        let (artist, date, place) = crate::tagging::identity(show);
+        if artist.trim().is_empty() || !crate::tagging::full_date(&date) {
+            let what = if artist.trim().is_empty() { "no artist name" } else { "no full date (YYYY-MM-DD)" };
+            let text = format!("Not searched on setlist.fm: {what} in the info file, the folder name or the tags");
+            ctx.status(&show.root, text.clone(), Level::Warn, "");
+            ctx.log(format!("{name}: {text}"), Level::Warn);
+            missing += 1;
+            ctx.tick();
+            continue;
+        }
+        if let Some(p) = crate::setlistfm::existing_file(&show.root, &artist, &date) {
+            ctx.status(&show.root, "Setlist file there already", Level::Info, file_name(&p));
+            there += 1;
+            ctx.tick();
+            continue;
+        }
+        let found = crate::setlistfm::find(&ctx.opt.setlistfm_key, &artist, &date, &ctx.cancel);
+        ctx.tick();
+        let found = match found {
+            Ok(found) => found,
+            Err(e) => {
+                if ctx.cancelled() {
+                    break;
+                }
+                ctx.status(&show.root, format!("setlist.fm: {e}"), Level::Error, "");
+                ctx.log(format!("{name}: {e}"), Level::Error);
+                // The same answer for every show: no use asking again.
+                if e.contains("API key") || e.contains("daily limit") {
+                    return format!("setlist.fm: {e}.");
+                }
+                continue;
+            }
+        };
+        let chosen = match found.len() {
+            0 => None,
+            1 => found.first(),
+            _ => crate::setlistfm::pick_by_place(&place, &found),
+        };
+        match chosen {
+                Some(s) => match setlist_file(ctx, &show.root, s) {
+                Some(true) => written += 1,
+                Some(false) => there += 1,
+                None => {}
+            },
+            None if found.is_empty() => {
+                let text = format!("Not on setlist.fm ({artist}, {date})");
+                ctx.status(&show.root, text.clone(), Level::Warn, "");
+                ctx.log(format!("{name}: {text}"), Level::Warn);
+                missing += 1;
+            }
+            None => {
+                let text = format!("{} shows of {artist} on setlist.fm that day: choose one", found.len());
+                ctx.status(&show.root, text.clone(), Level::Warn, "");
+                ctx.log(format!("{name}: {text}"), Level::Warn);
+                let _ = ctx.tx.send(Msg::SetlistChoice { root: show.root.clone(), shows: found });
+                choose += 1;
+            }
+        }
+    }
+    if ctx.cancelled() {
+        return "Stopped.".into();
+    }
+    let mut parts = vec![format!("{} written", plural(written, "setlist file", "setlist files"))];
+    if there > 0 {
+        parts.push(format!("{there} there already"));
+    }
+    if choose > 0 {
+        parts.push(format!("{choose} to choose"));
+    }
+    if missing > 0 {
+        parts.push(format!("{missing} not found"));
+    }
+    parts.join(", ") + "."
+}
+
+/// Writes the setlist file of a show and reports it: Some(true) written, Some(false) one
+/// was there already, None nothing written.
+fn setlist_file(ctx: &Ctx, root: &Path, show: &crate::setlistfm::Show) -> Option<bool> {
+    let (text, level, tip, done) = setlist_outcome(root, show);
+    ctx.status(root, text.clone(), level, tip);
+    if level != Level::Info {
+        ctx.log(format!("{}: {text}", files::show_name(root)), level);
+    }
+    done
+}
+
+/// Writes the setlist file of a show: what the Status column says (text, level, tooltip),
+/// and Some(true) written, Some(false) one was there already, None nothing written.
+pub fn setlist_outcome(root: &Path, show: &crate::setlistfm::Show) -> (String, Level, String, Option<bool>) {
+    if show.songs.is_empty() {
+        return (format!("On setlist.fm ({}), but without its songs", show.location()), Level::Warn, show.url.clone(), None);
+    }
+    match crate::setlistfm::write(root, show) {
+        Ok(Some(path)) => (format!("Setlist written: {} songs, {}", show.songs.len(), show.location()), Level::Ok, file_name(&path), Some(true)),
+        Ok(None) => ("Setlist file there already".into(), Level::Info, String::new(), Some(false)),
+        Err(e) => (format!("Setlist not written: {e}"), Level::Error, String::new(), None),
+    }
 }
 
 /// Rolls back shows of an undo journal run, then keeps in the journal what could not be.

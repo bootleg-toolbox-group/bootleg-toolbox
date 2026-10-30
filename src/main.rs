@@ -125,6 +125,7 @@ fn run_cli(args: &[String]) -> i32 {
             Some(jobs) => Op::Tag(jobs),
             None => return 0,
         },
+        "setlist" => Op::Setlist,
         // The latest Tag and rename, all its shows.
         "undo-tagging" => match bootleg_toolbox::undo::list().into_iter().next() {
             Some((run, batch)) => Op::Rollback { run, shows: (0..batch.shows.len()).collect() },
@@ -160,6 +161,8 @@ fn run_cli(args: &[String]) -> i32 {
     if std::env::var("BT_MD5").is_ok() {
         opt.create_md5 = true;
     }
+    // setlist: the user's setlist.fm API key.
+    opt.setlistfm_key = std::env::var("BT_SETLISTFM_KEY").unwrap_or_default();
     let (tx, rx) = mpsc::channel();
     ops::spawn(op, shows, all, opt, tx, Arc::new(AtomicBool::new(false)));
     let mut errors = 0;
@@ -201,6 +204,11 @@ fn run_cli(args: &[String]) -> i32 {
                 }
             }
             Msg::MediaInfo { text, .. } => println!("{text}"),
+            Msg::SetlistChoice { root, shows } => {
+                for s in shows {
+                    println!("      {}: {} ({} songs) {}", root.file_name().unwrap_or_default().to_string_lossy(), s.location(), s.songs.len(), s.url);
+                }
+            }
             Msg::Finished { summary, .. } => {
                 println!("{summary}");
                 break;

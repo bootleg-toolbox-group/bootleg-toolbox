@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, Key, Modifiers, RichText};
@@ -74,6 +74,10 @@ const TAG_TIP: &str = "Read the artist, date, place and titles from the show's i
                        then write them as tags in the FLAC files and, if you like, rename the files. The audio is not touched: \
                        the FFP and ST5 stay valid; the .md5 and .sfv are brought up to date.";
 
+const SETLIST_TIP: &str = "Get the setlist of each show from setlist.fm (artist and date from the info file, the folder name or the tags) \
+                           and write it in its folder as \"Artist - YYYY-MM-DD - Venue, City, Country.txt\": tour and numbered songs, \
+                           ready for Tag and rename. Needs your own setlist.fm API key (Settings).";
+
 const UNDO_TIP: &str = "Give shows changed by Tag and rename back their former tags, names and checksum files.";
 
 /// "Tag and rename from info file": what will be written, open for corrections.
@@ -94,6 +98,10 @@ struct TagDialog {
     rename: bool,
     /// Opened from the batch window to check this row: OK gives the plan back to it.
     batch_row: Option<usize>,
+    /// setlist.fm: the search under way, the shows to choose from, what went wrong.
+    setlist_search: Option<SetlistSearch>,
+    setlist_shows: Vec<crate::setlistfm::Show>,
+    setlist_note: Option<(String, Level)>,
 }
 
 /// Tag and rename of several shows: each plan prepared, the clear ones ticked, the others
@@ -116,12 +124,15 @@ struct BatchRow {
 
 impl TagDialog {
     /// The plan of a show from its best info file, with the default choices of Settings.
-    fn prepare(show: &Show, opt: &Options) -> Result<TagDialog, String> {
+    /// Without info file, `setlist`: a plan from the folder name and the tags, whose titles
+    /// setlist.fm can give.
+    fn prepare(show: &Show, opt: &Options, setlist: bool) -> Result<TagDialog, String> {
         let infos = crate::tagging::info_files(show);
-        if infos.is_empty() {
-            return Err("no info file (.txt or .nfo)".into());
-        }
-        let draft = crate::tagging::draft(show, &infos[0].0)?;
+        let draft = match infos.first() {
+            Some((info, _)) => crate::tagging::draft(show, info)?,
+            None if setlist => crate::tagging::draft_without_info(show),
+            None => return Err("no info file (.txt or .nfo; Get setlist from setlist.fm can write one)".into()),
+        };
         let whole_checksums = crate::tagging::checksum_files(&show.root).iter().any(|p| matches!(crate::files::ext_lower(p).as_str(), "md5" | "sfv"));
         Ok(TagDialog {
             show: show.clone(),
@@ -134,7 +145,24 @@ impl TagDialog {
             write_tags: opt.tag_write,
             rename: opt.tag_rename,
             batch_row: None,
+            setlist_search: None,
+            setlist_shows: Vec::new(),
+            setlist_note: None,
         })
+    }
+
+    /// The songs of a setlist.fm show as titles, its venue as the place.
+    fn use_setlist(&mut self, show: &crate::setlistfm::Show) {
+        if show.songs.is_empty() {
+            self.setlist_note = Some((format!("setlist.fm has the show ({}), but not its songs.", show.location()), Level::Warn));
+            return;
+        }
+        self.draft.use_setlist(&show.songs, &show.location());
+        if self.album_auto {
+            self.draft.album = format!("{} {}", self.draft.date.trim(), self.draft.place.trim()).trim().to_string();
+        }
+        self.setlist_shows.clear();
+        self.setlist_note = Some((format!("{} songs from setlist.fm: {}.", show.songs.len(), show.location()), Level::Ok));
     }
 
     fn names(&self, scheme: crate::tagging::NameScheme) -> crate::tagging::NameScheme {
@@ -158,6 +186,16 @@ impl TagDialog {
     fn job(&self, scheme: crate::tagging::NameScheme) -> crate::tagging::TagJob {
         self.draft.job(self.names(scheme), self.write_tags, self.update_checksums || !self.whole_checksums)
     }
+}
+
+/// The answer of a setlist.fm search under way (shared: the plans are cloned).
+type SetlistSearch = Arc<Mutex<Receiver<Result<Vec<crate::setlistfm::Show>, String>>>>;
+
+/// setlist.fm has several shows of the artist that day: the one to write, or none.
+struct SetlistChoice {
+    root: PathBuf,
+    shows: Vec<crate::setlistfm::Show>,
+    pick: Option<usize>,
 }
 
 /// "Undo tagging": the runs of the undo journal, the shows ticked to be rolled back.
@@ -356,6 +394,7 @@ enum Action {
     CopyFfp,
     CopyInfo,
     TagInfo,
+    Setlist,
     /// Pick .torrent files, then check the selection against them.
     TorrentCheck,
     Remove,
@@ -407,6 +446,8 @@ pub struct App {
     info_choice: Option<InfoChoice>,
     /// "Tag and rename from info file" window.
     tag_dialog: Option<TagDialog>,
+    /// Shows waiting for the user to choose their setlist.fm show.
+    setlist_choices: Vec<SetlistChoice>,
     undo_dialog: Option<UndoDialog>,
     tag_batch: Option<TagBatch>,
     /// The saved "Always on top" choice was applied to the window.
@@ -589,6 +630,7 @@ impl App {
             help: false,
             info_choice: None,
             tag_dialog: None,
+            setlist_choices: Vec::new(),
             undo_dialog: None,
             tag_batch: None,
             window_level_set: false,
@@ -1155,6 +1197,10 @@ impl App {
                         self.media_windows.retain(|(t, _)| t != &title);
                         self.media_windows.push((title, text));
                     }
+                    Msg::SetlistChoice { root, shows } => {
+                        self.setlist_choices.retain(|c| c.root != root);
+                        self.setlist_choices.push(SetlistChoice { root, shows, pick: None });
+                    }
                     Msg::FloatScan(found) => {
                         if let Some(pending) = &mut self.float_pending {
                             pending.scans = found;
@@ -1361,7 +1407,7 @@ impl App {
             return;
         };
         let name = crate::files::show_name(&show.root);
-        match TagDialog::prepare(&show, &self.opt) {
+        match TagDialog::prepare(&show, &self.opt, !self.opt.setlistfm_key.trim().is_empty()) {
             Ok(d) => self.tag_dialog = Some(d),
             Err(e) => {
                 let msg = format!("{name}: {e}, nothing to read the tags from.");
@@ -1379,7 +1425,7 @@ impl App {
             .par_iter()
             .map(|show| {
                 let row = BatchRow { show: show.clone(), plan: None, problem: String::new(), doubts: Vec::new(), checked: false, ticked: false, applied: false };
-                match TagDialog::prepare(show, &opt) {
+                match TagDialog::prepare(show, &opt, false) {
                     Ok(plan) => {
                         let doubts = crate::tagging::doubts(show, &plan.draft, &plan.infos);
                         let ticked = doubts.is_empty() && plan.blocked(opt.tag_scheme).is_none();
@@ -1564,6 +1610,34 @@ impl App {
         use crate::tagging::NameScheme;
         let Some(mut d) = self.tag_dialog.take() else { return };
         let (mut apply, mut cancel, mut then_next) = (false, false, false);
+        // The setlist.fm search, once it has answered.
+        if let Some(rx) = &d.setlist_search {
+            let answer = rx.lock().map(|rx| rx.try_recv()).unwrap_or(Err(mpsc::TryRecvError::Disconnected));
+            match answer {
+                Ok(answer) => {
+                    d.setlist_search = None;
+                    match answer {
+                        Ok(shows) if shows.is_empty() => d.setlist_note = Some((format!("{} on {}: not on setlist.fm.", d.draft.artist.trim(), d.draft.date.trim()), Level::Warn)),
+                        Ok(shows) => {
+                            let pick = if shows.len() == 1 { shows.first() } else { crate::setlistfm::pick_by_place(&d.draft.place, &shows) };
+                            match pick.cloned() {
+                                Some(show) => d.use_setlist(&show),
+                                None => {
+                                    d.setlist_note = Some((format!("setlist.fm has {} shows of {} that day: choose one.", shows.len(), d.draft.artist.trim()), Level::Warn));
+                                    d.setlist_shows = shows;
+                                }
+                            }
+                        }
+                        Err(e) => d.setlist_note = Some((format!("setlist.fm: {e}."), Level::Error)),
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(100)),
+                Err(mpsc::TryRecvError::Disconnected) => d.setlist_search = None,
+            }
+        }
+        let mut ask_setlist = false;
+        let mut chosen_setlist = None;
+        let setlist_key = self.opt.setlistfm_key.trim().to_string();
         // Checking a show of a batch: nothing is written here, the plan goes back to its row.
         let in_batch = d.batch_row.is_some();
         let mut reload = None;
@@ -1592,13 +1666,17 @@ impl App {
                     ui.add_space(4.0);
                     egui::Grid::new("tag_fields").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
                         ui.label("Info file");
-                        egui::ComboBox::from_id_salt("tag_info").width(560.0).selected_text(info_label(&d.infos[d.info])).show_ui(ui, |ui| {
-                            for (i, info) in d.infos.iter().enumerate() {
-                                if ui.selectable_label(i == d.info, info_label(info)).clicked() {
-                                    reload = Some(i);
+                        if d.infos.is_empty() {
+                            ui.label(RichText::new("None: the titles can come from setlist.fm").weak());
+                        } else {
+                            egui::ComboBox::from_id_salt("tag_info").width(560.0).selected_text(info_label(&d.infos[d.info])).show_ui(ui, |ui| {
+                                for (i, info) in d.infos.iter().enumerate() {
+                                    if ui.selectable_label(i == d.info, info_label(info)).clicked() {
+                                        reload = Some(i);
+                                    }
                                 }
-                            }
-                        });
+                            });
+                        }
                         ui.end_row();
                         ui.label("Artist");
                         ui.add(egui::TextEdit::singleline(&mut d.draft.artist).desired_width(560.0));
@@ -1639,8 +1717,44 @@ impl App {
                         ui.checkbox(&mut d.update_checksums, "Update the .md5 and .sfv files (whole-file checksums change with the tags)");
                     }
                     ui.label(RichText::new("The audio is not touched: FFP and ST5 stay valid. Renamed files are renamed in every checksum file.").weak());
+                    // Titles from setlist.fm: the search, then the choice when there are several shows.
+                    ui.horizontal(|ui| {
+                        let searching = d.setlist_search.is_some();
+                        let tip = if setlist_key.is_empty() {
+                            "Enter your setlist.fm API key in Settings first (a free key, from setlist.fm)."
+                        } else {
+                            "Ask setlist.fm for the show of this artist on this date: its songs become the titles, in order, and its venue the place."
+                        };
+                        let ready = !setlist_key.is_empty() && !searching && !d.draft.artist.trim().is_empty() && crate::tagging::full_date(&d.draft.date);
+                        ask_setlist = ui.add_enabled(ready, egui::Button::new("Titles from setlist.fm")).on_hover_text(tip).on_disabled_hover_text(tip).clicked();
+                        if searching {
+                            ui.spinner();
+                            ui.label(RichText::new("Asking setlist.fm...").weak());
+                        } else if let Some((text, level)) = &d.setlist_note {
+                            ui.label(colored(text.clone(), *level));
+                        }
+                    });
+                    for (i, show) in d.setlist_shows.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            if ui.button("Use").clicked() {
+                                chosen_setlist = Some(i);
+                            }
+                            let tour = if show.tour.is_empty() { String::new() } else { format!(", {}", show.tour) };
+                            ui.label(format!("{}   ({} songs{tour})", show.location(), show.songs.len()));
+                            if !show.url.is_empty() {
+                                ui.hyperlink_to("setlist.fm", &show.url);
+                            }
+                        });
+                    }
                     if d.draft.titles_from_names {
                         ui.label(colored("No tracklist in this info file: the titles below come from the file names. Check them.", Level::Warn));
+                    } else if d.draft.setlist && d.draft.found != files {
+                        ui.label(colored(format!(
+                            "setlist.fm lists {} songs for {files} files: check that each title is on the right file (intros, solos and medleys are often split or joined).",
+                            d.draft.found
+                        ), Level::Warn));
+                    } else if d.infos.is_empty() && !d.draft.setlist {
+                        ui.label(colored("No info file: type the titles below, or get them from setlist.fm.", Level::Warn));
                     } else if d.draft.found != files {
                         let text = if d.draft.found == 0 {
                             "No numbered tracklist found in this info file: type the titles below, or choose another file.".to_string()
@@ -1745,6 +1859,20 @@ impl App {
             }
         });
         self.opt.tag_scheme = scheme;
+        if let Some(show) = chosen_setlist.and_then(|i| d.setlist_shows.get(i).cloned()) {
+            d.use_setlist(&show);
+        }
+        if ask_setlist {
+            let (tx, rx) = mpsc::channel();
+            let (artist, date) = (d.draft.artist.trim().to_string(), d.draft.date.trim().to_string());
+            std::thread::spawn(move || {
+                let never = AtomicBool::new(false);
+                let _ = tx.send(crate::setlistfm::find(&setlist_key, &artist, &date, &never));
+            });
+            d.setlist_search = Some(Arc::new(Mutex::new(rx)));
+            d.setlist_shows.clear();
+            d.setlist_note = None;
+        }
         if let Some(i) = reload {
             match crate::tagging::draft(&d.show, &d.infos[i].0) {
                 Ok(draft) => {
@@ -1770,6 +1898,56 @@ impl App {
             self.start(Op::Tag(vec![job]), vec![d.show.clone()], d.show.files.clone(), false);
         } else if open && !cancel {
             self.tag_dialog = Some(d);
+        }
+    }
+
+    /// Several shows of the artist on setlist.fm that day: the user picks one per show.
+    fn setlist_window(&mut self, ctx: &egui::Context) {
+        if self.setlist_choices.is_empty() {
+            return;
+        }
+        let (mut open, mut write, mut close) = (true, false, false);
+        egui::Window::new("Choose the setlist").collapsible(false).default_size([760.0, 420.0]).open(&mut open).show(ctx, |ui| {
+            ui.label("setlist.fm has several shows of the artist that day. Choose the right one for each show, or leave it out.");
+            ui.add_space(4.0);
+            egui::TopBottomPanel::bottom("setlist_buttons").show_inside(ui, |ui| {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    let any = self.setlist_choices.iter().any(|c| c.pick.is_some());
+                    write = ui.add_enabled(any, egui::Button::new(RichText::new("Write the chosen setlists").strong())).clicked();
+                    close = ui.button("Cancel").clicked();
+                });
+            });
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                for c in self.setlist_choices.iter_mut() {
+                    ui.label(RichText::new(crate::files::show_name(&c.root)).strong());
+                    for (i, show) in c.shows.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            let songs = match show.songs.len() {
+                                0 => "no songs".to_string(),
+                                n => format!("{n} songs"),
+                            };
+                            let tour = if show.tour.is_empty() { String::new() } else { format!(", {}", show.tour) };
+                            ui.radio_value(&mut c.pick, Some(i), format!("{}   ({songs}{tour})", show.location()));
+                            if !show.url.is_empty() {
+                                ui.hyperlink_to("setlist.fm", &show.url);
+                            }
+                        });
+                    }
+                    ui.radio_value(&mut c.pick, None, "None of these");
+                    ui.add_space(6.0);
+                }
+            });
+        });
+        if write {
+            for c in std::mem::take(&mut self.setlist_choices) {
+                let Some(show) = c.pick.and_then(|i| c.shows.get(i)) else { continue };
+                let (text, level, tip, _) = ops::setlist_outcome(&c.root, show);
+                self.log(format!("{}: {text}", crate::files::show_name(&c.root)), level);
+                self.status.insert(c.root.clone(), (text, level, tip));
+            }
+        } else if close || !open {
+            self.setlist_choices.clear();
         }
     }
 
@@ -2127,6 +2305,7 @@ impl App {
                         clean_wav_button(ui, false, actions);
                         ui.separator();
                         tag_button(ui, false, actions);
+                        setlist_button(ui, false, actions);
                     }))
                     .response
                     .on_hover_text(format!("Convert {scope} to FLAC (each file is decoded again and checked) or to WAV, make an MP3 copy of the shows in a separate folder, or fix SBEs. The originals are kept."));
@@ -2620,6 +2799,14 @@ impl App {
                 Action::CopyFfp => self.copy_ffp(ctx),
                 Action::CopyInfo => self.copy_info(ctx),
                 Action::TagInfo => self.open_tag_dialog(),
+                Action::Setlist => {
+                    if self.opt.setlistfm_key.trim().is_empty() {
+                        self.flash("Enter your setlist.fm API key in Settings first (a free key, from setlist.fm).");
+                        self.settings = Some(self.opt.clone());
+                    } else {
+                        self.run_on_selection(Op::Setlist);
+                    }
+                }
                 Action::TorrentCheck => self.ask(Dialog::TorrentCheck),
                 Action::Remove => self.remove_selected(),
                 Action::ToggleColumn(col) => {
@@ -2813,6 +3000,15 @@ impl App {
                 ui.checkbox(&mut draft.torrent_private, "Private torrent (no DHT or peer exchange)");
                 ui.checkbox(&mut draft.torrent_source, "Tag each torrent with its site, so the same show can be seeded on several sites at once");
                 ui.separator();
+                ui.heading("setlist.fm");
+                ui.horizontal(|ui| {
+                    ui.label("API key");
+                    ui.add(egui::TextEdit::singleline(&mut draft.setlistfm_key).password(true).hint_text("Your own key").desired_width(320.0))
+                        .on_hover_text("Used by Tools > Get setlist from setlist.fm and by the Tag and rename window. \
+                                        setlist.fm is asked only then, with the artist and the date of the show.");
+                    ui.hyperlink_to("Get a free key", "https://www.setlist.fm/settings/api");
+                });
+                ui.separator();
                 ui.horizontal(|ui| {
                     ui.label("Files processed in parallel");
                     ui.add(egui::DragValue::new(&mut draft.jobs).range(1..=64));
@@ -2834,7 +3030,7 @@ impl App {
                 ui.checkbox(&mut draft.check_updates, "Check for a new version at startup")
                     .on_hover_text("Asks github.com once at each start whether a newer version has been released. \
                                     Nothing is sent but the program's name and version. \
-                                    Otherwise the program never connects to the network.");
+                                    Otherwise the program only connects to setlist.fm, when you ask for a setlist.");
                 ui.checkbox(&mut draft.shell_integration, "Add \"Open in Bootleg Toolbox\" to the file manager's right-click menu")
                     .on_hover_text("For folders and audio files, for your user only (no administrator rights). \
                                     Windows: Explorer (on Windows 11, under Show more options). Linux: Dolphin, Nautilus and Nemo.\n\
@@ -2855,7 +3051,8 @@ impl App {
                     cancel = true;
                 }
                 if ui.button("Reset to defaults").clicked() {
-                    draft = Options::default();
+                    // The API key is the user's own, not a setting.
+                    draft = Options { setlistfm_key: draft.setlistfm_key.clone(), ..Options::default() };
                 }
             });
         });
@@ -3479,6 +3676,14 @@ fn tag_button(ui: &mut egui::Ui, disabled: bool, actions: &mut Vec<Action>) {
     }
 }
 
+/// "Get setlist from setlist.fm": a text file with the setlist in each show folder.
+fn setlist_button(ui: &mut egui::Ui, disabled: bool, actions: &mut Vec<Action>) {
+    if ui.add_enabled(!disabled, egui::Button::new("📝 Get setlist from setlist.fm")).on_hover_text(SETLIST_TIP).clicked() {
+        ui.close_menu();
+        actions.push(Action::Setlist);
+    }
+}
+
 /// "Check against torrent...": every piece of the files hashed again and compared.
 fn torrent_check_button(ui: &mut egui::Ui, disabled: bool, actions: &mut Vec<Action>) {
     let tip = "Check the show against a .torrent file: every piece is hashed again, and damaged, missing or resized files are named. \
@@ -3535,6 +3740,7 @@ fn ops_menu(ui: &mut egui::Ui, disabled: bool, flac_level: u8, trackers: &[(Stri
     sbe_button(ui, disabled, actions);
     clean_wav_button(ui, disabled, actions);
     tag_button(ui, disabled, actions);
+    setlist_button(ui, disabled, actions);
     ui.separator();
     if ui.add_enabled(!disabled, egui::Button::new("📊 Spectrogram").shortcut_text("F9")).clicked() {
         ui.close_menu();
@@ -3602,6 +3808,7 @@ impl eframe::App for App {
         self.tag_batch_window(ctx);
         self.tag_window(ctx);
         self.undo_window(ctx);
+        self.setlist_window(ctx);
         self.float_window(ctx);
         self.after_flac_window(ctx);
         self.spectrogram_windows(ctx);

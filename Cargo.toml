@@ -27,6 +27,8 @@ rfd = "0.17"
 trash = "5"
 open = "5"
 serde = { version = "1", features = ["derive"] }
+# setlist.fm answers (JSON), only when the user asks for a setlist.
+serde_json = "1"
 # Undo journal of Tag and rename (already used by eframe for its settings).
 ron = "0.8"
 # Spectrogram legend (egui's own font) and PNG export; both already used by eframe.

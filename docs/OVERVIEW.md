@@ -166,6 +166,7 @@ Most shows arrive with a text file describing them; Bootleg Toolbox turns it int
 
 - **What is read:** the artist, date and place from the top of the file or from "Artist:", "Date:", "Venue:" fields; the tracklist, numbered ("01 - Title", "1. Title", "[01] Title", "d1t01 Title") or plain, across "Disc 1", "CD 2:" or "Set 2" headings, with running times, footnote marks and fingerprint lines left out. Several tracks on one line are told apart ("01 Intro, 02 Nightrain", "1. Intro 2. It's So Easy", "1.INTRO 2.IT'S SO EASY") when their numbers follow on.
 - **Titles from the file names:** when the info file has no tracklist but every file name holds a title ("01 - It's So Easy.flac"), those titles are used and the show is marked to check; a button does the same in any show. A "Title Case" button turns titles written in capitals into "It's So Easy", keeping initials (N.I.B.), Roman numerals and AC/DC. Several text files: the one whose tracklist matches the number of files comes first.
+- **Titles from setlist.fm:** with your setlist.fm API key in Settings, a button asks setlist.fm for the show of that artist on that date and takes its songs as titles, in order, and its venue as the place; when there are several shows that day, the venue already given picks one, or you choose. The window then also opens for a show without info file.
 - **A window to check everything** before it is written: artist, date, place, album (the eTree "date place" by default), each title next to its file and its new name. It warns when the list and the files do not have the same count, when the folder name gives another date, and when a new name would clash.
 - **Written:** TITLE, ARTIST, ALBUM, DATE, TRACKNUMBER, TRACKTOTAL, and DISCNUMBER/DISCTOTAL for several discs; the other tags are kept. Names: "01 - Title", "d1t01 - Title" or "Artist YYYY-MM-DD d1t01".
 - **Tags, names or both:** "Write the tags" and "Rename the files" are two boxes, ticked by default in Settings and changeable for each show. Renaming alone does not write in the files, so it works on read-only files too. A date not written YYYY-MM-DD is pointed out.
@@ -174,6 +175,17 @@ Most shows arrive with a text file describing them; Bootleg Toolbox turns it int
 - **The audio is never rewritten:** only the FLAC header changes, in place when its padding has room. The audio signature is checked after every file. FFP and ST5 stay valid; .md5 and .sfv lines of the tagged files are computed again, and new names are written into every checksum file. Lines that did not match the files before tagging are reported, as tagging rewrites them. A .torrent made before is reported as out of date.
 - **Nothing is changed when a file is read-only** (a torrent client may still hold it): you are told which files to unlock, so a show never ends up with names but no tags.
 - **Undo:** before a show is changed, its FLAC headers, former names and checksum files are kept for 30 days in the program's data folder (not in the show's folder). Tools > Undo tagging lists each Apply with its shows; rolling back gives the files back byte for byte, so the checksums and torrents made before match again. A file changed since by another program, or whose former name is taken, is left as it is and reported, and the checksum files are then kept as they are. From the command line: `undo-tagging`.
+
+### Setlists from setlist.fm
+
+Tools > Get setlist from setlist.fm (also in the Convert menu and the right-click menu) writes the setlist of each selected show into its folder, for shows that came without one.
+
+- **Your own key:** setlist.fm hands out free API keys (setlist.fm > Settings > API); paste yours in Settings > setlist.fm. Without it nothing is asked.
+- **Which show:** the artist and the date come from the info file, the folder name ("Artist - YYYY-MM-DD - ..." or "Artist YYYY-MM-DD ...") or the tags. setlist.fm's search also returns other artists whose name contains this one; only the same name is kept ("AC/DC" = "ACDC", "Mötley Crüe" = "Motley Crue").
+- **Several shows that day** (a festival, two sets in two places): the one whose venue the folder name or the info file gives; otherwise a window lists them, with their number of songs and a link to each page, to choose one or none.
+- **The file:** "Artist - YYYY-MM-DD - Venue, City, Country.txt", with the tour, the numbered songs (every set and encore, in order) and the link to the setlist.fm page. A setlist file already in the folder is kept, and that show is not asked for again. Tag and rename reads this file like any info file.
+- **Gentle on the service:** one request per second at most, answers kept until the program closes, a pause and new attempts when setlist.fm is busy, and a clear message when the key is refused or its daily limit is reached.
+- From the command line: `BT_SETLISTFM_KEY=<key> bootleg-toolbox --cli setlist <folders>` (several shows that day are listed, not chosen).
 
 ### Lossy files (MP3, MP2, AAC)
 
@@ -348,7 +360,7 @@ Bootleg Toolbox runs on 64-bit Windows and Linux from a single file, with nothin
 - **Nothing half-written:** new files are written as ".part" and renamed only once complete and verified; a stopped or failed job removes them.
 - **Existing files are not overwritten** without your say: an existing FLAC, MP3 or checksum file is skipped and reported.
 - **Nothing is deleted:** the after-conversion window moves files to the system trash (Recycle Bin, or the desktop trash on Linux), only if you tick the box, so they can be restored.
-- **No network access unless you ask:** the only connection is the optional update check, off by default. Torrents are written to disk for you to upload yourself.
+- **No network access unless you ask:** the optional update check, off by default, and the setlist.fm searches you ask for, with your own key. Torrents are written to disk for you to upload yourself.
 
 ### Built in the open
 
