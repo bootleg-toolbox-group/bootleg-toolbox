@@ -2,27 +2,27 @@
 source: tests/snapshots.rs
 expression: text
 ---
-11ca8bea7bfb8707e58db88f903c5e15  Synthetic Band 1990-01-01/SBE-fixed/CD1/01 - Opening.flac
-20463075deeab217c53d5541949a8057  Hires Band 2000-02-02/Hires Band 2000-02-02.md5
-2ab8c81345db10936c365e7ce1c70b59  Synthetic Band 1990-01-01/CD1/02 - Second Song.flac
-34f7b8326d745c388bc8b0a457eae0a4  Synthetic Band 1990-01-01/CD2/01 - Encore.flac
 37cceb1be477cad76aa69b7a5a78998f  Wav Band 2002-04-04/WAV-cleaned/01 - Extra chunk.wav
-380d17ec5c4c7e7122961b93d2c67bfc  Synthetic Band 1990-01-01/SBE-fixed/CD1/02 - Second Song.flac
+398bf2893f8bb949a6901f32f9701b6a  Hires Band 2000-02-02/Hires Band 2000-02-02.sfv
 3d642d5d1060edb43738cb8998d53216  Synthetic Band 1990-01-01/Synthetic Band 1990-01-01.st5
-4a0d876ee323b0588f8206b1e687f69f  Synthetic Band 1990-01-01/CD1/01 - Opening.flac
+435e9aef7ab555e0842ede8ebda52056  Synthetic Band 1990-01-01 [DIME].torrent
+4be125039a9890deb3f45e4c92bde995  Muffled Band 2001-03-03/01 - Muffled.flac
+4ff3eb4b2435a26050ab3d5a118eb9a4  Synthetic Band 1990-01-01/CD1/02 - Second Song.flac
 4ffc50942fe616f7fc3c8a33352853a7  Hires Band 2000-02-02/Hires Band 2000-02-02.ffp
 5019acbff75631889fb305b2a0282bb1  Wav Band 2002-04-04/01 - Extra chunk.wav
-53b25d73371735dc824776311183728a  Muffled Band 2001-03-03/01 - Muffled.flac
+5393c8ef0bade5c7c2e6f541e0250a65  Hires Band 2000-02-02/01 - Hires.flac
 5534f101e7743af4050f5efd69bcc3cf  01 - Hires - spectrogram.png
+600e7e0154a781f38cb918f51139f7ac  Synthetic Band 1990-01-01/Synthetic Band 1990-01-01.md5
 63894708d664ee85e6a243c77d687274  Synthetic Band 1990-01-01/info.txt
-68d02779ae7166ab532a04598d80ae7a  Synthetic Band 1990-01-01/Synthetic Band 1990-01-01.sfv
-756edfbcb1eebbcbfdd2322517210039  Synthetic Band 1990-01-01/SBE-fixed/CD1/03 - Long Jam.flac
 794bc5bac9efa20dd76d7598c05ffe77  Hires Band 2000-02-02/Hires Band 2000-02-02.st5
+7bbc5f0fcb7c808082ce6216a95a0557  Synthetic Band 1990-01-01/Synthetic Band 1990-01-01.sfv
 7dcccb48ada1eb79ec9fd1b032d78f66  Synthetic Band 1990-01-01/Synthetic Band 1990-01-01.ffp
-7e2ef1268c9f8685e4a9868eb47862ca  Synthetic Band 1990-01-01/CD1/03 - Long Jam.flac
-85dab43b93f1f4a528e4168f1e54b94d  Synthetic Band 1990-01-01 [TTD].torrent
-a8fd418c238598c23e8f4f412d244f36  Synthetic Band 1990-01-01 [DIME].torrent
-c7a448761b4382dd05ce5223e26aa486  Synthetic Band 1990-01-01/Synthetic Band 1990-01-01.md5
-d919862b3231a375d95684e03519f26c  Hires Band 2000-02-02/Hires Band 2000-02-02.sfv
-f1364082715c897154c35e9f7f6411dc  Hires Band 2000-02-02/01 - Hires.flac
+94548386ddc6055eb66d4bbf9dfb1855  Hires Band 2000-02-02/Hires Band 2000-02-02.md5
+a06e062dc33c4507430d29ce6716e593  Synthetic Band 1990-01-01/SBE-fixed/CD1/03 - Long Jam.flac
+df7a032518b961fe6f30a4bd1adc26e4  Synthetic Band 1990-01-01/CD1/03 - Long Jam.flac
+e47179d94d8d0b67ef5ab9a71173b98e  Synthetic Band 1990-01-01/SBE-fixed/CD1/01 - Opening.flac
+f3167de021fc5fa63c58a3ef604a9aed  Synthetic Band 1990-01-01 [TTD].torrent
+f44392a6b86c13f5dcedcd236b9773f7  Synthetic Band 1990-01-01/CD2/01 - Encore.flac
+f60a1369d73814ec9c2b094871984e94  Synthetic Band 1990-01-01/SBE-fixed/CD1/02 - Second Song.flac
 f615aba56333c8c0c755afb1d76e0f04  Wav Band 2002-04-04/02 - Plain.wav
+ff9f9e51d765de47404f0cc1df968190  Synthetic Band 1990-01-01/CD1/01 - Opening.flac
