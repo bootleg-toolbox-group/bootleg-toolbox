@@ -303,6 +303,61 @@ fn analyse_signal(path: &Path, info: &AudioInfo, aac_check: bool, cancel: &Atomi
     }
     let bw = bin_hz * band as f64;
     let nyquist = rate / 2.0;
+    // Steepest drop above 10 kHz: lossy encoders cut with a brick wall a few hundred Hz wide.
+    let gap = round_py(150.0 / bw).max(1);
+    let width_bands = round_py(600.0 / bw).max(2);
+    let find_cutoff = |level: &[f64]| {
+        let (mut best_drop, mut best_i) = (0.0f64, None);
+        for i in (width_bands + gap)..nb.saturating_sub(width_bands + gap) {
+            if fb[i] < 10000.0 || fb[i] > nyquist - 700.0 {
+                continue;
+            }
+            let drop = median(&level[i - gap - width_bands..i - gap]) - median(&level[i + gap..i + gap + width_bands]);
+            if drop > best_drop {
+                best_drop = drop;
+                best_i = Some(i);
+            }
+        }
+        let mut cutoff = None;
+        if let Some(bi) = best_i {
+            if best_drop >= 20.0 {
+                let below = median(&level[bi - gap - width_bands..bi - gap]);
+                let above = &level[bi + gap..];
+                if dsp::percentile(above, 90.0).unwrap_or(f64::INFINITY) <= below - 15.0 {
+                    let middle = (below + median(above)) / 2.0;
+                    let lo = (bi + 1).saturating_sub(gap + 2);
+                    let hi = (bi + gap + 2).min(nb);
+                    cutoff = Some((lo..hi).find(|&j| level[j] < middle).map(|j| fb[j]).unwrap_or(fb[bi]));
+                }
+            }
+        }
+        (best_drop, best_i, cutoff)
+    };
+    let (mut best_drop, mut best_i, mut cutoff) = find_cutoff(&level);
+    // A few loud clicks (all frequencies at once) fill the average above a real cutoff:
+    // look again without the 1 % of kept frames with the most treble.
+    let kept_bands = kept_hi - kept_lo;
+    if cutoff.is_none() && kept_bands > 0 && kept.len() / kept_bands >= 100 {
+        let treble: Vec<f64> = kept.chunks_exact(kept_bands).map(|frame| frame.iter().map(|&p| p as f64).sum()).collect();
+        let limit = dsp::percentile(&treble, 99.0).unwrap_or(f64::INFINITY);
+        let calm: Vec<&[f32]> = kept.chunks_exact(kept_bands).zip(&treble).filter(|(_, &t)| t <= limit).map(|(f, _)| f).collect();
+        let mut steady = level.clone();
+        for b in kept_lo..kept_hi.min(nb) {
+            let mean = calm.iter().map(|frame| frame[b - kept_lo] as f64).sum::<f64>() / calm.len().max(1) as f64;
+            steady[b] = 10.0 * (mean + 1e-30).log10();
+        }
+        for &b in &toned {
+            let around: Vec<f64> = (b.saturating_sub(12)..b).filter(|&j| !in_tone(fb[j])).map(|j| steady[j]).collect();
+            if let Some(m) = dsp::median(&around) {
+                steady[b] = m;
+            }
+        }
+        let found = find_cutoff(&steady);
+        if found.2.is_some() {
+            (best_drop, best_i, cutoff) = found;
+            level = steady;
+        }
+    }
     let median_between = |lo: f64, hi: f64| {
         let sel: Vec<f64> = (0..nb).filter(|&i| fb[i] >= lo && fb[i] < hi).map(|i| level[i]).collect();
         dsp::median(&sel)
@@ -310,33 +365,6 @@ fn analyse_signal(path: &Path, info: &AudioInfo, aac_check: bool, cancel: &Atomi
 
     let reference = median_between(1000.0, 4000.0);
 
-    // Steepest drop above 10 kHz: lossy encoders cut with a brick wall a few hundred Hz wide.
-    let gap = round_py(150.0 / bw).max(1);
-    let width_bands = round_py(600.0 / bw).max(2);
-    let (mut best_drop, mut best_i) = (0.0f64, None);
-    for i in (width_bands + gap)..nb.saturating_sub(width_bands + gap) {
-        if fb[i] < 10000.0 || fb[i] > nyquist - 700.0 {
-            continue;
-        }
-        let drop = median(&level[i - gap - width_bands..i - gap]) - median(&level[i + gap..i + gap + width_bands]);
-        if drop > best_drop {
-            best_drop = drop;
-            best_i = Some(i);
-        }
-    }
-    let mut cutoff = None;
-    if let Some(bi) = best_i {
-        if best_drop >= 20.0 {
-            let below = median(&level[bi - gap - width_bands..bi - gap]);
-            let above = &level[bi + gap..];
-            if dsp::percentile(above, 90.0).unwrap_or(f64::INFINITY) <= below - 15.0 {
-                let middle = (below + median(above)) / 2.0;
-                let lo = (bi + 1).saturating_sub(gap + 2);
-                let hi = (bi + gap + 2).min(nb);
-                cutoff = Some((lo..hi).find(|&j| level[j] < middle).map(|j| fb[j]).unwrap_or(fb[bi]));
-            }
-        }
-    }
     // How fast the level falls: across the cutoff (3 dB to 20 dB below the level under it),
     // or, without one, over the treble (10 to 16 kHz). Encoders and digital filters drop
     // by hundreds of dB per octave; tape, microphones and analog filters by tens.
@@ -369,7 +397,6 @@ fn analyse_signal(path: &Path, info: &AudioInfo, aac_check: bool, cancel: &Atomi
     //   frame, so just below the cutoff the level often collapses; FM and analog do not;
     // - the floor above the cutoff: an FM or analog capture keeps its hiss there up to the
     //   converter's filter, a decoded MP3/AAC falls to digital silence.
-    let kept_bands = kept_hi - kept_lo;
     let series = |lo: f64, hi: f64| -> Vec<f64> {
         // Tones (and 18.9-19.1 kHz, where a weak pilot may hide) are not part of the floor.
         let sel: Vec<usize> = (kept_lo..kept_hi)
