@@ -23,6 +23,10 @@ const STAMP_BYTES: u64 = 1 << 20;
 pub struct Batch {
     /// Seconds since 1970 (UTC).
     pub created: u64,
+    /// Nanoseconds within that second: orders two runs of the same second (absent from
+    /// older journals).
+    #[serde(default)]
+    pub nanos: u32,
     pub shows: Vec<ShowEntry>,
 }
 
@@ -73,8 +77,11 @@ pub fn dir() -> Option<PathBuf> {
 
 /// The runs, the latest first, with their folder.
 pub fn list() -> Vec<(PathBuf, Batch)> {
-    let Some(dir) = dir() else { return Vec::new() };
-    let mut runs: Vec<(PathBuf, Batch)> = fs::read_dir(&dir)
+    dir().map(|dir| runs_in(&dir)).unwrap_or_default()
+}
+
+fn runs_in(dir: &Path) -> Vec<(PathBuf, Batch)> {
+    let mut runs: Vec<(PathBuf, Batch)> = fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
@@ -84,7 +91,7 @@ pub fn list() -> Vec<(PathBuf, Batch)> {
         })
         .filter(|(_, b): &(PathBuf, Batch)| !b.shows.is_empty())
         .collect();
-    runs.sort_by_key(|(_, b)| std::cmp::Reverse(b.created));
+    runs.sort_by_key(|(_, b)| std::cmp::Reverse((b.created, b.nanos)));
     runs
 }
 
@@ -142,7 +149,8 @@ impl Recorder {
     /// A new run, after deleting those older than `KEEP_DAYS`. Without a data folder
     /// nothing is kept (`active` is false).
     pub fn new() -> Recorder {
-        let created = now();
+        let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+        let (created, nanos) = (since.as_secs(), since.subsec_nanos());
         let run = dir().and_then(|dir| {
             for (old, batch) in list() {
                 if created.saturating_sub(batch.created) > KEEP_DAYS * 86400 {
@@ -152,7 +160,7 @@ impl Recorder {
             let run = dir.join(format!("{created}-{}", std::process::id()));
             fs::create_dir_all(&run).ok().map(|()| run)
         });
-        Recorder { run, batch: Batch { created, shows: Vec::new() }, show: None, blobs: 0 }
+        Recorder { run, batch: Batch { created, nanos, shows: Vec::new() }, show: None, blobs: 0 }
     }
 
     pub fn active(&self) -> bool {
@@ -341,5 +349,19 @@ mod tests {
         assert_eq!(date(0), "1970-01-01 00:00:00 UTC");
         assert_eq!(date(1_793_300_000), "2026-10-29 18:53:20 UTC");
         assert_eq!(date(951_782_400), "2000-02-29 00:00:00 UTC");
+    }
+
+    #[test]
+    fn latest_run_first_within_a_second() {
+        let tmp = tempfile::tempdir().unwrap();
+        let show = ShowEntry::default();
+        // Written in this order so that the directory order cannot give the answer.
+        for (name, nanos) in [("100-2", 900_000_000), ("100-1", 100_000_000), ("99-3", 999_999_999)] {
+            let run = tmp.path().join(name);
+            fs::create_dir(&run).unwrap();
+            save(&run, &Batch { created: if name.starts_with("99") { 99 } else { 100 }, nanos, shows: vec![show.clone()] }).unwrap();
+        }
+        let order: Vec<String> = runs_in(tmp.path()).iter().map(|(p, _)| crate::files::file_name(p)).collect();
+        assert_eq!(order, ["100-2", "100-1", "99-3"]);
     }
 }
