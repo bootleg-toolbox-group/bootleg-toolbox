@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -91,8 +91,21 @@ fn runs_in(dir: &Path) -> Vec<(PathBuf, Batch)> {
         })
         .filter(|(_, b): &(PathBuf, Batch)| !b.shows.is_empty())
         .collect();
-    runs.sort_by_key(|(_, b)| std::cmp::Reverse((b.created, b.nanos)));
+    // The folder name last: two older journals of the same second (no nanoseconds) in a
+    // fixed order, whatever order the file system lists them in.
+    runs.sort_by(|(pa, a), (pb, b)| (b.created, b.nanos, pb).cmp(&(a.created, a.nanos, pa)));
     runs
+}
+
+/// A folder of its own for a new run: "<seconds>-<nanoseconds>-<process>", never one that
+/// exists (two runs of one process in the same second would otherwise share it).
+fn new_run(dir: &Path, since: Duration) -> Option<PathBuf> {
+    fs::create_dir_all(dir).ok()?;
+    let base = format!("{}-{:09}-{}", since.as_secs(), since.subsec_nanos(), std::process::id());
+    (0..100).find_map(|i| {
+        let run = dir.join(if i == 0 { base.clone() } else { format!("{base}-{i}") });
+        fs::create_dir(&run).ok().map(|()| run)
+    })
 }
 
 /// Bytes taken by a run.
@@ -107,8 +120,9 @@ pub fn save(run: &Path, batch: &Batch) -> Result<(), String> {
     fs::rename(&tmp, run.join("journal.ron")).map_err(|e| e.to_string())
 }
 
-fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+/// Time since 1970 (UTC).
+fn now() -> Duration {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default()
 }
 
 /// "2026-10-29 18:58:07 UTC".
@@ -128,7 +142,7 @@ pub fn date(secs: u64) -> String {
 
 /// "3 hours ago".
 pub fn age(secs: u64) -> String {
-    let d = now().saturating_sub(secs);
+    let d = now().as_secs().saturating_sub(secs);
     match d {
         0..60 => "just now".into(),
         60..3600 => format!("{} min ago", d / 60),
@@ -149,16 +163,15 @@ impl Recorder {
     /// A new run, after deleting those older than `KEEP_DAYS`. Without a data folder
     /// nothing is kept (`active` is false).
     pub fn new() -> Recorder {
-        let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+        let since = now();
         let (created, nanos) = (since.as_secs(), since.subsec_nanos());
         let run = dir().and_then(|dir| {
-            for (old, batch) in list() {
+            for (old, batch) in runs_in(&dir) {
                 if created.saturating_sub(batch.created) > KEEP_DAYS * 86400 {
                     let _ = fs::remove_dir_all(old);
                 }
             }
-            let run = dir.join(format!("{created}-{}", std::process::id()));
-            fs::create_dir_all(&run).ok().map(|()| run)
+            new_run(&dir, since)
         });
         Recorder { run, batch: Batch { created, nanos, shows: Vec::new() }, show: None, blobs: 0 }
     }
@@ -356,12 +369,22 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let show = ShowEntry::default();
         // Written in this order so that the directory order cannot give the answer.
-        for (name, nanos) in [("100-2", 900_000_000), ("100-1", 100_000_000), ("99-3", 999_999_999)] {
+        // Older journals have no nanoseconds (0): the folder name orders them.
+        for (name, created, nanos) in [("100-2", 100, 900_000_000), ("100-1", 100, 100_000_000), ("99-3", 99, 999_999_999), ("98-1", 98, 0), ("98-2", 98, 0)] {
             let run = tmp.path().join(name);
             fs::create_dir(&run).unwrap();
-            save(&run, &Batch { created: if name.starts_with("99") { 99 } else { 100 }, nanos, shows: vec![show.clone()] }).unwrap();
+            save(&run, &Batch { created, nanos, shows: vec![show.clone()] }).unwrap();
         }
         let order: Vec<String> = runs_in(tmp.path()).iter().map(|(p, _)| crate::files::file_name(p)).collect();
-        assert_eq!(order, ["100-2", "100-1", "99-3"]);
+        assert_eq!(order, ["100-2", "100-1", "99-3", "98-2", "98-1"]);
+    }
+
+    #[test]
+    fn runs_of_one_second_get_their_own_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let since = Duration::new(100, 5);
+        let (a, b) = (new_run(tmp.path(), since).unwrap(), new_run(tmp.path(), since).unwrap());
+        assert_ne!(a, b);
+        assert!(a.is_dir() && b.is_dir());
     }
 }

@@ -65,8 +65,11 @@ strip = true
 winresource = "0.1"
 
 # ape-decoder with Monkey's Audio 3.95-3.98 support (older value coding), see vendor/ape-decoder.
+# symphonia-format-isomp4 that skips the MP4 sync layer descriptor instead of refusing
+# files whose descriptor is not the MP4 one, see vendor/symphonia-format-isomp4.
 [patch.crates-io]
 ape-decoder = { path = "vendor/ape-decoder" }
+symphonia-format-isomp4 = { path = "vendor/symphonia-format-isomp4" }
 
 [dev-dependencies]
 # Property tests (tests/properties.rs), snapshot tests (tests/snapshots.rs).

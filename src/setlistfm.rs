@@ -13,6 +13,32 @@ use serde::Deserialize;
 
 use crate::tagging::same_name;
 
+/// The last line of a setlist file, which tells it from the show's own info file.
+const FOOTER: &str = "Setlist from setlist.fm";
+
+/// Why a search failed; `fatal` when it holds for every show (key refused, daily limit,
+/// stopped), so that a batch stops asking.
+#[derive(Debug)]
+pub struct Failure {
+    pub text: String,
+    pub fatal: bool,
+}
+
+impl Failure {
+    fn show(text: impl Into<String>) -> Failure {
+        Failure { text: text.into(), fatal: false }
+    }
+    fn all(text: impl Into<String>) -> Failure {
+        Failure { text: text.into(), fatal: true }
+    }
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
 const SEARCH: &str = "https://api.setlist.fm/rest/1.0/search/setlists";
 /// setlist.fm allows 2 requests per second: one per second here.
 const DELAY: Duration = Duration::from_secs(1);
@@ -36,17 +62,25 @@ pub struct Show {
 }
 
 impl Show {
-    /// "Venue, City, Country", without the characters file systems refuse.
+    /// "Venue, City, Country" (`file_name` makes it safe for a file name).
     pub fn location(&self) -> String {
-        let parts: Vec<&str> = [&self.venue, &self.city, &self.country].into_iter().map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
-        let text: String = parts.join(", ").chars().map(|c| if "\\/:*?\"<>|".contains(c) || c.is_control() { '-' } else { c }).collect();
-        text.split_whitespace().collect::<Vec<_>>().join(" ").trim_matches([' ', '.']).to_string()
+        let parts: Vec<String> = [&self.venue, &self.city, &self.country]
+            .into_iter()
+            .map(|p| p.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|p| !p.is_empty())
+            .collect();
+        parts.join(", ").trim_matches(['.', ' ']).to_string()
     }
 
-    /// "Artist - YYYY-MM-DD - Venue, City, Country.txt".
+    /// "Artist - YYYY-MM-DD - Venue, City, Country.txt", within the 255 bytes file systems
+    /// allow for a name.
     pub fn file_name(&self) -> String {
-        let artist: String = self.artist.chars().map(|c| if "\\/:*?\"<>|".contains(c) || c.is_control() { '-' } else { c }).collect();
-        format!("{} - {} - {}.txt", artist.trim(), self.date, self.location())
+        let safe = crate::tagging::safe_name;
+        let mut stem = format!("{} - {} - {}", safe(&self.artist), safe(&self.date), safe(&self.location()));
+        while stem.len() > 240 {
+            stem.pop();
+        }
+        format!("{}.txt", stem.trim_end_matches([' ', ',', '-', '.']))
     }
 
     /// The text file: the show, the tour, the numbered songs and where they come from.
@@ -59,7 +93,7 @@ impl Show {
         let width = if self.songs.len() >= 100 { 3 } else { 2 };
         lines.extend(self.songs.iter().enumerate().map(|(i, s)| format!("{:0width$}. {s}", i + 1)));
         lines.push(String::new());
-        lines.push(if self.url.is_empty() { "Setlist from setlist.fm".to_string() } else { format!("Setlist from setlist.fm: {}", self.url) });
+        lines.push(if self.url.is_empty() { FOOTER.to_string() } else { format!("{FOOTER}: {}", self.url) });
         lines.join("\n") + "\n"
     }
 }
@@ -69,8 +103,7 @@ impl Show {
 #[serde(default, rename_all = "camelCase")]
 struct Page {
     setlist: Vec<Setlist>,
-    total: u32,
-    items_per_page: u32,
+    total: usize,
 }
 
 #[derive(Deserialize, Default)]
@@ -118,12 +151,10 @@ struct Set {
 
 impl Setlist {
     fn show(self) -> Show {
-        // "dd-MM-yyyy" -> "yyyy-MM-dd"
-        let d: Vec<&str> = self.event_date.split('-').collect();
-        let date = if d.len() == 3 { format!("{}-{}-{}", d[2], d[1], d[0]) } else { self.event_date.clone() };
         Show {
             artist: self.artist.name.trim().to_string(),
-            date,
+            // "dd-MM-yyyy" -> "yyyy-MM-dd"
+            date: crate::tagging::find_date(&self.event_date).unwrap_or(self.event_date),
             venue: self.venue.name.trim().to_string(),
             city: self.venue.city.name.trim().to_string(),
             country: self.venue.city.country.name.trim().to_string(),
@@ -137,11 +168,15 @@ impl Setlist {
 /// The shows of that artist on that day (YYYY-MM-DD), each venue once (the most complete
 /// setlist when setlist.fm has the show twice). setlist.fm's search also returns other
 /// artists whose name contains the one asked for: only the same name is kept.
-pub fn find(key: &str, artist: &str, date: &str, cancel: &AtomicBool) -> Result<Vec<Show>, String> {
+pub fn find(key: &str, artist: &str, date: &str, cancel: &AtomicBool) -> Result<Vec<Show>, Failure> {
     let all = search(key, artist, date, cancel)?;
     let mut shows: Vec<Show> = Vec::new();
-    for s in all.into_iter().filter(|s| same_name(&s.artist, artist) || same_name(&simple(&s.artist), &simple(artist))) {
-        match shows.iter_mut().find(|o| o.location() == s.location()) {
+    let wanted = simple(artist);
+    for s in all.into_iter().filter(|s| same_name(&s.artist, artist) || simple(&s.artist) == wanted) {
+        // The same show entered twice (one setlist the start of the other) counts once, the
+        // more complete; an early and a late show at one venue stay two.
+        let twice = |o: &Show| o.location() == s.location() && (o.songs.starts_with(&s.songs) || s.songs.starts_with(&o.songs));
+        match shows.iter_mut().find(|o| twice(o)) {
             Some(o) if s.songs.len() > o.songs.len() => *o = s,
             Some(_) => {}
             None => shows.push(s),
@@ -171,33 +206,32 @@ fn simple(name: &str) -> String {
 
 /// Every setlist of that day whose artist matches the name, as setlist.fm gives them.
 /// The answers are kept for the session: asking again costs no request.
-fn search(key: &str, artist: &str, date: &str, cancel: &AtomicBool) -> Result<Vec<Show>, String> {
-    let key = key.trim();
+fn search(key: &str, artist: &str, date: &str, cancel: &AtomicBool) -> Result<Vec<Show>, Failure> {
+    let (key, artist, date) = (key.trim(), artist.trim(), date.trim());
     if key.is_empty() {
-        return Err("no setlist.fm API key (Settings > setlist.fm)".into());
+        return Err(Failure::all("no setlist.fm API key (Settings > setlist.fm)"));
     }
-    if artist.trim().is_empty() {
-        return Err("no artist name (folder name, tags or info file)".into());
+    if artist.is_empty() {
+        return Err(Failure::show("no artist name (folder name, tags or info file)"));
     }
-    let ymd: Vec<&str> = date.trim().split('-').collect();
-    if ymd.len() != 3 || ymd.iter().any(|p| p.is_empty() || !p.chars().all(|c| c.is_ascii_digit())) {
-        return Err(format!("no full date (YYYY-MM-DD) for the show: \"{}\"", date.trim()));
+    if !crate::tagging::full_date(date) {
+        return Err(Failure::show(format!("no full date (YYYY-MM-DD) for the show: \"{date}\"")));
     }
-    let cache_key = (artist.trim().to_lowercase(), date.trim().to_string());
+    let cache_key = (artist.to_lowercase(), date.to_string());
     type Answers = HashMap<(String, String), Vec<Show>>;
     static CACHE: OnceLock<Mutex<Answers>> = OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
     if let Some(shows) = cache.lock().ok().and_then(|c| c.get(&cache_key).cloned()) {
         return Ok(shows);
     }
-    let day = format!("{}-{}-{}", ymd[2], ymd[1], ymd[0]);
+    // setlist.fm wants "dd-MM-yyyy".
+    let day = date.split('-').rev().collect::<Vec<_>>().join("-");
     let mut shows = Vec::new();
     for number in 1..=MAX_PAGES {
-        let Some(page) = request(key, artist.trim(), &day, number, cancel)? else { break };
-        let (total, per_page) = (page.total, page.items_per_page.max(1));
+        let Some(page) = request(key, artist, &day, number, cancel)? else { break };
         let empty = page.setlist.is_empty();
         shows.extend(page.setlist.into_iter().map(Setlist::show));
-        if empty || number * per_page >= total {
+        if empty || shows.len() >= page.total {
             break;
         }
     }
@@ -209,22 +243,18 @@ fn search(key: &str, artist: &str, date: &str, cancel: &AtomicBool) -> Result<Ve
 
 /// One page of results (None: nothing found), retried after "too many requests", server
 /// and network errors.
-fn request(key: &str, artist: &str, day: &str, page: u32, cancel: &AtomicBool) -> Result<Option<Page>, String> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let tls = ureq::tls::TlsConfig::builder().root_certs(ureq::tls::RootCerts::PlatformVerifier).build();
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(20)))
-        .user_agent(format!("bootleg-toolbox/{}", crate::ops::APP_VERSION))
-        .tls_config(tls)
-        .build()
-        .into();
+fn request(key: &str, artist: &str, day: &str, page: u32, cancel: &AtomicBool) -> Result<Option<Page>, Failure> {
+    // One agent for the session (its connection is kept); no redirects, so the API key is
+    // never sent anywhere but to setlist.fm.
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    let agent = AGENT.get_or_init(|| crate::update::agent(Duration::from_secs(20)));
+    let stopped = || Failure::all("stopped");
     // BT_SETLISTFM: another address, for tests.
     let url = std::env::var("BT_SETLISTFM").unwrap_or_else(|_| SEARCH.to_string());
     let mut error = String::new();
     for attempt in 0..=RETRIES {
         if cancel.load(Ordering::Relaxed) {
-            return Err("stopped".into());
+            return Err(stopped());
         }
         pace();
         let mut wait = Duration::from_secs(2 << attempt);
@@ -240,22 +270,22 @@ fn request(key: &str, artist: &str, day: &str, page: u32, cancel: &AtomicBool) -
         match answer {
             Ok(mut response) => match response.status().as_u16() {
                 200 => {
-                    let text = response.body_mut().read_to_string().map_err(|e| format!("cannot read setlist.fm's answer ({e})"))?;
-                    return serde_json::from_str(&text).map(Some).map_err(|e| format!("unexpected answer from setlist.fm ({e})"));
+                    let text = response.body_mut().read_to_string().map_err(|e| Failure::show(format!("cannot read setlist.fm's answer ({e})")))?;
+                    return serde_json::from_str(&text).map(Some).map_err(|e| Failure::show(format!("unexpected answer from setlist.fm ({e})")));
                 }
                 404 => return Ok(None),
-                401 | 403 => return Err("setlist.fm refused the API key (check it in Settings > setlist.fm)".into()),
+                401 | 403 => return Err(Failure::all("setlist.fm refused the API key (check it in Settings > setlist.fm)")),
                 429 => {
                     let after: Option<u64> = response.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse().ok());
                     match after {
-                        Some(s) if s > 60 => return Err("setlist.fm's daily limit for this API key is reached: try again tomorrow".into()),
+                        Some(s) if s > 60 => return Err(Failure::all("setlist.fm's daily limit for this API key is reached: try again tomorrow")),
                         Some(s) => wait = Duration::from_secs(s + 1),
                         None => {}
                     }
                     error = "setlist.fm says too many requests".into();
                 }
                 code @ 500.. => error = format!("setlist.fm server error {code}"),
-                code => return Err(format!("setlist.fm answered {code}")),
+                code => return Err(Failure::show(format!("setlist.fm answered {code}"))),
             },
             Err(e) => error = format!("cannot reach setlist.fm ({e})"),
         }
@@ -263,13 +293,13 @@ fn request(key: &str, artist: &str, day: &str, page: u32, cancel: &AtomicBool) -
             let until = Instant::now() + wait;
             while Instant::now() < until {
                 if cancel.load(Ordering::Relaxed) {
-                    return Err("stopped".into());
+                    return Err(stopped());
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
         }
     }
-    Err(error)
+    Err(Failure::show(error))
 }
 
 /// One request per second at most, whatever asks (several windows, a batch).
@@ -293,8 +323,26 @@ pub fn pick_by_place<'a>(place: &str, shows: &'a [Show]) -> Option<&'a Show> {
     if place.is_empty() {
         return None;
     }
-    let hits: Vec<&Show> = shows.iter().filter(|s| !simple(&s.venue).is_empty() && place.contains(&simple(&s.venue))).collect();
+    let hits: Vec<&Show> = shows
+        .iter()
+        .filter(|s| {
+            let venue = simple(&s.venue);
+            !venue.is_empty() && place.contains(&venue)
+        })
+        .collect();
     if hits.len() == 1 { Some(hits[0]) } else { None }
+}
+
+/// The text of a file written by Get setlist (its last line names setlist.fm).
+pub fn is_setlist_text(text: &str) -> bool {
+    text.lines().rev().find(|l| !l.trim().is_empty()).is_some_and(|l| l.trim_start().starts_with(FOOTER))
+}
+
+/// A file written by Get setlist.
+pub fn is_setlist_file(path: &Path) -> bool {
+    crate::files::ext_lower(path) == "txt"
+        && std::fs::metadata(path).is_ok_and(|m| m.len() < 64 * 1024)
+        && crate::files::read_text(path).is_ok_and(|t| is_setlist_text(&t))
 }
 
 /// A setlist file of that show already in the folder ("Artist - YYYY-MM-DD - ....txt",
@@ -313,9 +361,12 @@ pub fn write(folder: &Path, show: &Show) -> Result<Option<PathBuf>, String> {
     if existing_file(folder, &show.artist, &show.date).is_some() {
         return Ok(None);
     }
-    let path = folder.join(show.file_name());
-    let text = if cfg!(windows) { show.text().replace('\n', "\r\n") } else { show.text() };
-    std::fs::write(&path, text).map_err(|e| format!("cannot write {}: {e}", show.file_name()))?;
+    let (name, mut text) = (show.file_name(), show.text());
+    if cfg!(windows) {
+        text = text.replace('\n', "\r\n");
+    }
+    let path = folder.join(&name);
+    std::fs::write(&path, text).map_err(|e| format!("cannot write {name}: {e}"))?;
     Ok(Some(path))
 }
 
@@ -356,7 +407,9 @@ mod tests {
         assert_eq!(pick_by_place("Movistar Arena, Santiago, Chile", &shows), Some(&shows[0]));
         assert_eq!(pick_by_place("Santiago, Chile", &shows), None);
         let odd = Show { artist: "A/B".into(), date: "2000-01-02".into(), venue: "Club: \"X\"".into(), ..Default::default() };
-        assert_eq!(odd.file_name(), "A-B - 2000-01-02 - Club- -X-.txt");
+        assert_eq!(odd.file_name(), "A-B - 2000-01-02 - Club- X.txt");
+        let long = Show { artist: "Ä".repeat(150), date: "2000-01-02".into(), venue: "V".repeat(150), ..Default::default() };
+        assert!(long.file_name().len() <= 244);
     }
 
     #[test]
@@ -366,5 +419,9 @@ mod tests {
         assert!(existing_file(tmp.path(), "Guns N' Roses", "1991-05-29").is_some());
         assert!(existing_file(tmp.path(), "Guns N' Roses", "1991-05-30").is_none());
         assert!(existing_file(tmp.path(), "Roses", "1991-05-29").is_none());
+        let show = Show { artist: "A".into(), date: "2000-01-02".into(), venue: "V".into(), songs: vec!["S".into()], ..Default::default() };
+        let path = write(tmp.path(), &show).unwrap().unwrap();
+        assert!(is_setlist_file(&path));
+        assert!(!is_setlist_file(&tmp.path().join("Guns N’ Roses - 1991-05-29 - Deer Creek Music Center, Noblesville, United States.txt")));
     }
 }

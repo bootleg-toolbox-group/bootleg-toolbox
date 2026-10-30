@@ -514,7 +514,7 @@ pub fn number_tracks(files: &[PathBuf], titles: &[(Option<u32>, String)]) -> Vec
 }
 
 /// A file name part without the characters file systems refuse (and segue marks).
-fn safe_name(text: &str) -> String {
+pub fn safe_name(text: &str) -> String {
     let mut out: String = text
         .chars()
         .map(|c| if c == ':' || c == '/' || c == '\\' || c == '|' { '-' } else { c })
@@ -951,15 +951,17 @@ pub fn info_files(show: &files::Show) -> Vec<(PathBuf, usize)> {
         candidates = crate::ops::info_candidates(&above).into_iter().filter(|p| p.parent() == Some(above.as_path())).collect();
     }
     let n = show.files.len();
-    let mut found: Vec<(PathBuf, usize)> = candidates
+    let mut found: Vec<(PathBuf, usize, bool)> = candidates
         .into_iter()
         .map(|p| {
-            let titles = files::read_text(&p).map(|t| parse_info(&t, n, None).titles.len()).unwrap_or(0);
-            (p, titles)
+            let text = files::read_text(&p).unwrap_or_default();
+            let titles = parse_info(&text, n, None).titles.len();
+            (p, titles, crate::setlistfm::is_setlist_text(&text))
         })
         .collect();
-    found.sort_by_key(|(_, t)| (*t != n, std::cmp::Reverse(*t)));
-    found
+    // At equal fit, the show's own info file before a setlist file from setlist.fm.
+    found.sort_by_key(|(_, t, setlist)| (*t != n, *setlist, std::cmp::Reverse(*t)));
+    found.into_iter().map(|(p, t, _)| (p, t)).collect()
 }
 
 /// Reads the info file of a show and prepares what will be written.

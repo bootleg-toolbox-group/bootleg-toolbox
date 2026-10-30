@@ -9,6 +9,8 @@ extend-ignore-re = [
 # ID3v2 frame names.
 TPE = "TPE"
 TPOS = "TPOS"
+# MP4 atom name.
+trak = "trak"
 
 [files]
 extend-exclude = [

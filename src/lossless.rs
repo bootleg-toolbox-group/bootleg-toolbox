@@ -905,8 +905,12 @@ fn build_report(title: String, verdict: &Verdict, f: &Facts) -> Report {
         add(
             "Content above 15 kHz",
             format!("{h:.0} dB relative to 1-4 kHz"),
-            "Below about -55 dB an encoder's lowpass shows less, and below about -67 dB there is too little treble to see it at all (common with audience, cassette and FM recordings).",
-            if h < TREBLE_UNCLEAR { Level::Warn } else { Level::Info },
+            if f.mp3_trace.is_some() {
+                "Below about -55 dB an encoder's lowpass shows less, and below about -67 dB there is too little treble to see it at all (common with audience, cassette and FM recordings)."
+            } else {
+                "Below about -60 dB there is too little treble to see an encoder's lowpass (common with audience, cassette and FM recordings)."
+            },
+            if h < if f.mp3_trace.is_some() { TREBLE_UNCLEAR } else { TREBLE_PLAIN } { Level::Warn } else { Level::Info },
         );
     }
     if let Some(h) = f.holes {

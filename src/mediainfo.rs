@@ -107,8 +107,13 @@ pub fn read_file(path: &Path) -> Result<FileInfo, String> {
         Format::WavPack => "WavPack".into(),
         Format::Mp3 => "MPEG Audio Layer 3 (MP3)".into(),
         Format::Mp2 => "MPEG Audio Layer 2 (MP2)".into(),
-        Format::M4a | Format::Mka => {
-            let container = if info.format == Format::M4a { "MPEG-4 (M4A)" } else { "Matroska (MKA)" };
+        Format::Vob => format!("{}, in DVD-Video (VOB)", info.codec.map_or("unknown", audio::Codec::long_name)),
+        Format::M4a | Format::Mp4 | Format::Mka => {
+            let container = match info.format {
+                Format::M4a => "MPEG-4 (M4A)",
+                Format::Mp4 => "MPEG-4 video (MP4), audio track",
+                _ => "Matroska (MKA)",
+            };
             format!("{}, in {container}", info.codec.map_or("unknown", audio::Codec::long_name))
         }
     };
@@ -179,7 +184,8 @@ fn write_file(doc: &mut Doc, f: &FileInfo) {
     doc.line("File size", size(f.bytes));
     doc.line("Duration", i.length());
     if i.seconds() > 0.0 {
-        doc.line("Overall bit rate", kbps(f.bytes as f64 * 8.0 / i.seconds() / 1000.0));
+        let label = if i.format == Format::Mp4 { "Overall bit rate (with the video)" } else { "Overall bit rate" };
+        doc.line(label, kbps(f.bytes as f64 * 8.0 / i.seconds() / 1000.0));
     }
     doc.line("Channels", if i.channels == 1 { "1 channel".to_string() } else { format!("{} channels", i.channels) });
     doc.line("Sampling rate", khz(i.rate));
@@ -216,7 +222,8 @@ pub fn audio_text(show: &Path, files: &[FileInfo], failed: &[(PathBuf, String)])
     doc.line("Total duration", hms(seconds));
     doc.line("Total size", size(bytes));
     if seconds > 0.0 {
-        doc.line("Average bit rate", kbps(bytes as f64 * 8.0 / seconds / 1000.0));
+        let video = files.iter().any(|f| f.info.format == Format::Mp4);
+        doc.line(if video { "Average bit rate (with the video)" } else { "Average bit rate" }, kbps(bytes as f64 * 8.0 / seconds / 1000.0));
     }
     let quality = |i: &AudioInfo| {
         let mut q = format!("{}, {}", khz(i.rate), if i.channels == 1 { "mono".to_string() } else { format!("{} channels", i.channels) });
@@ -403,7 +410,7 @@ fn id3_text(encoding: u8, b: &[u8]) -> String {
 
 // ---------------------------------------------------------------- DVD
 
-fn language_name(code: &str) -> String {
+pub fn language_name(code: &str) -> String {
     let name = match code {
         "en" => "English",
         "fr" => "French",
@@ -560,72 +567,30 @@ fn write_set(doc: &mut Doc, set: &TitleSet) {
     doc.line("Video", parts.join(", "));
 
     // Audio: the IFO gives languages, the streams their bit rates and layouts.
-    let streams = scan.map(|s| s.audio.as_slice()).unwrap_or(&[]);
+    let tracks = dvd::dvd_audio(set);
     let mut audio_kbps = Some(0.0);
     let mut lines = Vec::new();
     let mut lossless = Vec::new();
-    match ifo {
-        Some(i) if !i.audio.is_empty() => {
-            let mut used = Vec::new();
-            for (n, a) in i.audio.iter().enumerate() {
-                // Stream n is substream 0x80 + n (AC-3), 0x88 + n (DTS), 0xA0 + n (LPCM), or
-                // MPEG stream 0xC0 + n; some authoring tools number each kind from 0.
-                let id = match a.coding {
-                    "AC-3" => 0x80,
-                    "DTS" => 0x88,
-                    "LPCM" => 0xa0,
-                    _ => 0xc0,
-                } + n as u8;
-                let es = streams
-                    .iter()
-                    .find(|s| s.id == id)
-                    .or_else(|| streams.iter().find(|s| !used.contains(&s.id) && a.coding.starts_with(s.coding.split(' ').next().unwrap_or(""))));
-                if let Some(s) = es {
-                    used.push(s.id);
-                }
-                let mut p = vec![codec(a.coding)];
-                lossless.push(a.coding == "LPCM");
-                p.push(match es {
-                    Some(s) => channels(&s.channels),
-                    None => plural(a.channels as usize, "channel"),
-                });
-                p.push(khz(es.map_or(a.rate, |s| s.rate)));
-                if let Some(bits) = es.and_then(|s| s.bits).or(a.bits) {
-                    p.push(format!("{bits} bits"));
-                }
-                match es.and_then(|s| s.kbps) {
-                    Some(k) => {
-                        p.push(kbps(k));
-                        audio_kbps = audio_kbps.map(|t| t + k);
-                    }
-                    None => audio_kbps = None,
-                }
-                if !a.language.is_empty() {
-                    p.push(language_name(&a.language));
-                }
-                if !a.purpose.is_empty() {
-                    p.push(a.purpose.into());
-                }
-                lines.push(p.join(", "));
-            }
+    for t in &tracks {
+        let mut p = vec![codec(t.coding), channels(&t.channels), khz(t.rate)];
+        lossless.push(t.lossless());
+        if let Some(bits) = t.bits {
+            p.push(format!("{bits} bits"));
         }
-        _ => {
-            for s in streams {
-                let mut p = vec![codec(s.coding), channels(&s.channels), khz(s.rate)];
-                lossless.push(s.coding == "LPCM");
-                if let Some(bits) = s.bits {
-                    p.push(format!("{bits} bits"));
-                }
-                match s.kbps {
-                    Some(k) => {
-                        p.push(kbps(k));
-                        audio_kbps = audio_kbps.map(|t| t + k);
-                    }
-                    None => audio_kbps = None,
-                }
-                lines.push(p.join(", "));
+        match t.kbps {
+            Some(k) => {
+                p.push(kbps(k));
+                audio_kbps = audio_kbps.map(|a| a + k);
             }
+            None => audio_kbps = None,
         }
+        if !t.language.is_empty() {
+            p.push(language_name(&t.language));
+        }
+        if !t.purpose.is_empty() {
+            p.push(t.purpose.into());
+        }
+        lines.push(p.join(", "));
     }
     // The video's share: what the audio leaves of the overall rate (packets cost ~2%).
     if let (Some(o), Some(a)) = (overall, audio_kbps) {

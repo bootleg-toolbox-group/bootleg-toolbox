@@ -20,6 +20,7 @@ members = ["."]
 # The same modified ape-decoder as the program (see ../Cargo.toml).
 [patch.crates-io]
 ape-decoder = { path = "../vendor/ape-decoder" }
+symphonia-format-isomp4 = { path = "../vendor/symphonia-format-isomp4" }
 
 [profile.release]
 debug = 1

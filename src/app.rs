@@ -47,18 +47,10 @@ const COMPONENTS: &[(&str, &str, &str)] = &[
     ("Shorten decoder", "SHN decoding (written for Bootleg Toolbox)", "GPL-3.0"),
 ];
 
-const DVD_TIP: &str = "Pick a DVD folder (VIDEO_TS, or the folder above it) for a technical summary: video standard, resolution, aspect ratio, bit rates, audio tracks, subtitles, titles and chapters. Dropping a DVD folder on the window does the same.";
+const DVD_TIP: &str = "Add a DVD folder (VIDEO_TS, or the folder above it) to the list: one row per title, with its audio tracks and whether one is lossless (LPCM). Media info (Ctrl+I) then gives its technical summary: video standard, resolution, aspect ratio, bit rates, audio tracks, subtitles, titles and chapters. Dropping a DVD folder on the window does the same.";
 
 /// The result of an update check: (asked from the Help menu, newer version or error).
 type UpdateCheck = (bool, Result<Option<String>, String>);
-
-/// The name a DVD is known by: the folder above VIDEO_TS, else its own name.
-fn dvd_name(path: &Path) -> String {
-    match path.parent() {
-        Some(parent) if file_name(path).eq_ignore_ascii_case("VIDEO_TS") => file_name(parent),
-        _ => file_name(path),
-    }
-}
 
 const INFO_TIP: &str = "Copy the show's info file (.txt or .nfo, whatever its name) to the clipboard, for the upload forms. With several text files, a window lets you pick the right one.";
 
@@ -77,6 +69,10 @@ const TAG_TIP: &str = "Read the artist, date, place and titles from the show's i
 const SETLIST_TIP: &str = "Get the setlist of each show from setlist.fm (artist and date from the info file, the folder name or the tags) \
                            and write it in its folder as \"Artist - YYYY-MM-DD - Venue, City, Country.txt\": tour and numbered songs, \
                            ready for Tag and rename. Needs your own setlist.fm API key (Settings).";
+
+const EXTRACT_TIP: &str = "Extract one audio track of each selected DVD title, from all its VOB files, to a single file in the DVD's folder: \
+                           FLAC for an LPCM track (lossless, bit for bit, checked), the original stream (.ac3, .dts, .mp2) for a lossy one, \
+                           unchanged. A window lets you pick the track when there are several.";
 
 const UNDO_TIP: &str = "Give shows changed by Tag and rename back their former tags, names and checksum files.";
 
@@ -100,6 +96,9 @@ struct TagDialog {
     batch_row: Option<usize>,
     /// setlist.fm: the search under way, the shows to choose from, what went wrong.
     setlist_search: Option<SetlistSearch>,
+    /// The artist and date asked for, and the flag that stops the search.
+    setlist_asked: (String, String),
+    setlist_cancel: Arc<AtomicBool>,
     setlist_shows: Vec<crate::setlistfm::Show>,
     setlist_note: Option<(String, Level)>,
 }
@@ -146,6 +145,8 @@ impl TagDialog {
             rename: opt.tag_rename,
             batch_row: None,
             setlist_search: None,
+            setlist_asked: Default::default(),
+            setlist_cancel: Default::default(),
             setlist_shows: Vec::new(),
             setlist_note: None,
         })
@@ -190,6 +191,19 @@ impl TagDialog {
 
 /// The answer of a setlist.fm search under way (shared: the plans are cloned).
 type SetlistSearch = Arc<Mutex<Receiver<Result<Vec<crate::setlistfm::Show>, String>>>>;
+
+/// "Extract DVD audio": the titles of the selection, with their audio tracks
+/// (summary, lossless) and the one picked.
+struct ExtractDialog {
+    titles: Vec<ExtractTitle>,
+}
+
+struct ExtractTitle {
+    vob: PathBuf,
+    /// Each track's summary, and whether it is lossless.
+    tracks: Vec<(String, bool)>,
+    pick: usize,
+}
 
 /// setlist.fm has several shows of the artist that day: the one to write, or none.
 struct SetlistChoice {
@@ -395,6 +409,7 @@ enum Action {
     CopyInfo,
     TagInfo,
     Setlist,
+    ExtractDvd,
     /// Pick .torrent files, then check the selection against them.
     TorrentCheck,
     Remove,
@@ -448,6 +463,7 @@ pub struct App {
     tag_dialog: Option<TagDialog>,
     /// Shows waiting for the user to choose their setlist.fm show.
     setlist_choices: Vec<SetlistChoice>,
+    extract_dialog: Option<ExtractDialog>,
     undo_dialog: Option<UndoDialog>,
     tag_batch: Option<TagBatch>,
     /// The saved "Always on top" choice was applied to the window.
@@ -475,8 +491,6 @@ pub struct App {
     float_dialog: Option<FloatPending>,
     /// .torrent files dropped while something ran: checked when it ends.
     pending_torrents: Option<Vec<PathBuf>>,
-    /// DVDs added (they are not shown in the list): their media info is read when free.
-    pending_dvds: Vec<PathBuf>,
     /// Open media info windows: (show or DVD name, text).
     media_windows: Vec<(String, String)>,
     after_flac: Option<AfterFlac>,
@@ -631,6 +645,7 @@ impl App {
             info_choice: None,
             tag_dialog: None,
             setlist_choices: Vec::new(),
+            extract_dialog: None,
             undo_dialog: None,
             tag_batch: None,
             window_level_set: false,
@@ -647,7 +662,6 @@ impl App {
             float_pending: None,
             float_dialog: None,
             pending_torrents: None,
-            pending_dvds: Vec::new(),
             media_windows: Vec::new(),
             after_flac: None,
             clipboard: None,
@@ -762,38 +776,14 @@ impl App {
             self.flash("Wait for the current task to finish.");
             return;
         }
-        // DVDs open their media info instead of joining the list; a drop of DVDs only
-        // leaves the list as it is.
-        let mut dvds = Vec::new();
-        let mut audio = Vec::new();
-        for p in paths {
-            let found = crate::dvd::find(&p);
-            if found.is_empty() {
-                audio.push(p);
-            } else {
-                if !scan_paths(std::slice::from_ref(&p), &HashSet::new()).is_empty() {
-                    audio.push(p);
-                }
-                dvds.extend(found);
-            }
-        }
-        if !dvds.is_empty() {
-            const MAX: usize = 4;
-            if dvds.len() > MAX {
-                self.log(format!("{} DVDs found: media info for the first {MAX} only (add the others one by one).", dvds.len()), Level::Warn);
-                dvds.truncate(MAX);
-            }
-            self.log(format!("DVD found: {} (DVDs are not added to the list; their media info opens in a window).", dvds.iter().map(|d| dvd_name(d)).collect::<Vec<_>>().join(", ")), Level::Info);
-            self.pending_dvds.extend(dvds);
-        }
-        if audio.is_empty() {
-            self.start_pending_dvds();
+        // DVDs join the list like the shows (one row per title); Media info describes them.
+        if paths.is_empty() {
             return;
         }
         if !keep {
             self.clear_list();
         }
-        for p in audio {
+        for p in paths {
             let p = std::path::absolute(&p).unwrap_or(p);
             self.excluded.retain(|e| e != &p && !e.starts_with(&p));
             if !self.roots.contains(&p) {
@@ -802,7 +792,6 @@ impl App {
         }
         self.rebuild();
         self.auto_details();
-        self.start_pending_dvds();
     }
 
     /// Asks GitHub for the latest release, in the background.
@@ -831,13 +820,6 @@ impl App {
             Err(e) if manual => self.log(format!("Could not check for updates: {e}."), Level::Warn),
             // The automatic check stays silent when there is nothing to say.
             _ => {}
-        }
-    }
-
-    fn start_pending_dvds(&mut self) {
-        if self.running.is_none() && !self.pending_dvds.is_empty() {
-            let dvds = std::mem::take(&mut self.pending_dvds);
-            self.start(Op::MediaInfo(dvds), Vec::new(), Vec::new(), false);
         }
     }
 
@@ -872,7 +854,7 @@ impl App {
                 }
             }
             Dialog::AddFiles => {
-                if let Some(files) = file_dialog(self.parent).add_filter("Audio", &["flac", "wav", "ape", "shn", "wv", "mp3", "mp2", "m4a", "mka"]).pick_files() {
+                if let Some(files) = file_dialog(self.parent).add_filter("Audio", &["flac", "wav", "ape", "shn", "wv", "mp3", "mp2", "m4a", "mka", "mp4"]).pick_files() {
                     self.add_paths(files, true);
                 }
             }
@@ -1261,7 +1243,6 @@ impl App {
                     self.run_on_selection(Op::TorrentCheck(torrents));
                 }
             }
-            self.start_pending_dvds();
         }
     }
 
@@ -1614,6 +1595,10 @@ impl App {
         if let Some(rx) = &d.setlist_search {
             let answer = rx.lock().map(|rx| rx.try_recv()).unwrap_or(Err(mpsc::TryRecvError::Disconnected));
             match answer {
+                Ok(_) if d.setlist_asked != (d.draft.artist.trim().to_string(), d.draft.date.trim().to_string()) => {
+                    d.setlist_search = None;
+                    d.setlist_note = Some(("The artist or the date changed while setlist.fm was asked: ask again.".into(), Level::Warn));
+                }
                 Ok(answer) => {
                     d.setlist_search = None;
                     match answer {
@@ -1865,9 +1850,11 @@ impl App {
         if ask_setlist {
             let (tx, rx) = mpsc::channel();
             let (artist, date) = (d.draft.artist.trim().to_string(), d.draft.date.trim().to_string());
+            d.setlist_asked = (artist.clone(), date.clone());
+            d.setlist_cancel = Arc::new(AtomicBool::new(false));
+            let cancel = d.setlist_cancel.clone();
             std::thread::spawn(move || {
-                let never = AtomicBool::new(false);
-                let _ = tx.send(crate::setlistfm::find(&setlist_key, &artist, &date, &never));
+                let _ = tx.send(crate::setlistfm::find(&setlist_key, &artist, &date, &cancel).map_err(|e| e.text));
             });
             d.setlist_search = Some(Arc::new(Mutex::new(rx)));
             d.setlist_shows.clear();
@@ -1894,10 +1881,14 @@ impl App {
                 self.review_next(Some(i));
             }
         } else if apply {
+            d.setlist_cancel.store(true, Ordering::SeqCst);
             let job = d.job(scheme);
             self.start(Op::Tag(vec![job]), vec![d.show.clone()], d.show.files.clone(), false);
         } else if open && !cancel {
             self.tag_dialog = Some(d);
+        } else {
+            // Closed: a setlist.fm search still under way stops.
+            d.setlist_cancel.store(true, Ordering::SeqCst);
         }
     }
 
@@ -1948,6 +1939,65 @@ impl App {
             }
         } else if close || !open {
             self.setlist_choices.clear();
+        }
+    }
+
+    /// The DVD titles of the selection and their tracks; the first lossless track picked.
+    fn open_extract_dialog(&mut self) {
+        let (_, files) = self.selection();
+        let titles: Vec<ExtractTitle> = files
+            .into_iter()
+            .filter(|f| crate::audio::Format::from_path(f) == Some(crate::audio::Format::Vob))
+            .map(|vob| {
+                let tracks: Vec<(String, bool)> = crate::dvd::dvd_audio(&crate::dvd::title_of(&vob)).iter().map(|t| (t.summary(), t.lossless())).collect();
+                let pick = tracks.iter().position(|t| t.1).unwrap_or(0);
+                ExtractTitle { vob, tracks, pick }
+            })
+            .filter(|t| !t.tracks.is_empty())
+            .collect();
+        if titles.is_empty() {
+            self.flash("Select DVD titles (add a DVD folder to the list first): no DVD audio in the selection.");
+            return;
+        }
+        self.extract_dialog = Some(ExtractDialog { titles });
+    }
+
+    fn extract_window(&mut self, ctx: &egui::Context) {
+        let Some(mut d) = self.extract_dialog.take() else { return };
+        let (mut open, mut go, mut close) = (true, false, false);
+        let busy = self.running.is_some();
+        egui::Window::new("Extract DVD audio").collapsible(false).default_size([720.0, 380.0]).open(&mut open).show(ctx, |ui| {
+            ui.label("One file per title, in the DVD's folder, from all the VOB files of the title. An LPCM track becomes a FLAC file, \
+                      bit for bit; a lossy one (AC-3, DTS, MPEG) is saved as its original stream, unchanged: converting it would only lose more.");
+            ui.add_space(4.0);
+            egui::TopBottomPanel::bottom("extract_buttons").show_inside(ui, |ui| {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    go = ui.add_enabled(!busy, egui::Button::new(RichText::new("Extract").strong())).clicked();
+                    close = ui.button("Cancel").clicked();
+                    if busy {
+                        ui.label(RichText::new("Wait for the running task to finish.").weak());
+                    }
+                });
+            });
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                for t in d.titles.iter_mut() {
+                    let root = crate::dvd::output_dir(&t.vob);
+                    ui.label(RichText::new(format!("{}   ({})", crate::files::show_name(&root), file_name(&t.vob))).strong());
+                    for (i, (summary, lossless)) in t.tracks.iter().enumerate() {
+                        let out = if *lossless { "FLAC" } else { "original stream" };
+                        ui.radio_value(&mut t.pick, i, format!("Audio {}: {summary}  →  {out}", i + 1));
+                    }
+                    ui.add_space(6.0);
+                }
+            });
+        });
+        if go {
+            let tracks = d.titles.iter().map(|t| (t.vob.clone(), t.pick)).collect();
+            let files: Vec<PathBuf> = d.titles.iter().map(|t| t.vob.clone()).collect();
+            self.start(Op::ExtractDvd(tracks), Vec::new(), files, false);
+        } else if open && !close {
+            self.extract_dialog = Some(d);
         }
     }
 
@@ -2076,7 +2126,7 @@ impl App {
                         ui.close_menu();
                         self.ask(Dialog::AddFiles);
                     }
-                    if ui.add_enabled(!busy, egui::Button::new("DVD media info...")).on_hover_text(DVD_TIP).clicked() {
+                    if ui.add_enabled(!busy, egui::Button::new("Add DVD...")).on_hover_text(DVD_TIP).clicked() {
                         ui.close_menu();
                         self.pick_dvd();
                     }
@@ -2204,7 +2254,7 @@ impl App {
                             ui.close_menu();
                             self.ask(Dialog::AddFiles);
                         }
-                        if ui.button("📀 DVD media info...").on_hover_text(DVD_TIP).clicked() {
+                        if ui.button("📀 Add DVD...").on_hover_text(DVD_TIP).clicked() {
                             ui.close_menu();
                             self.pick_dvd();
                         }
@@ -2229,7 +2279,7 @@ impl App {
                             ("⏱ Speed?", "Ctrl+P", Op::Speed, format!("Estimate whether the tape of {scope} runs too fast or too slow, and the correction to apply.\nThe verdict goes to the Speed column; click it for the full analysis.")),
                             ("📊 Spectrogram", "F9", Op::Spectrogram, format!("Show the spectrogram of the first files of {scope}, up to 4, to see lossy sources for yourself")),
                             ("ℹ Show details", "F8", Op::Details { verbose: true }, format!("Read the format, length and SBEs of {scope} again, and list them in the log")),
-                            ("📋 Media info", "Ctrl+I", Op::MediaInfo(Vec::new()), format!("A technical summary of {scope} (format, encoder, length, bit rate, tags), as text to copy.\nFor a DVD, add its folder: the summary opens by itself.")),
+                            ("📋 Media info", "Ctrl+I", Op::MediaInfo(Vec::new()), format!("A technical summary of {scope} (format, encoder, length, bit rate, tags; for a DVD title, the whole DVD: video, audio tracks, subtitles, titles and chapters), as text to copy.")),
                         ];
                         for (i, (label, key, op, tip)) in items.into_iter().enumerate() {
                             if i == 4 {
@@ -2306,6 +2356,7 @@ impl App {
                         ui.separator();
                         tag_button(ui, false, actions);
                         setlist_button(ui, false, actions);
+                        extract_button(ui, false, actions);
                     }))
                     .response
                     .on_hover_text(format!("Convert {scope} to FLAC (each file is decoded again and checked) or to WAV, make an MP3 copy of the shows in a separate folder, or fix SBEs. The originals are kept."));
@@ -2705,6 +2756,10 @@ impl App {
                 Col::Format => {
                     let format = match (self.opt.compact, info) {
                         (true, Some(i)) => i.label(),
+                        // A container: what it holds, and whether that loses information.
+                        (false, Some(i)) if i.format.container() && i.codec.is_some() => {
+                            format!("{} · {} ({})", i.format.name(), i.name(), if i.lossy() { "lossy" } else { "lossless" })
+                        }
                         _ => crate::audio::Format::from_path(path).map(|f| f.name()).unwrap_or("").to_string(),
                     };
                     responses.push(row.col(|ui| { ui.label(format); }).1);
@@ -2799,6 +2854,7 @@ impl App {
                 Action::CopyFfp => self.copy_ffp(ctx),
                 Action::CopyInfo => self.copy_info(ctx),
                 Action::TagInfo => self.open_tag_dialog(),
+                Action::ExtractDvd => self.open_extract_dialog(),
                 Action::Setlist => {
                     if self.opt.setlistfm_key.trim().is_empty() {
                         self.flash("Enter your setlist.fm API key in Settings first (a free key, from setlist.fm).");
@@ -3676,6 +3732,14 @@ fn tag_button(ui: &mut egui::Ui, disabled: bool, actions: &mut Vec<Action>) {
     }
 }
 
+/// "Extract DVD audio...": one track of each DVD title to one file.
+fn extract_button(ui: &mut egui::Ui, disabled: bool, actions: &mut Vec<Action>) {
+    if ui.add_enabled(!disabled, egui::Button::new("📀 Extract DVD audio...")).on_hover_text(EXTRACT_TIP).clicked() {
+        ui.close_menu();
+        actions.push(Action::ExtractDvd);
+    }
+}
+
 /// "Get setlist from setlist.fm": a text file with the setlist in each show folder.
 fn setlist_button(ui: &mut egui::Ui, disabled: bool, actions: &mut Vec<Action>) {
     if ui.add_enabled(!disabled, egui::Button::new("📝 Get setlist from setlist.fm")).on_hover_text(SETLIST_TIP).clicked() {
@@ -3741,6 +3805,7 @@ fn ops_menu(ui: &mut egui::Ui, disabled: bool, flac_level: u8, trackers: &[(Stri
     clean_wav_button(ui, disabled, actions);
     tag_button(ui, disabled, actions);
     setlist_button(ui, disabled, actions);
+    extract_button(ui, disabled, actions);
     ui.separator();
     if ui.add_enabled(!disabled, egui::Button::new("📊 Spectrogram").shortcut_text("F9")).clicked() {
         ui.close_menu();
@@ -3809,6 +3874,7 @@ impl eframe::App for App {
         self.tag_window(ctx);
         self.undo_window(ctx);
         self.setlist_window(ctx);
+        self.extract_window(ctx);
         self.float_window(ctx);
         self.after_flac_window(ctx);
         self.spectrogram_windows(ctx);

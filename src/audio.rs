@@ -32,7 +32,12 @@ pub enum Format {
     Mp2,
     /// Containers: what they hold (AAC, ALAC...) is in `AudioInfo::codec`.
     M4a,
+    /// MPEG-4 video files: their audio track only (concert videos).
+    Mp4,
     Mka,
+    /// DVD-Video: one title (its first VOB stands for the title set), described from its
+    /// IFO and stream headers; the audio is not decoded.
+    Vob,
 }
 
 impl Format {
@@ -47,6 +52,8 @@ impl Format {
             "mp3" => Some(Format::Mp3),
             "mp2" => Some(Format::Mp2),
             "m4a" => Some(Format::M4a),
+            "mp4" => Some(Format::Mp4),
+            "vob" => Some(Format::Vob),
             "mka" => Some(Format::Mka),
             _ => None,
         }
@@ -62,6 +69,8 @@ impl Format {
             Format::Mp3 => "MP3",
             Format::Mp2 => "MP2",
             Format::M4a => "M4A",
+            Format::Mp4 => "MP4",
+            Format::Vob => "VOB",
             Format::Mka => "MKA",
         }
     }
@@ -77,7 +86,7 @@ impl Format {
     }
 
     pub fn container(self) -> bool {
-        matches!(self, Format::M4a | Format::Mka)
+        matches!(self, Format::M4a | Format::Mp4 | Format::Mka | Format::Vob)
     }
 }
 
@@ -91,6 +100,10 @@ pub enum Codec {
     Mp2,
     Vorbis,
     Pcm,
+    /// DVD audio.
+    Ac3,
+    Dts,
+    Lpcm,
 }
 
 impl Codec {
@@ -118,6 +131,9 @@ impl Codec {
             Codec::Mp2 => "MP2",
             Codec::Vorbis => "Vorbis",
             Codec::Pcm => "PCM",
+            Codec::Ac3 => "AC-3",
+            Codec::Dts => "DTS",
+            Codec::Lpcm => "LPCM",
         }
     }
 
@@ -131,11 +147,25 @@ impl Codec {
             Codec::Mp2 => "MPEG Audio Layer 2 (MP2)",
             Codec::Vorbis => "Vorbis",
             Codec::Pcm => "PCM (uncompressed)",
+            Codec::Ac3 => "AC-3 (Dolby Digital)",
+            Codec::Dts => "DTS",
+            Codec::Lpcm => "LPCM (uncompressed PCM)",
         }
     }
 
+    /// A DVD's coding name ("AC-3", "MPEG Audio Layer 2"...).
+    pub fn from_dvd(coding: &str) -> Option<Codec> {
+        Some(match coding {
+            "AC-3" => Codec::Ac3,
+            "DTS" => Codec::Dts,
+            "LPCM" => Codec::Lpcm,
+            c if c.starts_with("MPEG") => Codec::Mp2,
+            _ => return None,
+        })
+    }
+
     pub fn lossy(self) -> bool {
-        matches!(self, Codec::Aac | Codec::Mp3 | Codec::Mp2 | Codec::Vorbis)
+        matches!(self, Codec::Aac | Codec::Mp3 | Codec::Mp2 | Codec::Vorbis | Codec::Ac3 | Codec::Dts)
     }
 }
 
@@ -243,7 +273,23 @@ pub fn probe(path: &Path) -> Result<AudioInfo, String> {
 }
 
 /// As `probe`, the format given rather than taken from the extension (".part" files).
+/// A header announcing an impossible sample rate is refused here, before anything is
+/// decoded (a damaged 79-byte APE file claimed 855 MHz and 18 million samples).
 pub fn probe_as(path: &Path, format: Option<Format>) -> Result<AudioInfo, String> {
+    let info = probe_header(path, format)?;
+    if !(1..=MAX_RATE).contains(&info.rate) {
+        return Err(format!("damaged header: sample rate {} Hz", info.rate));
+    }
+    Ok(info)
+}
+
+/// What the audio operations say of a DVD title.
+pub const DVD_NOT_DECODED: &str = "DVD title: its audio is not decoded here (Media info describes its tracks)";
+
+/// The highest sample rate of real audio files (DXD is 705.6 and 768 kHz).
+pub const MAX_RATE: u32 = 768_000;
+
+fn probe_header(path: &Path, format: Option<Format>) -> Result<AudioInfo, String> {
     match format {
         Some(Format::Flac) => probe_flac(path),
         Some(Format::Shn) => crate::shn::probe(path).map(|h| AudioInfo {
@@ -258,7 +304,8 @@ pub fn probe_as(path: &Path, format: Option<Format>) -> Result<AudioInfo, String
         }),
         Some(Format::Wav) => probe_wav(path).map(|(info, _, _)| info),
         Some(f @ (Format::Mp3 | Format::Mp2)) => probe_mpa(path, f),
-        Some(f @ (Format::M4a | Format::Mka)) => probe_container(path, f),
+        Some(f @ (Format::M4a | Format::Mp4 | Format::Mka)) => probe_container(path, f),
+        Some(Format::Vob) => crate::dvd::probe_title(path),
         Some(Format::Ape) => {
             let decoder = open_ape(path)?;
             let i = decoder.info();
@@ -513,7 +560,8 @@ pub fn read_pcm_as(
         Some(Format::Ape) => decode_ape(path, cancel, sink),
         Some(Format::WavPack) => crate::wv::decode(path, cancel, sink),
         Some(f @ (Format::Mp3 | Format::Mp2)) => decode_mpa(path, f, cancel, sink),
-        Some(f @ (Format::M4a | Format::Mka)) => decode_container(path, f, cancel, sink),
+        Some(f @ (Format::M4a | Format::Mp4 | Format::Mka)) => decode_container(path, f, cancel, sink),
+        Some(Format::Vob) => Err(DVD_NOT_DECODED.into()),
         None => Err("not an audio file".into()),
     }
 }
@@ -654,7 +702,7 @@ fn probe_for(format: Format) -> &'static symphonia::core::probe::Probe {
     });
     match format {
         Format::Mp3 | Format::Mp2 => &probes[1],
-        Format::M4a => &probes[2],
+        Format::M4a | Format::Mp4 => &probes[2],
         Format::Mka => &probes[3],
         _ => &probes[0],
     }
@@ -731,7 +779,7 @@ fn open_container(
     let file = File::open(path).map_err(io_err)?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
-    hint.with_extension(if format == Format::M4a { "m4a" } else { "mka" });
+    hint.with_extension(if format == Format::Mka { "mka" } else { "m4a" });
     let options = FormatOptions { enable_gapless: true, ..Default::default() };
     let reader = probe_for(format)
         .format(&hint, mss, &options, &MetadataOptions::default())
@@ -868,7 +916,7 @@ pub fn source_tags(path: &Path) -> Vec<(String, String)> {
     match Format::from_path(path) {
         Some(Format::Flac) => return flac_tags(path).unwrap_or_default(),
         Some(Format::Ape | Format::WavPack) => {}
-        Some(f @ (Format::M4a | Format::Mka)) => return container_tags(path, f),
+        Some(f @ (Format::M4a | Format::Mp4 | Format::Mka)) => return container_tags(path, f),
         _ => return Vec::new(),
     }
     let Ok(mut file) = File::open(path) else { return Vec::new() };

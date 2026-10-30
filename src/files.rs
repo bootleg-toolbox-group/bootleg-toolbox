@@ -134,6 +134,12 @@ fn disc_dir_re() -> &'static Regex {
 /// CD1/CD2/Set 1/A/B sub-folders belong to the show folder above them.
 fn show_root_for(dir: &Path, top: Option<&Path>) -> PathBuf {
     let name = file_name(dir);
+    // A DVD's VIDEO_TS folder: the DVD is the folder above (itself maybe "DVD1" of a show).
+    if name.eq_ignore_ascii_case("VIDEO_TS") {
+        if let Some(parent) = dir.parent() {
+            return show_root_for(parent, top);
+        }
+    }
     if top != Some(dir) && disc_dir_re().is_match(&name) {
         if let Some(parent) = dir.parent() {
             return parent.to_path_buf();
@@ -159,7 +165,7 @@ fn walk(dir: &Path, top: &Path, excluded: &HashSet<PathBuf>, shows: &mut BTreeMa
         let Ok(kind) = entry.file_type() else { continue };
         if kind.is_dir() {
             subdirs.push(path);
-        } else if Format::from_path(&path).is_some() {
+        } else if Format::from_path(&path).is_some_and(|f| f != Format::Vob || crate::dvd::title_vob(&path)) {
             audio.push(path);
         }
     }
@@ -196,6 +202,14 @@ pub fn scan_paths(paths: &[PathBuf], excluded: &HashSet<PathBuf>) -> Vec<Show> {
     }
     let mut list: Vec<Show> = shows
         .into_iter()
+        .map(|(root, mut files)| {
+            // A video beside the audio of a show is a bonus, not a track: MP4 files count
+            // only in a show made of them (a concert video).
+            if files.iter().any(|f| Format::from_path(f) != Some(Format::Mp4)) {
+                files.retain(|f| Format::from_path(f) != Some(Format::Mp4));
+            }
+            (root, files)
+        })
         .filter(|(_, files)| !files.is_empty())
         .map(|(root, mut files)| {
             files.sort_by(|a, b| natural_path_cmp(a, b));
@@ -327,6 +341,36 @@ pub fn resolve_entry(base: &Path, name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dvd_titles_join_their_show() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ts = tmp.path().join("Band - 1990-01-01 (DVD)").join("VIDEO_TS");
+        fs::create_dir_all(&ts).unwrap();
+        for name in ["VIDEO_TS.VOB", "VIDEO_TS.IFO", "VTS_01_0.VOB", "VTS_01_0.IFO", "VTS_01_1.VOB", "VTS_01_2.VOB", "VTS_02_1.VOB"] {
+            fs::write(ts.join(name), b"x").unwrap();
+        }
+        let shows = scan_paths(&[tmp.path().to_path_buf()], &HashSet::new());
+        assert_eq!(shows.len(), 1);
+        assert_eq!(file_name(&shows[0].root), "Band - 1990-01-01 (DVD)");
+        let names: Vec<String> = shows[0].files.iter().map(|f| file_name(f)).collect();
+        assert_eq!(names, ["VTS_01_1.VOB", "VTS_02_1.VOB"]);
+    }
+
+    #[test]
+    fn videos_are_tracks_only_on_their_own() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (audio, video) = (tmp.path().join("Band - 1990-01-01"), tmp.path().join("Band - 1991-01-01 (video)"));
+        for (dir, names) in [(&audio, &["01 - Intro.flac", "bonus.mp4"][..]), (&video, &["Band 1991.mp4"][..])] {
+            fs::create_dir(dir).unwrap();
+            for name in names {
+                fs::write(dir.join(name), b"x").unwrap();
+            }
+        }
+        let shows = scan_paths(&[tmp.path().to_path_buf()], &HashSet::new());
+        let names: Vec<Vec<String>> = shows.iter().map(|s| s.files.iter().map(|f| file_name(f)).collect()).collect();
+        assert_eq!(names, [vec!["01 - Intro.flac"], vec!["Band 1991.mp4"]]);
+    }
 
     #[test]
     fn show_names() {

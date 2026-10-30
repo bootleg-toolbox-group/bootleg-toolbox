@@ -27,6 +27,17 @@ built from a modified copy in [vendor/ape-decoder](vendor/ape-decoder), with its
 files. The change adds the value coding of Monkey's Audio 3.95 to 3.98 files, which the
 original decodes as if they were 3.99 and later; it is listed in its CHANGELOG.md.
 
+## symphonia-format-isomp4 (MP4 and M4A reader), modified
+
+The `symphonia-format-isomp4` crate 0.5.5 (MPL-2.0, https://crates.io/crates/symphonia-format-isomp4,
+part of Symphonia) is built from a modified copy in
+[vendor/symphonia-format-isomp4](vendor/symphonia-format-isomp4); each change is marked
+"Bootleg Toolbox" in the source. The changes: files whose sync layer descriptor is not the
+MP4 one are read (the descriptor does not matter for decoding); an atom must fit in its
+parent and a table in its atom, and an audio packet is at most 64 MB, so that a damaged file
+cannot make the reader ask for gigabytes of memory; the length of a track is that of its
+sample table, not the media header's (longer in some videos). The MPL-2.0 text is below.
+
 ## MP3 and AAC transcoding detectors (Lossless?)
 
 The search for MP3 and AAC coding traces in `src/mp3trace.rs` and `src/aactrace.rs` is a
@@ -11395,7 +11406,7 @@ THE SOFTWARE.
 ### Mozilla Public License 2.0
 <a id="MPL-2.0"></a>
 
-symphonia-bundle-flac 0.5.5, symphonia-bundle-mp3 0.5.5, symphonia-codec-aac 0.5.5, symphonia-codec-alac 0.5.5, symphonia-codec-pcm 0.5.5, symphonia-codec-vorbis 0.5.5, symphonia-core 0.5.5, symphonia-format-isomp4 0.5.5, symphonia-format-mkv 0.5.5, symphonia-format-riff 0.5.5, symphonia-metadata 0.5.5, symphonia-utils-xiph 0.5.5, symphonia 0.5.5
+symphonia-format-isomp4 0.5.5, symphonia-bundle-flac 0.5.5, symphonia-bundle-mp3 0.5.5, symphonia-codec-aac 0.5.5, symphonia-codec-alac 0.5.5, symphonia-codec-pcm 0.5.5, symphonia-codec-vorbis 0.5.5, symphonia-core 0.5.5, symphonia-format-mkv 0.5.5, symphonia-format-riff 0.5.5, symphonia-metadata 0.5.5, symphonia-utils-xiph 0.5.5, symphonia 0.5.5
 
 ```
 Mozilla Public License Version 2.0

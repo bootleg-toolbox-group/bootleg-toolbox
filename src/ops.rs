@@ -250,6 +250,9 @@ pub enum Op {
     Tag(Vec<crate::tagging::TagJob>),
     /// The setlist of each show from setlist.fm, written to a text file in its folder.
     Setlist,
+    /// One audio track of DVD titles (the title's first VOB, the track's index in its
+    /// list) to one file beside the DVD: FLAC for LPCM, the stream as it is otherwise.
+    ExtractDvd(Vec<(PathBuf, usize)>),
     /// Gives these shows of an undo journal run back as they were.
     Rollback { run: PathBuf, shows: Vec<usize> },
     /// Follow-up of a conversion to FLAC (the choices of its window).
@@ -298,6 +301,7 @@ impl Op {
             Op::MediaInfo(_) => "Reading media info",
             Op::Tag(_) => "Tagging from the info file",
             Op::Setlist => "Getting setlists from setlist.fm",
+            Op::ExtractDvd(_) => "Extracting DVD audio",
             Op::Rollback { .. } => "Rolling back tagging",
             Op::AfterFlac { .. } => "Tidying up after the conversion",
         }
@@ -356,6 +360,26 @@ pub fn spawn(op: Op, shows: Vec<Show>, files: Vec<PathBuf>, opt: Options, tx: Se
             total: AtomicUsize::new(0),
             rescan: AtomicBool::new(false),
         };
+        // DVD titles are described, not decoded: the operations on the sound leave them
+        // out, saying so.
+        let decodes = matches!(
+            op,
+            Op::Test | Op::Create | Op::Lossless | Op::Speed | Op::Spectrogram | Op::Convert { .. } | Op::ScanFloat | Op::Mp3(_) | Op::FixSbe | Op::CleanWav
+        );
+        let (shows, files) = if decodes && files.iter().any(|f| Format::from_path(f) == Some(Format::Vob)) {
+            let dvd = |f: &PathBuf| Format::from_path(f) == Some(Format::Vob);
+            for f in files.iter().filter(|f| dvd(f)) {
+                ctx.status(f, "DVD title: not decoded (Media info describes it)", Level::Info, audio::DVD_NOT_DECODED);
+            }
+            let shows: Vec<Show> = shows
+                .into_iter()
+                .map(|s| Show { files: s.files.into_iter().filter(|f| !dvd(f)).collect(), ..s })
+                .filter(|s| !s.files.is_empty())
+                .collect();
+            (shows, files.into_iter().filter(|f| !dvd(f)).collect())
+        } else {
+            (shows, files)
+        };
         let pool = rayon::ThreadPoolBuilder::new().num_threads(ctx.opt.jobs.max(1)).build();
         let summary = match pool {
             Ok(pool) => catch_panic(|| Ok(pool.install(|| match &op {
@@ -376,6 +400,7 @@ pub fn spawn(op: Op, shows: Vec<Show>, files: Vec<PathBuf>, opt: Options, tx: Se
                 Op::MediaInfo(dvds) => op_media_info(&ctx, &shows, &files, dvds),
                 Op::Tag(jobs) => op_tag(&ctx, jobs),
                 Op::Setlist => op_setlist(&ctx, &shows),
+                Op::ExtractDvd(tracks) => op_extract_dvd(&ctx, tracks),
                 Op::Rollback { run, shows } => op_rollback(&ctx, run, shows),
                 Op::AfterFlac { roots, sources, trash_sources, trash_checksums, create_ffp } => {
                     op_after_flac(&ctx, roots, sources, *trash_sources, trash_checksums, *create_ffp)
@@ -557,6 +582,35 @@ pub fn describe_details(info: &AudioInfo, last_of_disc: bool) -> (String, String
     (text, tooltip.trim_end().to_string(), level, problems)
 }
 
+/// Details of a DVD title: every audio track with its codec, and whether one can be
+/// extracted without loss (LPCM).
+fn details_dvd(ctx: &Ctx, path: &Path) -> Result<DetailsResult<'static>, String> {
+    let (info, tracks) = crate::dvd::read_title(path)?;
+    ctx.info(path, &info);
+    let lossless = tracks.iter().any(|t| t.lossless());
+    let list: Vec<String> = tracks
+        .iter()
+        .enumerate()
+        .map(|(n, t)| if tracks.len() == 1 { t.summary() } else { format!("{}: {}", n + 1, t.summary()) })
+        .collect();
+    let (text, level, problems) = if lossless {
+        (format!("DVD audio: {}", list.join(" · ")), Level::Ok, vec![])
+    } else {
+        (format!("DVD audio, lossy only: {}", list.join(" · ")), Level::Warn, vec!["lossy"])
+    };
+    let tooltip = format!(
+        "{}\n\n{}\nThe audio of a DVD is not decoded here: Media info (Ctrl+I) gives the whole title set (video, subtitles, titles and chapters).",
+        list.iter().map(|l| format!("Audio {l}")).collect::<Vec<_>>().join("\n"),
+        if lossless {
+            "An LPCM track can be extracted to WAV or FLAC without any loss."
+        } else {
+            "Lossy only (AC-3, DTS, MPEG audio): keep the original stream; converting it to WAV or FLAC does not make it lossless."
+        }
+    );
+    ctx.status(path, &text, level, tooltip);
+    Ok((Some(info), problems, text, level))
+}
+
 fn last_of_each_disc(shows: &[Show]) -> HashSet<PathBuf> {
     let mut last: HashMap<PathBuf, PathBuf> = HashMap::new();
     for show in shows {
@@ -581,6 +635,9 @@ pub fn op_details(ctx: &Ctx, shows: &[Show], files: &[PathBuf], verbose: bool) -
             let (text, _, _) = problem("unsupported");
             ctx.status(path, text, Level::Warn, "APE, SHN and WavPack support comes in the next version.");
             return Ok((None, vec!["unsupported"], text.to_string(), Level::Warn));
+        }
+        if format == Format::Vob {
+            return details_dvd(ctx, path);
         }
         let info = audio::probe(path)?;
         ctx.info(path, &info);
@@ -1681,7 +1738,21 @@ fn hash_pieces(ctx: &Ctx, paths: &[PathBuf], piece_length: u64) -> Result<Vec<u8
 }
 
 /// One summary per show (its selected files) and per DVD.
-fn op_media_info(ctx: &Ctx, shows: &[Show], files: &[PathBuf], dvds: &[PathBuf]) -> String {
+fn op_media_info(ctx: &Ctx, shows: &[Show], files: &[PathBuf], dvds_given: &[PathBuf]) -> String {
+    // DVD titles of the list: the summary of their DVD (the folder of their VOBs, which
+    // describes them all), once.
+    let dvd_of = |f: &PathBuf| {
+        let f = std::path::absolute(f).unwrap_or_else(|_| f.clone());
+        if f.is_file() { f.parent().map(Path::to_path_buf).unwrap_or(f) } else { f }
+    };
+    let mut dvds: Vec<PathBuf> = Vec::new();
+    for dir in dvds_given.iter().chain(files.iter().filter(|f| Format::from_path(f) == Some(Format::Vob))).map(dvd_of) {
+        if !dvds.contains(&dir) {
+            dvds.push(dir);
+        }
+    }
+    let files: Vec<PathBuf> = files.iter().filter(|f| Format::from_path(f) != Some(Format::Vob)).cloned().collect();
+    let (files, dvds) = (files.as_slice(), dvds.as_slice());
     ctx.add_total(files.len() + dvds.len());
     let mut done = 0;
     for show in shows {
@@ -2007,7 +2078,7 @@ pub fn op_tag(ctx: &Ctx, jobs: &[crate::tagging::TagJob]) -> String {
 /// info file gives, otherwise the user chooses (`Msg::SetlistChoice`).
 fn op_setlist(ctx: &Ctx, shows: &[Show]) -> String {
     ctx.add_total(shows.len());
-    let (mut written, mut there, mut choose, mut missing) = (0, 0, 0, 0);
+    let (mut written, mut there, mut choose, mut missing, mut failed) = (0, 0, 0, 0, 0);
     for show in shows {
         if ctx.cancelled() {
             break;
@@ -2039,9 +2110,10 @@ fn op_setlist(ctx: &Ctx, shows: &[Show]) -> String {
                 }
                 ctx.status(&show.root, format!("setlist.fm: {e}"), Level::Error, "");
                 ctx.log(format!("{name}: {e}"), Level::Error);
+                failed += 1;
                 // The same answer for every show: no use asking again.
-                if e.contains("API key") || e.contains("daily limit") {
-                    return format!("setlist.fm: {e}.");
+                if e.fatal {
+                    break;
                 }
                 continue;
             }
@@ -2055,7 +2127,7 @@ fn op_setlist(ctx: &Ctx, shows: &[Show]) -> String {
                 Some(s) => match setlist_file(ctx, &show.root, s) {
                 Some(true) => written += 1,
                 Some(false) => there += 1,
-                None => {}
+                None => failed += 1,
             },
             None if found.is_empty() => {
                 let text = format!("Not on setlist.fm ({artist}, {date})");
@@ -2085,7 +2157,67 @@ fn op_setlist(ctx: &Ctx, shows: &[Show]) -> String {
     if missing > 0 {
         parts.push(format!("{missing} not found"));
     }
+    if failed > 0 {
+        parts.push(format!("{failed} failed"));
+    }
     parts.join(", ") + "."
+}
+
+/// Extracts DVD audio tracks one after the other (each reads gigabytes of VOB files).
+fn op_extract_dvd(ctx: &Ctx, tracks: &[(PathBuf, usize)]) -> String {
+    let sizes: Vec<u64> = tracks
+        .iter()
+        .map(|(vob, _)| crate::dvd::title_of(vob).vob_bytes)
+        .collect();
+    // Progress in MB, so that the counters stay small.
+    ctx.add_total(sizes.iter().map(|b| (b >> 20) as usize + 1).sum());
+    let (mut done, mut failed) = (0, 0);
+    for ((vob, track), size) in tracks.iter().zip(sizes) {
+        if ctx.cancelled() {
+            break;
+        }
+        let mut read = 0u64;
+        let mut ticked = 0u64;
+        let result = crate::dvd::extract(vob, *track, &ctx.cancel, &mut |bytes| {
+            read += bytes;
+            let mb = read >> 20;
+            if mb > ticked {
+                ctx.advance((mb - ticked) as usize);
+                ticked = mb;
+            }
+        });
+        ctx.advance(((size >> 20) + 1).saturating_sub(ticked) as usize);
+        let name = files::show_name(&crate::dvd::output_dir(vob));
+        match result {
+            Ok(x) => {
+                let what = match x.samples {
+                    Some(_) => format!("FLAC, {}, checked", human_size(x.bytes)),
+                    None => format!("the original stream, {}", human_size(x.bytes)),
+                };
+                let text = format!("Audio {} extracted: {} ({what})", track + 1, file_name(&x.path));
+                ctx.status(vob, &text, Level::Ok, x.path.display().to_string());
+                ctx.log(format!("{name}: {text}"), Level::Ok);
+                done += 1;
+            }
+            Err(e) if ctx.cancelled() => {
+                let _ = e;
+                break;
+            }
+            Err(e) => {
+                ctx.status(vob, format!("Audio {} not extracted: {e}", track + 1), Level::Error, "");
+                ctx.log(format!("{name}: audio {} not extracted: {e}", track + 1), Level::Error);
+                failed += 1;
+            }
+        }
+    }
+    if ctx.cancelled() {
+        return "Stopped.".into();
+    }
+    let mut text = format!("{} extracted", plural(done, "DVD audio track", "DVD audio tracks"));
+    if failed > 0 {
+        text.push_str(&format!(", {failed} failed"));
+    }
+    text + "."
 }
 
 /// Writes the setlist file of a show and reports it: Some(true) written, Some(false) one
@@ -2404,10 +2536,11 @@ pub fn info_candidates(root: &Path) -> Vec<PathBuf> {
     let rank = |p: &PathBuf| {
         let stem = p.file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
         let size = fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-        let score = if stem == folder { 2 } else if stem.contains("info") { 1 } else { 0 };
+        // A setlist file written by Get setlist comes after the show's own info file.
+        let score = if crate::setlistfm::is_setlist_file(p) { -1 } else if stem == folder { 2 } else if stem.contains("info") { 1 } else { 0 };
         (std::cmp::Reverse(score), std::cmp::Reverse(size))
     };
-    found.sort_by_key(rank);
+    found.sort_by_cached_key(rank);
     found
 }
 
@@ -2445,6 +2578,58 @@ mod tests {
         std::fs::write(&file, [0x4d, 0x41, 0x43, 0x46, 0x41, 0x7b, 0x20, 0x7a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x03, 0x80, 0x00, 0x0f, 0x22, 0x00, 0x00, 0xff, 0x2f, 0x2b, 0xff, 0xff, 0x08, 0x00, 0x00, 0x00, 0x00, 0xff, 0xf4, 0x49, 0x44, 0xb8, 0x02, 0x00, 0x58, 0x24, 0x00, 0x01, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 0x08, 0x00, 0x13, 0x00, 0x00, 0x00, 0x00, 0x32, 0x6d, 0x00]).unwrap();
         let err = crate::audio::read_pcm(&file, &AtomicBool::new(false), |_| {}).unwrap_err();
         assert!(err.contains("samples per frame"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Found by fuzzing: a 79-byte APE file announcing 855 MHz and 18 million samples took
+    /// seconds (and 170 MB) to fail; an impossible sample rate is refused by the header.
+    #[test]
+    fn ape_absurd_sample_rate() {
+        let dir = std::env::temp_dir().join(format!("bt-ape-rate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("01.ape");
+        std::fs::write(&file, [0x4d, 0x41, 0x43, 0x46, 0x41, 0x7b, 0x20, 0x7a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x03, 0x80, 0x00, 0x0f, 0x22, 0x00, 0x00, 0xff, 0x2f, 0x2b, 0xff, 0xff, 0x08, 0x00, 0x00, 0x00, 0x00, 0xff, 0xf4, 0x49, 0x44, 0xb8, 0x02, 0x00, 0x58, 0x10, 0x00, 0x01, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 0x08, 0x00, 0x13, 0x00, 0x00, 0x00, 0x00, 0x33, 0x6d, 0x00]).unwrap();
+        let err = crate::audio::probe(&file).unwrap_err();
+        assert!(err.contains("sample rate"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Found by fuzzing: an MP4 sample table announcing four billion entries made the MP4
+    /// reader ask for 64 GB, which ends the program; the reservation is now bounded by the
+    /// table's size in the file (vendor/symphonia-format-isomp4).
+    #[test]
+    fn mp4_absurd_table() {
+        fn atom(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+            let mut out = ((payload.len() + 8) as u32).to_be_bytes().to_vec();
+            out.extend_from_slice(kind);
+            out.extend_from_slice(payload);
+            out
+        }
+        let stsc = atom(b"stsc", &[0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]);
+        let moov = atom(b"moov", &atom(b"trak", &atom(b"mdia", &atom(b"minf", &atom(b"stbl", &stsc)))));
+        let mut file = atom(b"ftyp", b"isom\0\0\0\0isommp42");
+        file.extend(moov);
+        let dir = std::env::temp_dir().join(format!("bt-mp4-table-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("01.mp4");
+        std::fs::write(&path, file).unwrap();
+        assert!(crate::audio::probe(&path).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Found by fuzzing: an MP4 atom larger than the file is refused before its size is used.
+    #[test]
+    fn mp4_atom_past_the_end() {
+        let mut file = 24u32.to_be_bytes().to_vec();
+        file.extend_from_slice(b"ftypisom\0\0\0\0isommp42");
+        file.extend_from_slice(&[0, 0, 0, 1]);
+        file.extend_from_slice(b"moov");
+        file.extend_from_slice(&(1u64 << 40).to_be_bytes());
+        let dir = std::env::temp_dir().join(format!("bt-mp4-atom-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("01.m4a");
+        std::fs::write(&path, file).unwrap();
+        assert!(crate::audio::probe(&path).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -7,20 +7,25 @@ use std::time::Duration;
 
 pub const RELEASES: &str = "https://github.com/bootleg-toolbox-group/bootleg-toolbox/releases";
 
-/// A newer version than this one, if there is one ("0.1.5").
-pub fn newer_version() -> Result<Option<String>, String> {
-    // HTTPS through rustls with the ring cryptography, the certificates checked by the
-    // system (Windows certificate store, or the distribution's certificates on Linux).
+/// The program's HTTPS client: rustls with the ring cryptography, the certificates checked
+/// by the system (Windows certificate store, or the distribution's certificates on Linux),
+/// no redirects (nothing sent to another server than the one asked), HTTP errors as answers.
+pub fn agent(timeout: Duration) -> ureq::Agent {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let tls = ureq::tls::TlsConfig::builder().root_certs(ureq::tls::RootCerts::PlatformVerifier).build();
-    let agent: ureq::Agent = ureq::Agent::config_builder()
+    ureq::Agent::config_builder()
         .max_redirects(0)
         .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(15)))
+        .timeout_global(Some(timeout))
         .user_agent(format!("bootleg-toolbox/{}", crate::ops::APP_VERSION))
         .tls_config(tls)
         .build()
-        .into();
+        .into()
+}
+
+/// A newer version than this one, if there is one ("0.1.5").
+pub fn newer_version() -> Result<Option<String>, String> {
+    let agent = agent(Duration::from_secs(15));
     // BT_RELEASES: another releases page, for tests.
     let releases = std::env::var("BT_RELEASES").unwrap_or_else(|_| RELEASES.to_string());
     let response = agent.get(&format!("{releases}/latest")).call().map_err(|e| format!("cannot reach github.com ({e})"))?;

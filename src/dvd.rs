@@ -200,25 +200,408 @@ pub fn read(root: &Path) -> Result<Dvd, String> {
     }
     let mut sets = Vec::new();
     for (number, (ifo, bup, vobs)) in by_set {
-        let ifo = ifo.or(bup).map(|p| read_ifo(&p).map_err(|e| format!("{}: {e}", file_name(&p))));
         // A title set with no title VOB is only a menu; it has nothing to show.
-        if vobs.is_empty() {
-            continue;
+        if !vobs.is_empty() {
+            sets.push(title_set(number, ifo.or(bup), vobs));
         }
-        let vob_bytes = vobs.iter().map(|p| size(p)).sum();
-        let scan = scan_vobs(&vobs);
-        sets.push(TitleSet { number, vobs, vob_bytes, ifo, scan });
     }
     for vob in loose {
-        let vob_bytes = size(&vob);
-        let vobs = vec![vob];
-        let scan = scan_vobs(&vobs);
-        sets.push(TitleSet { number: 0, vobs, vob_bytes, ifo: None, scan });
+        sets.push(title_set(0, None, vec![vob]));
     }
     if sets.is_empty() {
         return Err("no title VOB file".into());
     }
     Ok(Dvd { name, total_bytes, sets })
+}
+
+fn title_set(number: u32, ifo: Option<PathBuf>, vobs: Vec<PathBuf>) -> TitleSet {
+    let ifo = ifo.map(|p| read_ifo(&p).map_err(|e| format!("{}: {e}", file_name(&p))));
+    let vob_bytes = vobs.iter().map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)).sum();
+    let scan = scan_vobs(&vobs);
+    TitleSet { number, vobs, vob_bytes, ifo, scan }
+}
+
+/// "VTS_01_1.VOB" -> (1, 1); None for a VOB of another name.
+fn vts_parts(name: &str) -> Option<(u32, u32)> {
+    let up = name.to_ascii_uppercase();
+    let rest = up.strip_prefix("VTS_")?.strip_suffix(".VOB")?;
+    let (set, part) = rest.split_once('_')?;
+    (set.len() == 2 && part.len() == 1).then_some(())?;
+    Some((set.parse().ok()?, part.parse().ok()?))
+}
+
+/// The VOB that stands for its title in the list: the first title VOB of a title set
+/// (VTS_nn_1), or a loose VOB; not menus (VIDEO_TS.VOB, VTS_nn_0) nor the other parts.
+pub fn title_vob(path: &Path) -> bool {
+    let name = file_name(path);
+    is_vob(path) && !name.eq_ignore_ascii_case("VIDEO_TS.VOB") && vts_parts(&name).is_none_or(|(_, part)| part == 1)
+}
+
+/// The title set a VOB of the list stands for: its title VOBs and IFO beside it, or the
+/// loose file alone.
+pub fn title_of(vob: &Path) -> TitleSet {
+    let Some((set, _)) = vts_parts(&file_name(vob)) else { return title_set(0, None, vec![vob.to_path_buf()]) };
+    let dir = vob.parent().unwrap_or(Path::new("."));
+    let mut vobs = Vec::new();
+    let (mut ifo, mut bup) = (None, None);
+    for p in std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()) {
+        let name = file_name(&p).to_ascii_uppercase();
+        if vts_parts(&name).is_some_and(|(s, part)| s == set && part > 0) {
+            vobs.push(p);
+        } else if name == format!("VTS_{set:02}_0.IFO") {
+            ifo = Some(p);
+        } else if name == format!("VTS_{set:02}_0.BUP") {
+            bup = Some(p);
+        }
+    }
+    vobs.sort_by(|a, b| natural_path_cmp(a, b));
+    title_set(set, ifo.or(bup), vobs)
+}
+
+/// One audio track of a DVD title set.
+pub struct DvdAudio {
+    /// "AC-3", "DTS", "LPCM", "MPEG Audio Layer 2"...
+    pub coding: &'static str,
+    /// The stream in the VOBs: a private stream 1 substream (0x80 AC-3, 0x88 DTS, 0xA0
+    /// LPCM, + track) or an MPEG audio stream (0xC0 + track).
+    pub id: u8,
+    /// "2", "5.1"
+    pub channels: String,
+    pub rate: u32,
+    pub bits: Option<u32>,
+    pub kbps: Option<f64>,
+    /// "en", empty when not given.
+    pub language: String,
+    pub purpose: &'static str,
+}
+
+impl DvdAudio {
+    pub fn lossless(&self) -> bool {
+        self.coding == "LPCM"
+    }
+
+    /// "AC-3 (lossy), 5.1 ch, English": for the list.
+    pub fn summary(&self) -> String {
+        let mut p = vec![format!("{} ({})", self.coding, if self.lossless() { "lossless" } else { "lossy" }), format!("{} ch", self.channels)];
+        if let Some(bits) = self.bits {
+            p.push(format!("{bits}-bit"));
+        }
+        if !self.language.is_empty() {
+            p.push(crate::mediainfo::language_name(&self.language));
+        }
+        p.join(", ")
+    }
+}
+
+/// The audio tracks of a title set: from its IFO (languages) matched with the streams of
+/// its VOBs (layouts, bit rates), or from the streams alone.
+pub fn dvd_audio(set: &TitleSet) -> Vec<DvdAudio> {
+    let streams = set.scan.as_ref().map(|s| s.audio.as_slice()).unwrap_or(&[]);
+    match &set.ifo {
+        Some(Ok(i)) if !i.audio.is_empty() => {
+            let mut used = Vec::new();
+            i.audio
+                .iter()
+                .enumerate()
+                .map(|(n, a)| {
+                    // Stream n is substream 0x80 + n (AC-3), 0x88 + n (DTS), 0xA0 + n (LPCM),
+                    // or MPEG stream 0xC0 + n; some authoring tools number each kind from 0.
+                    let id = match a.coding {
+                        "AC-3" => 0x80,
+                        "DTS" => 0x88,
+                        "LPCM" => 0xa0,
+                        _ => 0xc0,
+                    } + n as u8;
+                    let es = streams
+                        .iter()
+                        .find(|s| s.id == id)
+                        .or_else(|| streams.iter().find(|s| !used.contains(&s.id) && a.coding.starts_with(s.coding.split(' ').next().unwrap_or(""))));
+                    if let Some(s) = es {
+                        used.push(s.id);
+                    }
+                    DvdAudio {
+                        coding: a.coding,
+                        id: es.map_or(id, |s| s.id),
+                        channels: es.map_or_else(|| a.channels.to_string(), |s| s.channels.clone()),
+                        rate: es.map_or(a.rate, |s| s.rate),
+                        bits: es.and_then(|s| s.bits).or(a.bits),
+                        kbps: es.and_then(|s| s.kbps),
+                        language: a.language.clone(),
+                        purpose: a.purpose,
+                    }
+                })
+                .collect()
+        }
+        _ => streams
+            .iter()
+            .map(|s| DvdAudio { coding: s.coding, id: s.id, channels: s.channels.clone(), rate: s.rate, bits: s.bits, kbps: s.kbps, language: String::new(), purpose: "" })
+            .collect(),
+    }
+}
+
+/// The header of a DVD title for the list: its best audio track (an LPCM one if there is
+/// one, since it can be extracted without loss), and its length.
+pub fn probe_title(vob: &Path) -> Result<crate::audio::AudioInfo, String> {
+    read_title(vob).map(|(info, _)| info)
+}
+
+/// The header of a DVD title and all its audio tracks.
+pub fn read_title(vob: &Path) -> Result<(crate::audio::AudioInfo, Vec<DvdAudio>), String> {
+    let set = title_of(vob);
+    if let (Err(e), None | Some(Err(_))) = (&set.scan, &set.ifo) {
+        return Err(e.clone());
+    }
+    let tracks = dvd_audio(&set);
+    let best = tracks.iter().find(|t| t.lossless()).or(tracks.first()).ok_or("DVD title without audio")?;
+    // "5.1" -> 6 channels.
+    let channels = best.channels.split('.').filter_map(|n| n.parse::<u32>().ok()).sum::<u32>().max(1);
+    let samples = set.seconds().map_or(0, |s| (s * best.rate as f64).round() as u64);
+    let info = crate::audio::AudioInfo {
+        format: crate::audio::Format::Vob,
+        rate: best.rate,
+        bits: best.bits.unwrap_or(16),
+        channels,
+        samples,
+        md5: None,
+        float: false,
+        codec: crate::audio::Codec::from_dvd(best.coding),
+    };
+    Ok((info, tracks))
+}
+
+// ---------------------------------------------------------------- extracting a track
+
+/// The folder a title's extracted audio goes to: the DVD's (above VIDEO_TS), or the folder
+/// of a loose VOB.
+pub fn output_dir(vob: &Path) -> PathBuf {
+    let dir = vob.parent().unwrap_or(Path::new(".")).to_path_buf();
+    match dir.parent() {
+        Some(parent) if file_name(&dir).eq_ignore_ascii_case("VIDEO_TS") => parent.to_path_buf(),
+        _ => dir,
+    }
+}
+
+/// The file an extracted track is written to: "<DVD> - title 1 - audio 2 LPCM French.flac"
+/// (FLAC for LPCM; the stream as it is for the lossy codecs).
+pub fn extract_path(vob: &Path, track: usize, t: &DvdAudio) -> PathBuf {
+    let dir = output_dir(vob);
+    let head = match vts_parts(&file_name(vob)) {
+        Some((set, _)) => format!("{} - title {set}", file_name(&dir)),
+        None => vob.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+    };
+    let coding = match t.coding {
+        c if c.starts_with("MPEG") => "MPEG audio",
+        c => c,
+    };
+    let language = if t.language.is_empty() { String::new() } else { format!(" {}", crate::mediainfo::language_name(&t.language)) };
+    let ext = match t.coding {
+        "LPCM" => "flac",
+        "AC-3" => "ac3",
+        "DTS" => "dts",
+        _ => "mp2",
+    };
+    dir.join(crate::tagging::safe_name(&format!("{head} - audio {} {coding}{language}", track + 1)) + "." + ext)
+}
+
+/// The payload of one track, in stream order, through every title VOB of its title set;
+/// `progress` gets the bytes read. Packs are 2048 bytes and a VOB file holds whole packs,
+/// so the files are read in pack-aligned pieces.
+fn track_payload(vobs: &[PathBuf], id: u8, cancel: &std::sync::atomic::AtomicBool, progress: &mut dyn FnMut(u64), each: &mut dyn FnMut(&[u8])) -> Result<(), String> {
+    const PIECE: usize = 512 * SECTOR as usize;
+    let mut buf = vec![0u8; PIECE];
+    for vob in vobs {
+        let mut f = File::open(vob).map_err(|e| format!("{}: {e}", file_name(vob)))?;
+        loop {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err("stopped".into());
+            }
+            let mut got = 0;
+            while got < PIECE {
+                match f.read(&mut buf[got..]).map_err(|e| format!("{}: {e}", file_name(vob)))? {
+                    0 => break,
+                    n => got += n,
+                }
+            }
+            if got == 0 {
+                break;
+            }
+            packets(&buf[..got], |p| match (p.id, id) {
+                // Private stream 1: the first byte names the substream; AC-3 and DTS have
+                // 3 more header bytes, LPCM 6.
+                (0xbd, 0x80..=0x8f) if p.payload.first() == Some(&id) => each(p.payload.get(4..).unwrap_or(&[])),
+                (0xbd, 0xa0..=0xaf) if p.payload.first() == Some(&id) => each(p.payload.get(1..).unwrap_or(&[])),
+                (mpeg, _) if mpeg == id && (0xc0..=0xdf).contains(&mpeg) => each(p.payload),
+                _ => {}
+            });
+            progress(got as u64);
+            if got < PIECE {
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// DVD LPCM to little-endian PCM: big-endian 16-bit samples; 20 and 24-bit ones in groups
+/// of two sample frames, split into units of 4 samples (high 16 bits, then low bits).
+struct LpcmDecoder {
+    bits: u32,
+    channels: usize,
+    pending: Vec<u8>,
+}
+
+impl LpcmDecoder {
+    /// Bytes of one group: one sample frame at 16 bits, two at 20 and 24.
+    fn group(&self) -> usize {
+        match self.bits {
+            16 => 2 * self.channels,
+            20 => 5 * self.channels,
+            _ => 6 * self.channels,
+        }
+    }
+
+    fn push(&mut self, data: &[u8], out: &mut Vec<u8>) {
+        self.pending.extend_from_slice(data);
+        let group = self.group();
+        let whole = self.pending.len() / group * group;
+        let ch = self.channels;
+        for g in self.pending[..whole].chunks_exact(group) {
+            match self.bits {
+                16 => {
+                    for [a, b] in g.as_chunks::<2>().0 {
+                        out.extend_from_slice(&[*b, *a]);
+                    }
+                }
+                // The 2 x channels samples of the group, in order, go by units of 4 (2 for
+                // mono): their high 16 bits, then their low bits (a byte each at 24 bits,
+                // a nibble each at 20).
+                bits => {
+                    let mut rest = g;
+                    let mut left = 2 * ch;
+                    while left > 0 {
+                        let k = left.min(4);
+                        let low_len = if bits == 20 { k / 2 } else { k };
+                        let (high, after) = rest.split_at(2 * k);
+                        let (low, after) = after.split_at(low_len);
+                        for i in 0..k {
+                            if bits == 20 {
+                                let nibble = (low[i / 2] >> if i % 2 == 0 { 4 } else { 0 }) & 0x0f;
+                                let v = (i16::from_be_bytes([high[2 * i], high[2 * i + 1]]) as i32) << 4 | nibble as i32;
+                                out.extend_from_slice(&v.to_le_bytes()[..3]);
+                            } else {
+                                out.extend_from_slice(&[low[i], high[2 * i + 1], high[2 * i]]);
+                            }
+                        }
+                        rest = after;
+                        left -= k;
+                    }
+                }
+            }
+        }
+        self.pending.drain(..whole);
+    }
+}
+
+/// What an extraction wrote.
+pub struct Extraction {
+    pub path: PathBuf,
+    /// LPCM: the sample frames in the FLAC file; other codecs: None.
+    pub samples: Option<u64>,
+    pub bytes: u64,
+}
+
+/// Extracts track `track` (as `dvd_audio` lists them) of the title `vob` stands for, from
+/// all its VOBs, to one file beside the DVD: FLAC for LPCM (verified by decoding it
+/// again), the stream as it is for AC-3, DTS and MPEG audio. An existing file is kept.
+pub fn extract(vob: &Path, track: usize, cancel: &std::sync::atomic::AtomicBool, progress: &mut dyn FnMut(u64)) -> Result<Extraction, String> {
+    let set = title_of(vob);
+    let tracks = dvd_audio(&set);
+    let t = tracks.get(track).ok_or_else(|| format!("no audio track {}", track + 1))?;
+    let out = extract_path(vob, track, t);
+    if out.exists() {
+        return Err(format!("{} exists already", file_name(&out)));
+    }
+    if t.lossless() {
+        let bits = t.bits.ok_or("LPCM track of unknown bit depth")?;
+        let channels: u32 = t.channels.parse().map_err(|_| format!("LPCM track with {} channels", t.channels))?;
+        let info = crate::audio::AudioInfo {
+            format: crate::audio::Format::Flac,
+            rate: t.rate,
+            bits,
+            channels,
+            samples: 0,
+            md5: None,
+            float: false,
+            codec: None,
+        };
+        crate::encode::check_encodable(&info)?;
+        let mut decoder = LpcmDecoder { bits, channels: channels as usize, pending: Vec::new() };
+        let comment = format!("Extracted from {}, audio {} (LPCM)", file_name(&output_dir(vob)), track + 1);
+        let tags = [("COMMENT".to_string(), comment)];
+        let encoded = crate::encode::pcm_to_flac(&out, &info, 8, &tags, cancel, |sink| {
+            let mut pcm = Vec::new();
+            let mut format = None;
+            let mut changed = false;
+            track_payload(&set.vobs, t.id, cancel, progress, &mut |payload: &[u8]| {
+                // 3 header bytes before the samples: their format (bits, rate, channels),
+                // which must stay the same through the track.
+                let Some((head, samples)) = payload.get(3..6).zip(payload.get(6..)) else { return };
+                if *format.get_or_insert(head[1]) != head[1] {
+                    changed = true;
+                }
+                if changed {
+                    return;
+                }
+                pcm.clear();
+                decoder.push(samples, &mut pcm);
+                sink(&pcm);
+            })?;
+            if changed {
+                return Err("the LPCM format changes within the track".into());
+            }
+            Ok(())
+        })?;
+        if encoded.samples == 0 {
+            let _ = std::fs::remove_file(&out);
+            return Err("no audio found for this track".into());
+        }
+        let bytes = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+        return Ok(Extraction { path: out, samples: Some(encoded.samples), bytes });
+    }
+    let mut part = out.clone().into_os_string();
+    part.push(".part");
+    let part = PathBuf::from(part);
+    let result = (|| {
+        let mut file = std::io::BufWriter::new(File::create(&part).map_err(|e| e.to_string())?);
+        let mut written = 0u64;
+        let mut failure = None;
+        track_payload(&set.vobs, t.id, cancel, progress, &mut |payload: &[u8]| {
+            if failure.is_none() {
+                match std::io::Write::write_all(&mut file, payload) {
+                    Ok(()) => written += payload.len() as u64,
+                    Err(e) => failure = Some(e.to_string()),
+                }
+            }
+        })?;
+        if let Some(e) = failure {
+            return Err(e);
+        }
+        std::io::Write::flush(&mut file).map_err(|e| e.to_string())?;
+        if written == 0 {
+            return Err("no audio found for this track".to_string());
+        }
+        Ok(written)
+    })();
+    match result {
+        Ok(bytes) => {
+            std::fs::rename(&part, &out).map_err(|e| e.to_string())?;
+            Ok(Extraction { path: out, samples: None, bytes })
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&part);
+            Err(e)
+        }
+    }
 }
 
 // ---------------------------------------------------------------- IFO
@@ -693,6 +1076,40 @@ pub fn mpa_header(b: &[u8]) -> Option<MpaHeader> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lpcm_reordering() {
+        let mut out = Vec::new();
+        // 16-bit stereo: big-endian words.
+        LpcmDecoder { bits: 16, channels: 2, pending: Vec::new() }.push(&[0x12, 0x34, 0xfe, 0xdc], &mut out);
+        assert_eq!(out, [0x34, 0x12, 0xdc, 0xfe]);
+        // 24-bit stereo: L0 R0 L1 R1 high words, then their low bytes; split across two
+        // packets.
+        out.clear();
+        let mut d = LpcmDecoder { bits: 24, channels: 2, pending: Vec::new() };
+        let group = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0xa1, 0xa2, 0xa3, 0xa4];
+        d.push(&group[..5], &mut out);
+        assert!(out.is_empty());
+        d.push(&group[5..], &mut out);
+        assert_eq!(out, [0xa1, 0x22, 0x11, 0xa2, 0x44, 0x33, 0xa3, 0x66, 0x55, 0xa4, 0x88, 0x77]);
+        // 24-bit, 6 channels: 12 samples by units of 4 (4 high words, then 4 low bytes).
+        out.clear();
+        let mut group = Vec::new();
+        for unit in 0..3u8 {
+            for i in 0..4u8 {
+                group.extend_from_slice(&[unit, i]);
+            }
+            group.extend_from_slice(&[0xb0 + unit; 4]);
+        }
+        LpcmDecoder { bits: 24, channels: 6, pending: Vec::new() }.push(&group, &mut out);
+        let samples: Vec<[u8; 3]> = out.as_chunks::<3>().0.to_vec();
+        assert_eq!(samples[5], [0xb1, 1, 1]);
+        assert_eq!(samples[11], [0xb2, 3, 2]);
+        // 20-bit mono: two high words, then one byte of two nibbles.
+        out.clear();
+        LpcmDecoder { bits: 20, channels: 1, pending: Vec::new() }.push(&[0x80, 0x00, 0x00, 0x01, 0x5a], &mut out);
+        assert_eq!(out, [0x05, 0x00, 0xf8, 0x1a, 0x00, 0x00]);
+    }
 
     #[test]
     fn dvd_time_bcd() {

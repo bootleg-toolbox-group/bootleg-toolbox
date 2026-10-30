@@ -126,6 +126,26 @@ fn run_cli(args: &[String]) -> i32 {
             None => return 0,
         },
         "setlist" => Op::Setlist,
+        // Each DVD title: track BT_TRACK (1, 2...), else the first lossless one, else the first.
+        "extract-dvd" => {
+            let wanted: Option<usize> = std::env::var("BT_TRACK").ok().and_then(|t| t.parse::<usize>().ok()).filter(|t| *t > 0);
+            let given: Vec<PathBuf> = args[1..].iter().map(PathBuf::from).collect();
+            let titles: Vec<PathBuf> = files::scan_paths(&given, &Default::default())
+                .into_iter()
+                .flat_map(|s| s.files)
+                .filter(|f| audio::Format::from_path(f) == Some(audio::Format::Vob))
+                .collect();
+            Op::ExtractDvd(
+                titles
+                    .into_iter()
+                    .map(|vob| {
+                        let tracks = dvd::dvd_audio(&dvd::title_of(&vob));
+                        let track = wanted.map(|t| t - 1).unwrap_or_else(|| tracks.iter().position(|t| t.lossless()).unwrap_or(0));
+                        (vob, track)
+                    })
+                    .collect(),
+            )
+        }
         // The latest Tag and rename, all its shows.
         "undo-tagging" => match bootleg_toolbox::undo::list().into_iter().next() {
             Some((run, batch)) => Op::Rollback { run, shows: (0..batch.shows.len()).collect() },
