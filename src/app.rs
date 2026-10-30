@@ -267,6 +267,9 @@ pub fn run(paths: Vec<PathBuf>) -> eframe::Result<()> {
             .with_drag_and_drop(true)
             .with_app_id("bootleg-toolbox")
             .with_icon(app_icon()),
+        // With vsync, the NVIDIA driver under XWayland blocks the frame of a hidden window
+        // (show desktop, minimised) until it shows again, which freezes the interface.
+        vsync: false,
         ..Default::default()
     };
     // winit has no drag and drop on Wayland: go through XWayland when it is there.
