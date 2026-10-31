@@ -108,10 +108,12 @@ pub fn read_file(path: &Path) -> Result<FileInfo, String> {
         Format::Mp3 => "MPEG Audio Layer 3 (MP3)".into(),
         Format::Mp2 => "MPEG Audio Layer 2 (MP2)".into(),
         Format::Vob => format!("{}, in DVD-Video (VOB)", info.codec.map_or("unknown", audio::Codec::long_name)),
-        Format::M4a | Format::Mp4 | Format::Mka => {
+        Format::M4a | Format::Mp4 | Format::Mka | Format::Aiff | Format::Ogg => {
             let container = match info.format {
                 Format::M4a => "MPEG-4 (M4A)",
                 Format::Mp4 => "MPEG-4 video (MP4), audio track",
+                Format::Aiff => "AIFF",
+                Format::Ogg => "Ogg",
                 _ => "Matroska (MKA)",
             };
             format!("{}, in {container}", info.codec.map_or("unknown", audio::Codec::long_name))

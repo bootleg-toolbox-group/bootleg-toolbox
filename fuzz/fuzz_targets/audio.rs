@@ -15,7 +15,7 @@ use libfuzzer_sys::fuzz_target;
 
 mod common;
 
-const EXTENSIONS: [&str; 10] = ["flac", "wav", "ape", "shn", "wv", "mp3", "mp2", "m4a", "mka", "mp4"];
+const EXTENSIONS: [&str; 12] = ["flac", "wav", "ape", "shn", "wv", "mp3", "mp2", "m4a", "mka", "mp4", "aiff", "ogg"];
 
 fn hook() {
     static HOOK: Once = Once::new();

@@ -24,7 +24,7 @@ const AUTO_DETAILS_LIMIT: usize = 3000;
 const COMPONENTS: &[(&str, &str, &str)] = &[
     ("egui, eframe, egui_extras", "user interface", "MIT or Apache-2.0"),
     ("winit", "windows and input", "Apache-2.0"),
-    ("Symphonia", "FLAC, MP3, AAC and ALAC decoding; M4A and MKA files", "MPL-2.0"),
+    ("Symphonia", "FLAC, MP3, AAC, ALAC and Vorbis decoding; M4A, MKA, AIFF and OGG files", "MPL-2.0"),
     ("flacenc", "FLAC encoding", "Apache-2.0"),
     ("ape-decoder", "Monkey's Audio (APE) decoding", "MIT or Apache-2.0"),
     ("wavicle", "WavPack decoding", "MIT or Apache-2.0"),
@@ -854,7 +854,7 @@ impl App {
                 }
             }
             Dialog::AddFiles => {
-                if let Some(files) = file_dialog(self.parent).add_filter("Audio", &["flac", "wav", "ape", "shn", "wv", "mp3", "mp2", "m4a", "mka", "mp4"]).pick_files() {
+                if let Some(files) = file_dialog(self.parent).add_filter("Audio", &["flac", "wav", "aif", "aiff", "aifc", "ape", "shn", "wv", "mp3", "mp2", "m4a", "mka", "ogg", "oga", "mp4"]).pick_files() {
                     self.add_paths(files, true);
                 }
             }
@@ -2493,7 +2493,7 @@ impl App {
                     ui.vertical_centered(|ui| {
                         ui.add(
                             egui::Label::new(
-                                RichText::new("Drop show folders or audio files here\n(FLAC, WAV, APE, SHN, WavPack, ALAC, MP3, MP2, AAC, M4A, MKA, MP4 videos, DVD folders)\n\nA new drop replaces the list. Hold Ctrl to add to it instead.")
+                                RichText::new("Drop show folders or audio files here\n(FLAC, WAV, AIFF, APE, SHN, WavPack, ALAC, MP3, MP2, AAC, OGG, M4A, MKA, MP4 videos, DVD folders)\n\nA new drop replaces the list. Hold Ctrl to add to it instead.")
                                     .size(15.0)
                                     .weak(),
                             )

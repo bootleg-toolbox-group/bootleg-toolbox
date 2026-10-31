@@ -7,7 +7,7 @@ use std::path::Path;
 
 const LABEL: &str = "Open in Bootleg Toolbox";
 /// Audio files the entry is offered for, besides folders.
-const AUDIO_EXT: [&str; 9] = ["flac", "wav", "ape", "shn", "wv", "mp3", "mp2", "m4a", "mka"];
+const AUDIO_EXT: [&str; 14] = ["flac", "wav", "ape", "shn", "wv", "mp3", "mp2", "m4a", "mka", "aif", "aiff", "aifc", "ogg", "oga"];
 
 #[cfg(windows)]
 mod platform {

@@ -35,6 +35,10 @@ pub enum Format {
     /// MPEG-4 video files: their audio track only (concert videos).
     Mp4,
     Mka,
+    /// AIFF (big-endian PCM, the Apple counterpart of WAV), and OGG (Vorbis, FLAC; Opus is
+    /// recognised but not decoded).
+    Aiff,
+    Ogg,
     /// DVD-Video: one title (its first VOB stands for the title set), described from its
     /// IFO and stream headers; the audio is not decoded.
     Vob,
@@ -55,6 +59,8 @@ impl Format {
             "mp4" => Some(Format::Mp4),
             "vob" => Some(Format::Vob),
             "mka" => Some(Format::Mka),
+            "aif" | "aiff" | "aifc" => Some(Format::Aiff),
+            "ogg" | "oga" => Some(Format::Ogg),
             _ => None,
         }
     }
@@ -72,6 +78,8 @@ impl Format {
             Format::Mp4 => "MP4",
             Format::Vob => "VOB",
             Format::Mka => "MKA",
+            Format::Aiff => "AIFF",
+            Format::Ogg => "OGG",
         }
     }
 
@@ -86,7 +94,7 @@ impl Format {
     }
 
     pub fn container(self) -> bool {
-        matches!(self, Format::M4a | Format::Mp4 | Format::Mka | Format::Vob)
+        matches!(self, Format::M4a | Format::Mp4 | Format::Mka | Format::Aiff | Format::Ogg | Format::Vob)
     }
 }
 
@@ -304,7 +312,7 @@ fn probe_header(path: &Path, format: Option<Format>) -> Result<AudioInfo, String
         }),
         Some(Format::Wav) => probe_wav(path).map(|(info, _, _)| info),
         Some(f @ (Format::Mp3 | Format::Mp2)) => probe_mpa(path, f),
-        Some(f @ (Format::M4a | Format::Mp4 | Format::Mka)) => probe_container(path, f),
+        Some(f @ (Format::M4a | Format::Mp4 | Format::Mka | Format::Aiff | Format::Ogg)) => probe_container(path, f),
         Some(Format::Vob) => crate::dvd::probe_title(path),
         Some(Format::Ape) => {
             let decoder = open_ape(path)?;
@@ -560,7 +568,7 @@ pub fn read_pcm_as(
         Some(Format::Ape) => decode_ape(path, cancel, sink),
         Some(Format::WavPack) => crate::wv::decode(path, cancel, sink),
         Some(f @ (Format::Mp3 | Format::Mp2)) => decode_mpa(path, f, cancel, sink),
-        Some(f @ (Format::M4a | Format::Mp4 | Format::Mka)) => decode_container(path, f, cancel, sink),
+        Some(f @ (Format::M4a | Format::Mp4 | Format::Mka | Format::Aiff | Format::Ogg)) => decode_container(path, f, cancel, sink),
         Some(Format::Vob) => Err(DVD_NOT_DECODED.into()),
         None => Err("not an audio file".into()),
     }
@@ -687,8 +695,8 @@ fn decode_mpa(path: &Path, format: Format, cancel: &AtomicBool, sink: impl FnMut
 /// reader on any file, so a damaged .flac or .m4a could reach the MKV reader (below).
 fn probe_for(format: Format) -> &'static symphonia::core::probe::Probe {
     use symphonia::core::probe::Probe;
-    use symphonia::default::formats::{FlacReader, IsoMp4Reader, MkvReader, MpaReader};
-    static PROBES: OnceLock<[Probe; 4]> = OnceLock::new();
+    use symphonia::default::formats::{AiffReader, FlacReader, IsoMp4Reader, MkvReader, MpaReader, OggReader};
+    static PROBES: OnceLock<[Probe; 6]> = OnceLock::new();
     let probes = PROBES.get_or_init(|| {
         let mut flac = Probe::default();
         flac.register_all::<FlacReader>();
@@ -698,12 +706,18 @@ fn probe_for(format: Format) -> &'static symphonia::core::probe::Probe {
         mp4.register_all::<IsoMp4Reader>();
         let mut mkv = Probe::default();
         mkv.register_all::<MkvReader>();
-        [flac, mpa, mp4, mkv]
+        let mut aiff = Probe::default();
+        aiff.register_all::<AiffReader>();
+        let mut ogg = Probe::default();
+        ogg.register_all::<OggReader>();
+        [flac, mpa, mp4, mkv, aiff, ogg]
     });
     match format {
         Format::Mp3 | Format::Mp2 => &probes[1],
         Format::M4a | Format::Mp4 => &probes[2],
         Format::Mka => &probes[3],
+        Format::Aiff => &probes[4],
+        Format::Ogg => &probes[5],
         _ => &probes[0],
     }
 }
@@ -768,7 +782,7 @@ fn ebml_sizes_ok(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// An M4A or MKA file, with its first audio track this version can decode.
+/// An M4A, MKA, AIFF or OGG file, with its first audio track this version can decode.
 fn open_container(
     path: &Path,
     format: Format,
@@ -779,7 +793,12 @@ fn open_container(
     let file = File::open(path).map_err(io_err)?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
-    hint.with_extension(if format == Format::Mka { "mka" } else { "m4a" });
+    hint.with_extension(match format {
+        Format::Mka => "mka",
+        Format::Aiff => "aiff",
+        Format::Ogg => "ogg",
+        _ => "m4a",
+    });
     let options = FormatOptions { enable_gapless: true, ..Default::default() };
     let reader = probe_for(format)
         .format(&hint, mss, &options, &MetadataOptions::default())
@@ -805,6 +824,7 @@ fn open_container(
         }
         None => Err(match mka_codec_id(path) {
             Some(id) => format!("{} audio is not supported yet", mka_codec_name(&id)),
+            None if format == Format::Ogg && ogg_opus(path) => "Opus audio is not supported yet".into(),
             None => "no audio track this version can decode".into(),
         }),
     }
@@ -836,6 +856,8 @@ fn probe_container(path: &Path, format: Format) -> Result<AudioInfo, String> {
     // The length in the container's own time units (MKA: milliseconds). Lossy codecs decode
     // a little more (the encoder's delay and padding): see `length_ok`.
     let samples = match (p.n_frames, p.time_base) {
+        // Symphonia counts the 8 header bytes of the SSND chunk as sound: COMM is exact.
+        _ if format == Format::Aiff => aiff_frames(path)?,
         (Some(n), Some(base)) => {
             let t = base.calc_time(n);
             ((t.seconds as f64 + t.frac) * rate as f64).round() as u64
@@ -851,6 +873,28 @@ fn probe_container(path: &Path, format: Format) -> Result<AudioInfo, String> {
         }
     };
     Ok(AudioInfo { format, rate, bits: bits.unwrap_or(16), channels, samples, md5: None, float: false, codec: Some(codec) })
+}
+
+/// The length of an AIFF file, from its COMM chunk (numSampleFrames).
+fn aiff_frames(path: &Path) -> Result<u64, String> {
+    let mut f = BufReader::new(File::open(path).map_err(io_err)?);
+    let mut head = [0u8; 12];
+    f.read_exact(&mut head).map_err(io_err)?;
+    if &head[..4] != b"FORM" || !matches!(&head[8..], b"AIFF" | b"AIFC") {
+        return Err("not an AIFF file".into());
+    }
+    loop {
+        let mut chunk = [0u8; 8];
+        f.read_exact(&mut chunk).map_err(|_| "no COMM chunk".to_string())?;
+        let size = u32::from_be_bytes(chunk[4..].try_into().unwrap()) as i64;
+        if &chunk[..4] == b"COMM" {
+            let mut comm = [0u8; 6];
+            f.read_exact(&mut comm).map_err(io_err)?;
+            return Ok(u32::from_be_bytes(comm[2..].try_into().unwrap()) as u64);
+        }
+        // Chunks are padded to an even size.
+        f.seek_relative(size + (size & 1)).map_err(io_err)?;
+    }
 }
 
 /// Whether `frames` decoded samples match the announced length. In an M4A or MKA, lossy
@@ -870,6 +914,12 @@ fn decode_container(path: &Path, format: Format, cancel: &AtomicBool, sink: impl
     let (reader, track, codec) = open_container(path, format)?;
     let bits = container_bits(&track, codec)?;
     decode_track(reader, &track, bits, cancel, sink)
+}
+
+/// An Ogg Opus file: its first page holds the "OpusHead" packet.
+fn ogg_opus(path: &Path) -> bool {
+    let mut head = Vec::new();
+    File::open(path).is_ok_and(|f| f.take(512).read_to_end(&mut head).is_ok()) && head.windows(8).any(|w| w == b"OpusHead")
 }
 
 /// The codec ID of the first audio track of an MKA file ("A_AC3"), read from its first 64 KB.
@@ -916,7 +966,7 @@ pub fn source_tags(path: &Path) -> Vec<(String, String)> {
     match Format::from_path(path) {
         Some(Format::Flac) => return flac_tags(path).unwrap_or_default(),
         Some(Format::Ape | Format::WavPack) => {}
-        Some(f @ (Format::M4a | Format::Mp4 | Format::Mka)) => return container_tags(path, f),
+        Some(f @ (Format::M4a | Format::Mp4 | Format::Mka | Format::Ogg)) => return container_tags(path, f),
         _ => return Vec::new(),
     }
     let Ok(mut file) = File::open(path) else { return Vec::new() };
@@ -1256,6 +1306,36 @@ pub fn file_crc32(path: &Path, cancel: &AtomicBool) -> Result<u32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aiff_length_and_sound() {
+        // 16-bit stereo, 44.1 kHz (80-bit extended float), 5 frames, big-endian samples.
+        let samples: Vec<i16> = (0..10).map(|i| (i * 1000 - 4000) as i16).collect();
+        let mut comm = 2u16.to_be_bytes().to_vec();
+        comm.extend(5u32.to_be_bytes());
+        comm.extend(16u16.to_be_bytes());
+        comm.extend([0x40, 0x0E, 0xAC, 0x44, 0, 0, 0, 0, 0, 0]);
+        let mut ssnd = vec![0u8; 8];
+        ssnd.extend(samples.iter().flat_map(|s| s.to_be_bytes()));
+        let mut body = b"AIFF".to_vec();
+        for (id, data) in [(b"COMM", &comm), (b"SSND", &ssnd)] {
+            body.extend(id);
+            body.extend((data.len() as u32).to_be_bytes());
+            body.extend(data);
+        }
+        let mut file = b"FORM".to_vec();
+        file.extend((body.len() as u32).to_be_bytes());
+        file.extend(body);
+        let path = std::env::temp_dir().join(format!("bt-test-{}.aiff", std::process::id()));
+        std::fs::write(&path, &file).unwrap();
+        let info = probe(&path).unwrap();
+        assert_eq!((info.format, info.rate, info.bits, info.channels, info.samples), (Format::Aiff, 44100, 16, 2, 5));
+        let mut pcm = Vec::new();
+        let frames = read_pcm(&path, &AtomicBool::new(false), |chunk| pcm.extend_from_slice(chunk)).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(frames, 5);
+        assert_eq!(pcm, samples.iter().flat_map(|s| s.to_le_bytes()).collect::<Vec<_>>());
+    }
 
     #[test]
     fn ape_tags_to_vorbis() {

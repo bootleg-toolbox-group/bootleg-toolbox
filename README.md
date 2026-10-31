@@ -14,10 +14,10 @@ ffmpeg or LAME. Every decoder and encoder is built in.
 
 ## Features
 
-- **Reads** FLAC, WAV (integer and float), SHN (Shorten), APE (Monkey's Audio 3.95 and
-  later), WavPack and ALAC (lossless), MP3, MP2 and AAC (always flagged as lossy), and the
-  M4A and MKA containers (AAC, ALAC, FLAC, MP2, MP3, PCM inside; AC-3 not yet), and the
-  audio track of MP4 concert videos.
+- **Reads** FLAC, WAV (integer and float), AIFF, SHN (Shorten), APE (Monkey's Audio 3.95
+  and later), WavPack and ALAC (lossless), MP3, MP2, AAC and Ogg Vorbis (always flagged as
+  lossy), the M4A, MKA and Ogg containers (AAC, ALAC, FLAC, MP2, MP3, PCM, Vorbis inside;
+  AC-3 and Opus not yet), the audio track of MP4 concert videos, and DVD-Video folders.
 - **File details**: format, length, CD-readiness, MD5 signature, sector boundary errors
   (SBE), for every track and every show.
 - **Checksums**: verifies and creates `.ffp` (FLAC fingerprints), `.st5` (MD5 of the
