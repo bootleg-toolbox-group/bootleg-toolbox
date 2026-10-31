@@ -1000,7 +1000,7 @@ fn build_report(title: String, verdict: &Verdict, f: &Facts) -> Report {
                     if t.mid_side { "mid/side" } else { "left/right" }
                 )
             } else {
-                format!("none ({:.1} % of the bands, {:.0} standard deviations above chance)", t.likelihood * 100.0, t.contrast)
+                trace_none(t.likelihood, crate::mp3trace::THRESHOLD)
             },
             "The sound is analysed again with an MP3 encoder's own filter bank, at every possible position. A file decoded from an MP3 falls back onto the encoder's rounding grid in many bands (3 % and more, far above the other positions), even at 320 kbps; genuine audio stays around 2 %, at no particular position. Resampling or effects after the decoder erase this trace, so its absence does not prove a file lossless.",
             if t.found() { Level::Error } else { Level::Ok },
@@ -1019,7 +1019,7 @@ fn build_report(title: String, verdict: &Verdict, f: &Facts) -> Report {
                     if t.mid_side { "mid/side" } else { "left/right" }
                 )
             } else {
-                format!("none ({:.1} % of the bands, {:.0} standard deviations above chance)", t.likelihood * 100.0, t.contrast)
+                trace_none(t.likelihood, crate::aactrace::THRESHOLD)
             },
             "The same search with the transform of AAC (iTunes, YouTube, streaming services, many webcasts). A file decoded from an AAC falls back onto the encoder's rounding grid at one position; genuine audio does not. Resampling or effects after the decoder erase this trace.",
             if found { Level::Error } else { Level::Ok },
@@ -1228,6 +1228,17 @@ fn reasoning(verdict: &Verdict, f: &Facts) -> Vec<String> {
         r.push(format!("A tone at {:.2} kHz is a TV set's line frequency: the show was probably simulcast on TV, or a TV set was near the recorder.", t / 1000.0));
     }
     r
+}
+
+/// No coding trace: the share of bands, said to be normal, without the contrast (for a
+/// genuine file, "4 standard deviations above chance" read like a signal).
+fn trace_none(likelihood: f64, threshold: f64) -> String {
+    let share = likelihood * 100.0;
+    if likelihood <= threshold {
+        format!("none ({share:.1} % of the bands, within the normal range)")
+    } else {
+        format!("none ({share:.1} % of the bands, but at every position alike: not an encoder's grid)")
+    }
 }
 
 #[cfg(test)]

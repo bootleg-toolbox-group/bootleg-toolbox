@@ -610,9 +610,9 @@ fn write_set(doc: &mut Doc, set: &TitleSet) {
     let pcm: Vec<String> = lossless.iter().enumerate().filter(|(_, l)| **l).map(|(n, _)| (n + 1).to_string()).collect();
     if !lines.is_empty() {
         doc.line("Audio extraction", match (pcm.len(), lines.len()) {
-            (0, _) => "lossy only: keep the original stream as it is; converting it to WAV or FLAC does not make it lossless".to_string(),
-            (_, 1) => "lossless (LPCM): can be extracted to WAV or FLAC without any loss".to_string(),
-            (_, _) => format!("track {} lossless (LPCM): can be extracted to WAV or FLAC without any loss", pcm.join(", ")),
+            (0, _) => "lossy only: keep the original stream (a FLAC of it is not lossless)".to_string(),
+            (_, 1) => "lossless (LPCM): extracts to FLAC without any loss".to_string(),
+            (_, _) => format!("track {} lossless (LPCM): extracts to FLAC without any loss", pcm.join(", ")),
         });
     }
 

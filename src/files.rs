@@ -35,9 +35,22 @@ pub fn outer_folder(root: &Path) -> Option<&Path> {
     (!name.is_empty() && (holder_folder(&file_name(root)) || date.is_match(&name))).then_some(parent)
 }
 
+/// Folders Bootleg Toolbox writes corrected copies into, inside a show: left out of
+/// torrents, MP3 copies and the info file search.
+pub const OUTPUT_DIRS: [&str; 2] = ["SBE-fixed", "WAV-cleaned"];
+
+pub fn is_output_dir(name: &str) -> bool {
+    OUTPUT_DIRS.iter().any(|d| name.eq_ignore_ascii_case(d))
+}
+
 /// The name of a show for the list and the messages: its folder, after the folder above
-/// when that one names the show (see `outer_folder`).
+/// when that one names the show (see `outer_folder`). The copies in an output folder
+/// put that folder first ("WAV-cleaned: <show>"), seen even in a narrow column.
 pub fn show_name(root: &Path) -> String {
+    let name = file_name(root);
+    if let Some(parent) = root.parent().filter(|_| is_output_dir(&name)) {
+        return format!("{name}: {}", show_name(parent));
+    }
     match outer_folder(root) {
         Some(parent) => format!("{}/{}", file_name(parent), file_name(root)),
         None => file_name(root),
@@ -382,6 +395,8 @@ mod tests {
         let inner = "1995-11-21 - Madrid (Version 2)";
         assert_eq!(show_name(&Path::new("/m").join(outer).join(inner)), format!("{outer}/{inner}"));
         assert_eq!(show_name(&Path::new("/m/Iron Maiden").join(inner)), inner);
+        assert_eq!(show_name(&Path::new("/m").join(show).join("WAV-cleaned")), format!("WAV-cleaned: {show}"));
+        assert_eq!(show_name(&Path::new("/m").join(show).join("AUDIO/SBE-fixed")), format!("SBE-fixed: {show}/AUDIO"));
     }
 
     #[test]

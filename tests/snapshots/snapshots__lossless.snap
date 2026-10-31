@@ -173,13 +173,13 @@ expression: text
 - 19 kHz FM stereo pilot: not found
 - 19 kHz FM stereo pilot: not found
 - 19 kHz FM stereo pilot: not found
-- AAC coding traces: none (1.7 % of the bands, 3 standard deviations above chance)
-- AAC coding traces: none (1.8 % of the bands, 4 standard deviations above chance)
-- AAC coding traces: none (1.8 % of the bands, 4 standard deviations above chance)
-- AAC coding traces: none (1.8 % of the bands, 5 standard deviations above chance)
-- AAC coding traces: none (1.8 % of the bands, 5 standard deviations above chance)
-- AAC coding traces: none (1.8 % of the bands, 5 standard deviations above chance)
-- AAC coding traces: none (16.8 % of the bands, 3 standard deviations above chance)
+- AAC coding traces: none (1.7 % of the bands, within the normal range)
+- AAC coding traces: none (1.8 % of the bands, within the normal range)
+- AAC coding traces: none (1.8 % of the bands, within the normal range)
+- AAC coding traces: none (1.8 % of the bands, within the normal range)
+- AAC coding traces: none (1.8 % of the bands, within the normal range)
+- AAC coding traces: none (1.8 % of the bands, within the normal range)
+- AAC coding traces: none (16.8 % of the bands, but at every position alike: not an encoder's grid)
 - CD1/01 - Opening.flac: Lossless (treble -0 dB)
 - CD1/02 - Second Song.flac: Lossless (treble -0 dB)
 - CD1/03 - Long Jam.flac: Lossless (treble -0 dB)
@@ -205,13 +205,13 @@ expression: text
 - Highest frequencies: no brick-wall lowpass up to 21.4 kHz
 - Highest frequencies: no brick-wall lowpass up to 47.3 kHz
 - Highest frequencies: steep lowpass at 13.4 kHz (21 dB drop)
-- MP3 coding traces: none (1.7 % of the bands, 3 standard deviations above chance)
-- MP3 coding traces: none (1.7 % of the bands, 4 standard deviations above chance)
-- MP3 coding traces: none (1.8 % of the bands, 4 standard deviations above chance)
-- MP3 coding traces: none (1.8 % of the bands, 4 standard deviations above chance)
-- MP3 coding traces: none (1.9 % of the bands, 4 standard deviations above chance)
-- MP3 coding traces: none (1.9 % of the bands, 5 standard deviations above chance)
-- MP3 coding traces: none (31.5 % of the bands, 4 standard deviations above chance)
+- MP3 coding traces: none (1.7 % of the bands, within the normal range)
+- MP3 coding traces: none (1.7 % of the bands, within the normal range)
+- MP3 coding traces: none (1.8 % of the bands, within the normal range)
+- MP3 coding traces: none (1.8 % of the bands, within the normal range)
+- MP3 coding traces: none (1.9 % of the bands, within the normal range)
+- MP3 coding traces: none (1.9 % of the bands, within the normal range)
+- MP3 coding traces: none (31.5 % of the bands, but at every position alike: not an encoder's grid)
 - Stereo width: difference channel (L-R) 11 dB below the sum
 - Stereo width: difference channel (L-R) 11 dB below the sum
 - Stereo width: difference channel (L-R) 12 dB below the sum

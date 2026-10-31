@@ -315,7 +315,7 @@ pub fn run(paths: Vec<PathBuf>) -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_title(APP_NAME)
             .with_inner_size([1000.0, 465.0])
-            .with_min_inner_size([620.0, 320.0])
+            .with_min_inner_size([680.0, 320.0])
             .with_drag_and_drop(true)
             .with_app_id("bootleg-toolbox")
             .with_icon(app_icon()),
@@ -2327,21 +2327,24 @@ impl App {
                     let level = self.opt.flac_level;
                     ui.menu_button("🎵 Convert ⏷", |ui| fit_below(ui, |ui| {
                         menu_open = true;
-                        ui.label(RichText::new("To FLAC (verified)").strong());
-                        for l in 0..=8u8 {
-                            let text = match l {
-                                0 => "Level 0 (fastest)".to_string(),
-                                5 => "Level 5 (flac default)".to_string(),
-                                8 => "Level 8 (smallest)".to_string(),
-                                _ => format!("Level {l}"),
-                            };
-                            let text = if l == level { format!("{text}  ✔") } else { text };
-                            if ui.button(text).clicked() {
-                                ui.close_menu();
-                                actions.push(Action::FlacLevel(l));
-                                actions.push(Action::Run(Op::Convert { target: Target::Flac, level: l, round_float: false }));
+                        ui.label(RichText::new("To FLAC (verified), level:").strong());
+                        // The levels on one row: a sub-menu would stay open over the other entries (egui 0.29).
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            for l in 0..=8u8 {
+                                let tip = match l {
+                                    0 => "Level 0: fastest".to_string(),
+                                    5 => "Level 5: the flac default".to_string(),
+                                    8 => "Level 8: smallest files".to_string(),
+                                    _ => format!("Level {l}"),
+                                };
+                                if ui.selectable_label(l == level, format!(" {l} ")).on_hover_text(tip).clicked() {
+                                    ui.close_menu();
+                                    actions.push(Action::FlacLevel(l));
+                                    actions.push(Action::Run(Op::Convert { target: Target::Flac, level: l, round_float: false }));
+                                }
                             }
-                        }
+                        });
                         ui.separator();
                         if ui.button("To WAV").clicked() {
                             ui.close_menu();
@@ -2396,18 +2399,24 @@ impl App {
                     ui.label(RichText::new(format!("{}...", r.label)).color(busy).strong());
                 } else if let Some((text, when)) = &self.flash {
                     if when.elapsed() < Duration::from_secs(15) {
-                        ui.label(text);
+                        // At most half the bar, wrapped, so that the selection stays readable too.
+                        let half = ui.available_width() / 2.0;
+                        ui.scope(|ui| {
+                            ui.set_max_width(half);
+                            ui.add(egui::Label::new(text.as_str()).wrap());
+                        });
                     }
                 }
                 if !self.shows.is_empty() {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let (shows, files) = self.selection();
-                        let counts = format!("{} show(s), {} file(s)", shows.len(), files.len());
-                        if self.selected.is_empty() {
-                            ui.label(colored(format!("No selection: actions apply to the whole list ({counts})"), Level::Warn));
+                        let counts = format!("{}, {}", crate::ops::plural(shows.len(), "show", "shows"), crate::ops::plural(files.len(), "file", "files"));
+                        let text = if self.selected.is_empty() {
+                            colored(format!("No selection: actions apply to the whole list ({counts})"), Level::Warn)
                         } else {
-                            ui.label(format!("Selected: {counts}"));
-                        }
+                            RichText::new(format!("Selected: {counts}"))
+                        };
+                        ui.add(egui::Label::new(text).wrap());
                     });
                 }
             });
@@ -2424,7 +2433,7 @@ impl App {
             ui.horizontal(|ui| {
                 let arrow = if open { "⏷" } else { "⏵" };
                 toggle = ui
-                    .add(egui::Label::new(RichText::new(format!("{arrow} Log ({} lines)", self.log.len())).weak()).sense(egui::Sense::click()))
+                    .add(egui::Label::new(RichText::new(format!("{arrow} Log ({})", crate::ops::plural(self.log.len(), "line", "lines"))).weak()).sense(egui::Sense::click()))
                     .on_hover_text(if open { "Fold the log" } else { "Unfold the log" })
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked();
@@ -2452,10 +2461,23 @@ impl App {
             if !open {
                 return;
             }
-            let row_height = ui.text_style_height(&egui::TextStyle::Monospace) + 2.0;
-            egui::ScrollArea::both().stick_to_bottom(true).auto_shrink([false, false]).show_rows(ui, row_height, self.log.len(), |ui, range| {
-                for (text, level) in &self.log[range] {
-                    ui.add(egui::Label::new(colored(text.clone(), *level).monospace()).extend());
+            // Long lines wrap: each line is measured, only those in view are drawn.
+            let font = egui::TextStyle::Monospace.resolve(ui.style());
+            let gap = 2.0;
+            egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).show_viewport(ui, |ui, viewport| {
+                let width = ui.available_width();
+                let heights: Vec<f32> = ui.fonts(|f| {
+                    self.log.iter().map(|(text, _)| f.layout(text.clone(), font.clone(), Color32::WHITE, width).size().y + gap).collect()
+                });
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(width, heights.iter().sum()), egui::Sense::hover());
+                let mut top = 0.0;
+                for ((text, level), height) in self.log.iter().zip(heights) {
+                    if top + height >= viewport.min.y && top <= viewport.max.y {
+                        let line = egui::Rect::from_min_size(rect.min + egui::vec2(0.0, top), egui::vec2(width, height));
+                        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(line).layout(egui::Layout::top_down(egui::Align::Min)));
+                        child.add(egui::Label::new(colored(text.clone(), *level).monospace()).wrap());
+                    }
+                    top += height;
                 }
             });
         });
@@ -2464,8 +2486,20 @@ impl App {
     fn table(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         egui::CentralPanel::default().show(ctx, |ui| {
             if self.shows.is_empty() {
-                ui.centered_and_justified(|ui| {
-                    ui.label(RichText::new("Drop show folders or audio files here\n(FLAC, WAV, APE, SHN, WV)\n\nA new drop replaces the list. Hold Ctrl to add to it instead.").size(15.0).weak());
+                // Wrapped, centred, and scrolled when the window is too small for it.
+                let height = ui.available_height();
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    ui.add_space((height / 2.0 - 60.0).max(8.0));
+                    ui.vertical_centered(|ui| {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new("Drop show folders or audio files here\n(FLAC, WAV, APE, SHN, WavPack, ALAC, MP3, MP2, AAC, M4A, MKA, MP4 videos, DVD folders)\n\nA new drop replaces the list. Hold Ctrl to add to it instead.")
+                                    .size(15.0)
+                                    .weak(),
+                            )
+                            .wrap(),
+                        );
+                    });
                 });
                 return;
             }
@@ -2485,6 +2519,8 @@ impl App {
             let keys_taken = ctx.wants_keyboard_input() || self.info_choice.is_some() || self.float_dialog.is_some() || self.settings.is_some();
             // A little air between columns fitted to their content.
             ui.spacing_mut().item_spacing.x = 16.0;
+            // The Result column wraps its text: a row grows to show it all.
+            let mut result_width: f32 = 0.0;
             egui::ScrollArea::horizontal().show(ui, |ui| {
                 let mut table = TableBuilder::new(ui)
                     // Each set of visible columns keeps its own widths. The number changes with
@@ -2502,6 +2538,10 @@ impl App {
                     .header(22.0, |mut header| {
                         for col in &cols {
                             header.col(|ui| {
+                                // The part in view: the list may be wider than the window.
+                                if *col == Col::Result {
+                                    result_width = visible_width(ui);
+                                }
                                 ui.strong(col.title()).on_hover_text(col.describe());
                                 // Right-click on a header: choose the columns.
                                 let all = ui.interact(ui.max_rect(), ui.id().with("columns menu"), egui::Sense::click());
@@ -2533,12 +2573,23 @@ impl App {
                             }
                         }
                         let (mut first_shown, mut last_shown) = (usize::MAX, 0usize);
-                        let row_height = if compact { 18.0 } else { 20.0 };
+                        let row_height: f32 = if compact { 18.0 } else { 20.0 };
+                        let font = egui::TextStyle::Body.resolve(&ctx.style());
+                        let heights: Vec<f32> = rows
+                            .iter()
+                            .map(|r| match self.status.get(self.row_path(*r)) {
+                                Some((text, _, _)) if result_width > 0.0 => {
+                                    let galley = ctx.fonts(|f| f.layout(text.clone(), font.clone(), Color32::WHITE, result_width));
+                                    row_height.max(galley.size().y + 4.0)
+                                }
+                                _ => row_height,
+                            })
+                            .collect();
                         // Page Up / Page Down scroll by a screen (keeping one row in view), Home / End
                         // go to the top / bottom of the list.
                         if !keys_taken {
                             let page = (visible.height() - row_height).max(row_height);
-                            let all = rows.len() as f32 * row_height + visible.height();
+                            let all = heights.iter().sum::<f32>() + visible.height();
                             let delta = ctx.input_mut(|i| {
                                 if i.consume_key(Modifiers::NONE, Key::PageDown) { -page }
                                 else if i.consume_key(Modifiers::NONE, Key::PageUp) { page }
@@ -2550,7 +2601,7 @@ impl App {
                                 body.ui_mut().scroll_with_delta(egui::vec2(0.0, delta));
                             }
                         }
-                        body.rows(row_height, rows.len(), |mut row| {
+                        body.heterogeneous_rows(heights.into_iter(), |mut row| {
                             let index = row.index();
                             first_shown = first_shown.min(index);
                             last_shown = last_shown.max(index);
@@ -2645,8 +2696,23 @@ impl App {
         });
     }
 
+    /// The Result cell: wrapped to the width in view (as `table` measures the rows), truncated
+    /// when hardly any of it is in view.
     fn status_cell(&self, ui: &mut egui::Ui, path: &Path) -> egui::Response {
-        Self::verdict_cell(ui, self.status.get(path))
+        let wrap = visible_width(ui);
+        match self.status.get(path) {
+            Some((text, level, tooltip)) => {
+                let tip = if tooltip.is_empty() { text } else { tooltip };
+                let label = egui::Label::new(colored(text.clone(), *level));
+                if wrap > 0.0 {
+                    ui.set_max_width(wrap);
+                    ui.add(label.wrap()).on_hover_text(tip)
+                } else {
+                    ui.add(label.truncate()).on_hover_text(tip)
+                }
+            }
+            None => ui.label(""),
+        }
     }
 
     /// A Source or Speed cell: its verdict is a link to the full analysis. The click is read on
@@ -2703,7 +2769,8 @@ impl App {
                     if ui.add(egui::Label::new(arrow).sense(egui::Sense::click())).clicked() {
                         actions.push(Action::Toggle(show.root.clone()));
                     }
-                    let parent_is_show = show.root.parent().is_some_and(|p| self.shows.iter().any(|s| s.root == p));
+                    let parent_is_show = show.root.parent().is_some_and(|p| self.shows.iter().any(|s| s.root == p))
+                        && !crate::files::is_output_dir(&file_name(&show.root));
                     let label = if parent_is_show {
                         format!("{}/{}", show.root.parent().map(file_name).unwrap_or_default(), file_name(&show.root))
                     } else {
@@ -2719,8 +2786,8 @@ impl App {
                 }
                 Col::Length => responses.push(row.col(|ui| {
                     if !infos.is_empty() {
-                        let total: f64 = infos.iter().map(|i| i.seconds()).sum();
-                        let suffix = if infos.len() < show.files.len() { " +" } else { "" };
+                        let (total, complete) = show_length(&show.files, &self.info);
+                        let suffix = if complete { "" } else { " +" };
                         ui.label(format!("{}{suffix}", fmt_total(total)));
                     }
                 }).1),
@@ -3713,6 +3780,25 @@ fn mp3_buttons(ui: &mut egui::Ui, disabled: bool, actions: &mut Vec<Action>) {
     }
 }
 
+/// A show's length, each track once: a FLAC and a WAV of the same track (during or after
+/// a conversion) count once. False when a track's length is not known yet.
+fn show_length(files: &[PathBuf], info: &HashMap<PathBuf, AudioInfo>) -> (f64, bool) {
+    let mut tracks: HashMap<PathBuf, Option<f64>> = HashMap::new();
+    for f in files {
+        let seconds = info.get(f).map(|i| i.seconds());
+        let entry = tracks.entry(f.with_extension("")).or_default();
+        *entry = entry.or(seconds);
+    }
+    (tracks.values().flatten().sum(), tracks.values().all(Option::is_some))
+}
+
+/// The width of a table cell in view (the list may be wider than the window), 0 when
+/// hardly any of it is.
+fn visible_width(ui: &egui::Ui) -> f32 {
+    let visible = ui.clip_rect().intersect(ui.max_rect()).width();
+    if visible >= 60.0 { visible } else { 0.0 }
+}
+
 /// "Clean WAV headers": copies with only the format and the sound.
 fn clean_wav_button(ui: &mut egui::Ui, disabled: bool, actions: &mut Vec<Action>) {
     let tip = "Rewrite WAV files with only their format and their sound, in the canonical layout: extra chunks (LIST, id3, bext...), \
@@ -3886,7 +3972,7 @@ impl eframe::App for App {
         let title = if self.shows.is_empty() {
             APP_NAME.to_string()
         } else {
-            format!("{APP_NAME} - {} show(s), {file_count} file(s)", self.shows.len())
+            format!("{APP_NAME} - {}, {}", crate::ops::plural(self.shows.len(), "show", "shows"), crate::ops::plural(file_count, "file", "files"))
         };
         if title != self.title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));

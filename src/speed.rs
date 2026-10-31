@@ -11,7 +11,7 @@ use std::sync::atomic::AtomicBool;
 
 use crate::audio::AudioInfo;
 use crate::dsp::{self, Fft};
-use crate::ops::Level;
+use crate::ops::{plural, Level};
 use crate::report::{Measure, Report};
 
 /// Under this, "in tune with A = 440 Hz" (correctly running recordings measure -4 to +8 cents).
@@ -340,6 +340,11 @@ pub fn track_verdict(title: String, f: &SpeedFacts) -> SpeedVerdict {
     SpeedVerdict { label, level, sentence, report }
 }
 
+/// "median of 4 tracks, spread 3 cents", or "1 track" alone (no median nor spread).
+fn median_of(k: usize, spread: f64) -> String {
+    if k == 1 { "1 track".into() } else { format!("median of {k} tracks, spread {spread:.0} cents") }
+}
+
 /// The verdict for a whole show: tracks agreeing with each other are much more convincing.
 pub fn show_verdict(title: String, tracks: &[(String, SpeedFacts, String, Level, String)]) -> SpeedVerdict {
     let pilots: Vec<f64> = tracks.iter().filter_map(|t| t.1.pilot).collect();
@@ -374,17 +379,18 @@ pub fn show_verdict(title: String, tracks: &[(String, SpeedFacts, String, Level,
         .map(|(n, a)| (n, dsp::median(&a).unwrap_or(0.0), a.len()));
 
     let mut reasoning = Vec::new();
-    let hum_note = hum.map(|(_, _, k)| format!(" (on {k} of {} tracks)", tracks.len())).unwrap_or_default();
+    let of_tracks = |k: usize| format!("{k} of {}", plural(tracks.len(), "track", "tracks"));
+    let hum_note = hum.map(|(_, _, k)| format!(" (on {})", of_tracks(k))).unwrap_or_default();
     // A real FM pilot is on most tracks, at the same frequency.
     let pilot = dsp::median(&pilots).filter(|p| {
         let agreeing = pilots.iter().filter(|q| (*q - p).abs() <= 0.15).count();
         agreeing * 2 >= tracks.len()
     });
     if pilot.is_none() && !pilots.is_empty() {
-        reasoning.push(format!("A tone that could be the FM pilot shows on only {} of {} tracks: not used.", pilots.len(), tracks.len()));
+        reasoning.push(format!("A tone that could be the FM pilot shows on only {}: not used.", of_tracks(pilots.len())));
     }
     let (label, level, sentence) = if let Some(p) = pilot {
-        reasoning.push(format!("The 19 kHz FM pilot is on {} of {} tracks: the recording plays {}.", pilots.len(), tracks.len(), if p.abs() < 0.2 { "at the right speed".into() } else { describe(p) }));
+        reasoning.push(format!("The 19 kHz FM pilot is on {}: the recording plays {}.", of_tracks(pilots.len()), if p.abs() < 0.2 { "at the right speed".into() } else { describe(p) }));
         if p.abs() < 0.2 {
             ("OK".to_string(), Level::Ok, "Right speed: the 19 kHz FM pilot is where it should be".to_string())
         } else {
@@ -396,7 +402,8 @@ pub fn show_verdict(title: String, tracks: &[(String, SpeedFacts, String, Level,
         let hum_pct = hum.map(|(n, f, _)| (f / n - 1.0) * 100.0);
         if let Some((c, spread, k, coh)) = tuning {
             reasoning.push(format!(
-                "Tuning: {c:+.0} cents from A = 440 Hz (median of {k} tracks, spread {spread:.0} cents, coherence {coh:.2}){}.",
+                "Tuning: {c:+.0} cents from A = 440 Hz ({}, coherence {coh:.2}){}.",
+                median_of(k, spread),
                 if spread > 10.0 {
                     ": the tracks disagree"
                 } else if coh < CLAIM_COHERENCE {
@@ -407,7 +414,7 @@ pub fn show_verdict(title: String, tracks: &[(String, SpeedFacts, String, Level,
             ));
         }
         if let (Some((n, f, k)), Some(h)) = (hum, hum_pct) {
-            reasoning.push(format!("Mains hum: {k} tracks show the same line at {f:.2} Hz, {} from {n:.0} Hz.", describe(h)));
+            reasoning.push(format!("Mains hum: {} the same line at {f:.2} Hz, {} from {n:.0} Hz.", if k == 1 { "1 track shows".to_string() } else { format!("{k} tracks show") }, describe(h)));
         }
         match (tuning, tuning_pct, hum_pct) {
             (Some((_, spread, _, coh)), Some(t), Some(h)) if spread <= 10.0 && coh >= MIN_COHERENCE && (t - h).abs() > 1.0 => {
@@ -461,8 +468,8 @@ pub fn show_verdict(title: String, tracks: &[(String, SpeedFacts, String, Level,
         hum.map(|(n, f, _)| (n, f)),
         &hum_note,
     );
-    if let Some((_, spread, k, _)) = tuning {
-        measures[1].value = format!("{} (median of {k} tracks, spread {spread:.0} cents)", measures[1].value.split(", coherence").next().unwrap_or_default());
+    if let Some((_, spread, k, _)) = tuning.filter(|t| t.2 > 1) {
+        measures[1].value = format!("{} ({})", measures[1].value.split(", coherence").next().unwrap_or_default(), median_of(k, spread));
     }
     let report = Report {
         heading: "Speed analysis".into(),

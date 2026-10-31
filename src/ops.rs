@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use sha1::Sha1;
 
 use crate::audio::{self, hex, AudioInfo, Format, ZERO_MD5};
-use crate::files::{self, ext_lower, file_name, rel_posix, Show};
+use crate::files::{self, ext_lower, file_name, is_output_dir, rel_posix, Show};
 
 pub const APP_NAME: &str = "Bootleg Toolbox";
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -602,9 +602,9 @@ fn details_dvd(ctx: &Ctx, path: &Path) -> Result<DetailsResult<'static>, String>
         "{}\n\n{}\nThe audio of a DVD is not decoded here: Media info (Ctrl+I) gives the whole title set (video, subtitles, titles and chapters).",
         list.iter().map(|l| format!("Audio {l}")).collect::<Vec<_>>().join("\n"),
         if lossless {
-            "An LPCM track can be extracted to WAV or FLAC without any loss."
+            "An LPCM track extracts to FLAC without any loss (Extract DVD audio)."
         } else {
-            "Lossy only (AC-3, DTS, MPEG audio): keep the original stream; converting it to WAV or FLAC does not make it lossless."
+            "Lossy only (AC-3, DTS, MPEG audio): keep the original stream; a FLAC of it would not be lossless."
         }
     );
     ctx.status(path, &text, level, tooltip);
@@ -1259,14 +1259,6 @@ pub fn op_mp3(ctx: &Ctx, shows: &[Show], files: &[PathBuf], mode: crate::encode:
     summary
 }
 
-/// Folders Bootleg Toolbox writes corrected copies into, inside a show: left out of
-/// torrents, MP3 copies and the info file search.
-const OUTPUT_DIRS: [&str; 2] = ["SBE-fixed", "WAV-cleaned"];
-
-fn is_output_dir(name: &str) -> bool {
-    OUTPUT_DIRS.iter().any(|d| name.eq_ignore_ascii_case(d))
-}
-
 /// What is wrong with a WAV file's structure, besides its sound; Err when the sound itself
 /// is incomplete (nothing to clean then).
 fn wav_issues(path: &Path) -> Result<Vec<String>, String> {
@@ -1549,7 +1541,7 @@ pub fn op_speed(ctx: &Ctx, shows: &[Show], files: &[PathBuf]) -> String {
             continue;
         }
         let verdict = crate::speed::show_verdict(files::show_name(&show.root), &tracks);
-        ctx.log(format!("{}: speed {}", files::show_name(&show.root), verdict.sentence.to_lowercase()), verdict.level);
+        ctx.log(format!("{}: {}", files::show_name(&show.root), verdict.sentence), verdict.level);
         summary_levels.push(Some(verdict.level));
         send(&show.root, &verdict);
     }
