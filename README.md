@@ -7,6 +7,8 @@ A modern, open-source take on Trader's Little Helper.
 For a detailed description of every feature and a comparison with Trader's Little Helper,
 see the [overview](docs/OVERVIEW.md).
 
+![Bootleg Toolbox: shows checked for lossless origin, with MP3 traces, FM broadcasts and a DVD](docs/screenshots/main.png)
+
 **One executable for Windows and Linux. Nothing else to install:** no flac, shntool,
 ffmpeg or LAME. Every decoder and encoder is built in.
 
