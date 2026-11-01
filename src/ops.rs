@@ -174,6 +174,9 @@ pub struct Options {
     pub compact: bool,
     /// Table columns the user chose to hide (by title).
     pub hidden_columns: Vec<String>,
+    /// After a torrent is made: open the show's .ffp and info file, to copy them into the
+    /// upload form.
+    pub open_after_torrent: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -210,6 +213,7 @@ impl Default for Options {
             after_flac_old: true,
             after_flac_ffp: true,
             hidden_columns: Vec::new(),
+            open_after_torrent: false,
             tag_scheme: Default::default(),
             tag_write: true,
             tag_rename: true,

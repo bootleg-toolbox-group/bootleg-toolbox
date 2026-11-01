@@ -435,6 +435,8 @@ struct Running {
     label: String,
     done: usize,
     total: usize,
+    /// Torrents being made with "open the .ffp and info file" on: the show folders.
+    open_after: Vec<PathBuf>,
 }
 
 pub struct App {
@@ -1029,8 +1031,9 @@ impl App {
             self.log(format!("--- {} ---", op.label()), Level::Info);
         }
         let label = op.label().to_string();
+        let open_after = if matches!(op, Op::Torrent(_)) && self.opt.open_after_torrent { shows.iter().map(|s| s.root.clone()).collect() } else { Vec::new() };
         ops::spawn(op, shows, files, self.opt.clone(), tx, cancel.clone());
-        self.running = Some(Running { rx, cancel, label, done: 0, total: 0 });
+        self.running = Some(Running { rx, cancel, label, done: 0, total: 0, open_after });
     }
 
     fn run_on_selection(&mut self, op: Op) {
@@ -1205,7 +1208,9 @@ impl App {
             }
         }
         if let Some((summary, rescan)) = finished {
-            self.running = None;
+            if let Some(running) = self.running.take() {
+                self.open_for_upload(&running.open_after);
+            }
             if self.float_pending.is_some() {
                 self.flash(summary.clone());
                 self.float_scanned(summary == "Stopped.");
@@ -1261,6 +1266,35 @@ impl App {
 
     fn flash(&mut self, text: impl Into<String>) {
         self.flash = Some((text.into(), Instant::now()));
+    }
+
+    /// Opens the .ffp and the info file of each show that got its torrent, in the system's
+    /// text editor, to copy them into the upload form.
+    fn open_for_upload(&mut self, roots: &[PathBuf]) {
+        const MAX_SHOWS: usize = 5;
+        let made: Vec<&PathBuf> = roots
+            .iter()
+            .filter(|r| self.status.get(*r).is_some_and(|(text, level, _)| *level == Level::Ok && text.starts_with("Torrent created")))
+            .collect();
+        if made.len() > MAX_SHOWS {
+            self.log(format!("{} shows: their .ffp and info files are not opened (only up to {MAX_SHOWS} at a time).", made.len()), Level::Info);
+            return;
+        }
+        for root in made {
+            let name = crate::files::show_name(root);
+            let ffp = crate::files::all_files(root, true).into_iter().find(|p| crate::files::ext_lower(p) == "ffp");
+            let info = ops::info_candidates(root).into_iter().next();
+            for (what, file) in [("no .ffp file", ffp), ("no info file", info)] {
+                match file {
+                    Some(f) => {
+                        if let Err(e) = open::that_detached(&f) {
+                            self.log(format!("Cannot open {}: {e}", f.display()), Level::Warn);
+                        }
+                    }
+                    None => self.log(format!("{name}: {what} to open"), Level::Info),
+                }
+            }
+        }
     }
 
     fn copy_ffp(&mut self, ctx: &egui::Context) {
@@ -3141,6 +3175,7 @@ impl App {
                 ui.add_space(4.0);
                 ui.checkbox(&mut draft.torrent_private, "Private torrent (no DHT or peer exchange)");
                 ui.checkbox(&mut draft.torrent_source, "Tag each torrent with its site, so the same show can be seeded on several sites at once");
+                ui.checkbox(&mut draft.open_after_torrent, "Open the .ffp and the info file once the torrent is made, to copy them into the upload form");
                 ui.separator();
                 ui.heading("setlist.fm");
                 ui.horizontal(|ui| {

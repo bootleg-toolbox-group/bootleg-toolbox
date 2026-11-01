@@ -109,6 +109,7 @@ One click makes a private torrent per tracker, ready to upload.
 - **Piece size chosen automatically** (about 1,500 pieces at most, 32 KiB to 16 MiB).
 - **Junk left out:** hidden files (.directory from Dolphin, .DS_Store), Thumbs.db, desktop.ini, .part files, other .torrent files and the SBE-fixed folder.
 - The torrent is saved next to the show folder (or in a folder you choose), never inside it, with a reminder to download the torrent again from the site to get your passkey.
+- **Ready to paste:** with "Open the .ffp and the info file once the torrent is made" on (Settings, off by default), both files open in your text editor as soon as the torrent is there, to copy them into the site's upload form (up to five shows at a time).
 
 ### Torrent check
 

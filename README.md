@@ -26,7 +26,8 @@ ffmpeg or LAME. Every decoder and encoder is built in.
   (`\` paths, other letter case, Windows-1252 names).
 - **Decode test**: decodes every file in full and reports damaged or truncated ones.
 - **Torrents** for DIME and The Traders' Den (private, one `source` per tracker so both
-  can be seeded), and for any other tracker you add.
+  can be seeded), and for any other tracker you add; the show's .ffp and info file can
+  open by themselves once the torrent is made, ready to paste into the upload form.
 - **Torrent check**: checks a show against its `.torrent`, piece by piece, and names the
   damaged, missing and extra files (drop the `.torrent` on the window).
 - **Conversions**: to FLAC (levels 0 to 8, each file decoded again and checked), to WAV,
