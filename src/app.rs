@@ -24,7 +24,7 @@ const AUTO_DETAILS_LIMIT: usize = 3000;
 const COMPONENTS: &[(&str, &str, &str)] = &[
     ("egui, eframe, egui_extras", "user interface", "MIT or Apache-2.0"),
     ("winit", "windows and input", "Apache-2.0"),
-    ("Symphonia", "FLAC, MP3, AAC, ALAC and Vorbis decoding; M4A, MKA, AIFF and OGG files", "MPL-2.0"),
+    ("Symphonia", "FLAC, MP3, AAC, ALAC and Vorbis decoding; M4A, MP4, MKA, MKV, AIFF and OGG files", "MPL-2.0"),
     ("flacenc", "FLAC encoding", "Apache-2.0"),
     ("ape-decoder", "Monkey's Audio (APE) decoding", "MIT or Apache-2.0"),
     ("wavicle", "WavPack decoding", "MIT or Apache-2.0"),
@@ -70,9 +70,10 @@ const SETLIST_TIP: &str = "Get the setlist of each show from setlist.fm (artist 
                            and write it in its folder as \"Artist - YYYY-MM-DD - Venue, City, Country.txt\": tour and numbered songs, \
                            ready for Tag and rename. Needs your own setlist.fm API key (Settings).";
 
-const EXTRACT_TIP: &str = "Extract one audio track of each selected DVD title, from all its VOB files, to a single file in the DVD's folder: \
-                           FLAC for an LPCM track (lossless, bit for bit, checked), the original stream (.ac3, .dts, .mp2) for a lossy one, \
-                           unchanged. A window lets you pick the track when there are several.";
+const EXTRACT_TIP: &str = "Extract one audio track of each selected DVD title or video (MKV, MP4) to a single file: \
+                           FLAC for a lossless track (LPCM, PCM, FLAC, ALAC: bit for bit, checked), the original stream (.ac3, .dts, .aac...) \
+                           for a lossy one, unchanged. A DVD title's track is gathered from all its VOB files into the DVD's folder; \
+                           a video's goes beside it. A window lets you pick the track when there are several.";
 
 const UNDO_TIP: &str = "Give shows changed by Tag and rename back their former tags, names and checksum files.";
 
@@ -192,16 +193,17 @@ impl TagDialog {
 /// The answer of a setlist.fm search under way (shared: the plans are cloned).
 type SetlistSearch = Arc<Mutex<Receiver<Result<Vec<crate::setlistfm::Show>, String>>>>;
 
-/// "Extract DVD audio": the titles of the selection, with their audio tracks
-/// (summary, lossless) and the one picked.
+/// "Extract audio": the DVD titles and videos of the selection, with their audio tracks
+/// (summary, what the extraction writes) and the one picked.
 struct ExtractDialog {
     titles: Vec<ExtractTitle>,
 }
 
 struct ExtractTitle {
-    vob: PathBuf,
-    /// Each track's summary, and whether it is lossless.
-    tracks: Vec<(String, bool)>,
+    /// A DVD title's first VOB, or a video file.
+    source: PathBuf,
+    /// Each track's summary, and what it becomes ("FLAC", "original stream"; None: not possible).
+    tracks: Vec<(String, Option<&'static str>)>,
     pick: usize,
 }
 
@@ -409,7 +411,7 @@ enum Action {
     CopyInfo,
     TagInfo,
     Setlist,
-    ExtractDvd,
+    ExtractAudio,
     /// Pick .torrent files, then check the selection against them.
     TorrentCheck,
     Remove,
@@ -854,7 +856,7 @@ impl App {
                 }
             }
             Dialog::AddFiles => {
-                if let Some(files) = file_dialog(self.parent).add_filter("Audio", &["flac", "wav", "aif", "aiff", "aifc", "ape", "shn", "wv", "mp3", "mp2", "m4a", "mka", "ogg", "oga", "mp4"]).pick_files() {
+                if let Some(files) = file_dialog(self.parent).add_filter("Audio", &["flac", "wav", "aif", "aiff", "aifc", "ape", "shn", "wv", "mp3", "mp2", "m4a", "mka", "ogg", "oga", "mp4", "mkv"]).pick_files() {
                     self.add_paths(files, true);
                 }
             }
@@ -1157,6 +1159,10 @@ impl App {
                         self.info.insert(path, info);
                     }
                     Msg::Source { path, text, level, tooltip, report } => {
+                        // Reading the files again (Details) must not replace a measured verdict.
+                        if report.measures.is_empty() && self.reports.get(&(ReportKind::Lossless, path.clone())).is_some_and(|r| !r.measures.is_empty()) {
+                            continue;
+                        }
                         self.reports.insert((ReportKind::Lossless, path.clone()), report);
                         self.source.insert(path, (text, level, tooltip));
                     }
@@ -1942,21 +1948,29 @@ impl App {
         }
     }
 
-    /// The DVD titles of the selection and their tracks; the first lossless track picked.
+    /// The DVD titles and videos of the selection and their tracks; the first track that
+    /// extracts to FLAC picked, else the first that extracts at all.
     fn open_extract_dialog(&mut self) {
+        use crate::audio::Format;
         let (_, files) = self.selection();
         let titles: Vec<ExtractTitle> = files
             .into_iter()
-            .filter(|f| crate::audio::Format::from_path(f) == Some(crate::audio::Format::Vob))
-            .map(|vob| {
-                let tracks: Vec<(String, bool)> = crate::dvd::dvd_audio(&crate::dvd::title_of(&vob)).iter().map(|t| (t.summary(), t.lossless())).collect();
-                let pick = tracks.iter().position(|t| t.1).unwrap_or(0);
-                ExtractTitle { vob, tracks, pick }
+            .filter_map(|source| {
+                let tracks: Vec<(String, Option<&'static str>)> = match Format::from_path(&source)? {
+                    Format::Vob => crate::dvd::dvd_audio(&crate::dvd::title_of(&source))
+                        .iter()
+                        .map(|t| (t.summary(), Some(if t.lossless() { "FLAC" } else { "original stream" })))
+                        .collect(),
+                    f if f.video() => crate::video::audio_tracks(&source).iter().map(|t| (t.summary(), t.output())).collect(),
+                    _ => return None,
+                };
+                let pick = tracks.iter().position(|t| t.1 == Some("FLAC")).or_else(|| tracks.iter().position(|t| t.1.is_some())).unwrap_or(0);
+                Some(ExtractTitle { source, tracks, pick })
             })
             .filter(|t| !t.tracks.is_empty())
             .collect();
         if titles.is_empty() {
-            self.flash("Select DVD titles (add a DVD folder to the list first): no DVD audio in the selection.");
+            self.flash("Select DVD titles or videos (MKV, MP4): no audio to extract in the selection.");
             return;
         }
         self.extract_dialog = Some(ExtractDialog { titles });
@@ -1966,9 +1980,10 @@ impl App {
         let Some(mut d) = self.extract_dialog.take() else { return };
         let (mut open, mut go, mut close) = (true, false, false);
         let busy = self.running.is_some();
-        egui::Window::new("Extract DVD audio").collapsible(false).default_size([720.0, 380.0]).open(&mut open).show(ctx, |ui| {
-            ui.label("One file per title, in the DVD's folder, from all the VOB files of the title. An LPCM track becomes a FLAC file, \
-                      bit for bit; a lossy one (AC-3, DTS, MPEG) is saved as its original stream, unchanged: converting it would only lose more.");
+        egui::Window::new("Extract audio").collapsible(false).default_size([720.0, 380.0]).open(&mut open).show(ctx, |ui| {
+            ui.label("One file per DVD title or video: a DVD title's from all its VOB files, in the DVD's folder; a video's beside it. \
+                      A lossless track (LPCM, PCM, FLAC, ALAC) becomes a FLAC file, bit for bit; a lossy one (AC-3, DTS, AAC, MPEG) \
+                      is saved as its original stream, unchanged: converting it would only lose more.");
             ui.add_space(4.0);
             egui::TopBottomPanel::bottom("extract_buttons").show_inside(ui, |ui| {
                 ui.add_space(4.0);
@@ -1982,20 +1997,24 @@ impl App {
             });
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 for t in d.titles.iter_mut() {
-                    let root = crate::dvd::output_dir(&t.vob);
-                    ui.label(RichText::new(format!("{}   ({})", crate::files::show_name(&root), file_name(&t.vob))).strong());
-                    for (i, (summary, lossless)) in t.tracks.iter().enumerate() {
-                        let out = if *lossless { "FLAC" } else { "original stream" };
-                        ui.radio_value(&mut t.pick, i, format!("Audio {}: {summary}  →  {out}", i + 1));
+                    let title = if crate::audio::Format::from_path(&t.source) == Some(crate::audio::Format::Vob) {
+                        format!("{}   ({})", crate::files::show_name(&crate::dvd::output_dir(&t.source)), file_name(&t.source))
+                    } else {
+                        file_name(&t.source)
+                    };
+                    ui.label(RichText::new(title).strong());
+                    for (i, (summary, out)) in t.tracks.iter().enumerate() {
+                        let label = format!("Audio {}: {summary}  →  {}", i + 1, out.unwrap_or("cannot be extracted yet"));
+                        ui.add_enabled_ui(out.is_some(), |ui| ui.radio_value(&mut t.pick, i, label));
                     }
                     ui.add_space(6.0);
                 }
             });
         });
         if go {
-            let tracks = d.titles.iter().map(|t| (t.vob.clone(), t.pick)).collect();
-            let files: Vec<PathBuf> = d.titles.iter().map(|t| t.vob.clone()).collect();
-            self.start(Op::ExtractDvd(tracks), Vec::new(), files, false);
+            let tracks = d.titles.iter().map(|t| (t.source.clone(), t.pick)).collect();
+            let files: Vec<PathBuf> = d.titles.iter().map(|t| t.source.clone()).collect();
+            self.start(Op::ExtractAudio(tracks), Vec::new(), files, false);
         } else if open && !close {
             self.extract_dialog = Some(d);
         }
@@ -2493,7 +2512,7 @@ impl App {
                     ui.vertical_centered(|ui| {
                         ui.add(
                             egui::Label::new(
-                                RichText::new("Drop show folders or audio files here\n(FLAC, WAV, AIFF, APE, SHN, WavPack, ALAC, MP3, MP2, AAC, OGG, M4A, MKA, MP4 videos, DVD folders)\n\nA new drop replaces the list. Hold Ctrl to add to it instead.")
+                                RichText::new("Drop show folders or audio files here\n(FLAC, WAV, AIFF, APE, SHN, WavPack, ALAC, MP3, MP2, AAC, OGG, M4A, MKA, MP4 and MKV videos, DVD folders)\n\nA new drop replaces the list. Hold Ctrl to add to it instead.")
                                     .size(15.0)
                                     .weak(),
                             )
@@ -2921,7 +2940,7 @@ impl App {
                 Action::CopyFfp => self.copy_ffp(ctx),
                 Action::CopyInfo => self.copy_info(ctx),
                 Action::TagInfo => self.open_tag_dialog(),
-                Action::ExtractDvd => self.open_extract_dialog(),
+                Action::ExtractAudio => self.open_extract_dialog(),
                 Action::Setlist => {
                     if self.opt.setlistfm_key.trim().is_empty() {
                         self.flash("Enter your setlist.fm API key in Settings first (a free key, from setlist.fm).");
@@ -3818,11 +3837,11 @@ fn tag_button(ui: &mut egui::Ui, disabled: bool, actions: &mut Vec<Action>) {
     }
 }
 
-/// "Extract DVD audio...": one track of each DVD title to one file.
+/// "Extract audio...": one track of each DVD title or video to one file.
 fn extract_button(ui: &mut egui::Ui, disabled: bool, actions: &mut Vec<Action>) {
-    if ui.add_enabled(!disabled, egui::Button::new("📀 Extract DVD audio...")).on_hover_text(EXTRACT_TIP).clicked() {
+    if ui.add_enabled(!disabled, egui::Button::new("📀 Extract audio...")).on_hover_text(EXTRACT_TIP).clicked() {
         ui.close_menu();
-        actions.push(Action::ExtractDvd);
+        actions.push(Action::ExtractAudio);
     }
 }
 

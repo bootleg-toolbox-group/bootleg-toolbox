@@ -10,12 +10,12 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Once;
 
 use bootleg_toolbox::ops::catch_panic;
-use bootleg_toolbox::{audio, mediainfo};
+use bootleg_toolbox::{audio, mediainfo, video};
 use libfuzzer_sys::fuzz_target;
 
 mod common;
 
-const EXTENSIONS: [&str; 12] = ["flac", "wav", "ape", "shn", "wv", "mp3", "mp2", "m4a", "mka", "mp4", "aiff", "ogg"];
+const EXTENSIONS: [&str; 13] = ["flac", "wav", "ape", "shn", "wv", "mp3", "mp2", "m4a", "mka", "mkv", "mp4", "aiff", "ogg"];
 
 fn hook() {
     static HOOK: Once = Once::new();
@@ -42,5 +42,8 @@ fuzz_target!(|data: &[u8]| {
     let _ = catch_panic(|| mediainfo::read_file(&path));
     if ext == "wav" {
         let _ = audio::wav_layout(&path);
+    }
+    if ext == "mkv" || ext == "mp4" {
+        let _ = catch_panic(|| Ok::<_, String>(video::audio_tracks(&path)));
     }
 });

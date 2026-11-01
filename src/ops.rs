@@ -252,7 +252,8 @@ pub enum Op {
     Setlist,
     /// One audio track of DVD titles (the title's first VOB, the track's index in its
     /// list) to one file beside the DVD: FLAC for LPCM, the stream as it is otherwise.
-    ExtractDvd(Vec<(PathBuf, usize)>),
+    /// One audio track of DVD titles and video files: (title VOB or video, track index).
+    ExtractAudio(Vec<(PathBuf, usize)>),
     /// Gives these shows of an undo journal run back as they were.
     Rollback { run: PathBuf, shows: Vec<usize> },
     /// Follow-up of a conversion to FLAC (the choices of its window).
@@ -301,7 +302,7 @@ impl Op {
             Op::MediaInfo(_) => "Reading media info",
             Op::Tag(_) => "Tagging from the info file",
             Op::Setlist => "Getting setlists from setlist.fm",
-            Op::ExtractDvd(_) => "Extracting DVD audio",
+            Op::ExtractAudio(_) => "Extracting audio",
             Op::Rollback { .. } => "Rolling back tagging",
             Op::AfterFlac { .. } => "Tidying up after the conversion",
         }
@@ -400,7 +401,7 @@ pub fn spawn(op: Op, shows: Vec<Show>, files: Vec<PathBuf>, opt: Options, tx: Se
                 Op::MediaInfo(dvds) => op_media_info(&ctx, &shows, &files, dvds),
                 Op::Tag(jobs) => op_tag(&ctx, jobs),
                 Op::Setlist => op_setlist(&ctx, &shows),
-                Op::ExtractDvd(tracks) => op_extract_dvd(&ctx, tracks),
+                Op::ExtractAudio(tracks) => op_extract_audio(&ctx, tracks),
                 Op::Rollback { run, shows } => op_rollback(&ctx, run, shows),
                 Op::AfterFlac { roots, sources, trash_sources, trash_checksums, create_ffp } => {
                     op_after_flac(&ctx, roots, sources, *trash_sources, trash_checksums, *create_ffp)
@@ -602,7 +603,7 @@ fn details_dvd(ctx: &Ctx, path: &Path) -> Result<DetailsResult<'static>, String>
         "{}\n\n{}\nThe audio of a DVD is not decoded here: Media info (Ctrl+I) gives the whole title set (video, subtitles, titles and chapters).",
         list.iter().map(|l| format!("Audio {l}")).collect::<Vec<_>>().join("\n"),
         if lossless {
-            "An LPCM track extracts to FLAC without any loss (Extract DVD audio)."
+            "An LPCM track extracts to FLAC without any loss (Extract audio)."
         } else {
             "Lossy only (AC-3, DTS, MPEG audio): keep the original stream; a FLAC of it would not be lossless."
         }
@@ -641,6 +642,17 @@ pub fn op_details(ctx: &Ctx, shows: &[Show], files: &[PathBuf], verbose: bool) -
         }
         let info = audio::probe(path)?;
         ctx.info(path, &info);
+        if info.lossy() {
+            // Lossy by its format: the Source column can say so without any analysis.
+            let verdict = crate::lossless::by_format(path, &info);
+            let _ = ctx.tx.send(Msg::Source {
+                path: path.clone(),
+                text: verdict.label,
+                level: verdict.level,
+                tooltip: format!("{}.\n\nClick to see why.", verdict.sentence),
+                report: Arc::new(verdict.report),
+            });
+        }
         let (text, tooltip, level, problems) = describe_details(&info, last.contains(path));
         ctx.status(path, &text, level, tooltip);
         if !problems.is_empty() && !verbose {
@@ -2155,11 +2167,13 @@ fn op_setlist(ctx: &Ctx, shows: &[Show]) -> String {
     parts.join(", ") + "."
 }
 
-/// Extracts DVD audio tracks one after the other (each reads gigabytes of VOB files).
-fn op_extract_dvd(ctx: &Ctx, tracks: &[(PathBuf, usize)]) -> String {
+/// Extracts audio tracks of DVD titles and videos one after the other (each reads
+/// gigabytes of VOB or video files).
+fn op_extract_audio(ctx: &Ctx, tracks: &[(PathBuf, usize)]) -> String {
+    let dvd = |path: &PathBuf| Format::from_path(path) == Some(Format::Vob);
     let sizes: Vec<u64> = tracks
         .iter()
-        .map(|(vob, _)| crate::dvd::title_of(vob).vob_bytes)
+        .map(|(path, _)| if dvd(path) { crate::dvd::title_of(path).vob_bytes } else { fs::metadata(path).map_or(0, |m| m.len()) })
         .collect();
     // Progress in MB, so that the counters stay small.
     ctx.add_total(sizes.iter().map(|b| (b >> 20) as usize + 1).sum());
@@ -2170,16 +2184,20 @@ fn op_extract_dvd(ctx: &Ctx, tracks: &[(PathBuf, usize)]) -> String {
         }
         let mut read = 0u64;
         let mut ticked = 0u64;
-        let result = crate::dvd::extract(vob, *track, &ctx.cancel, &mut |bytes| {
+        let mut progress = |bytes| {
             read += bytes;
             let mb = read >> 20;
             if mb > ticked {
                 ctx.advance((mb - ticked) as usize);
                 ticked = mb;
             }
-        });
+        };
+        let (result, name) = if dvd(vob) {
+            (crate::dvd::extract(vob, *track, &ctx.cancel, &mut progress), files::show_name(&crate::dvd::output_dir(vob)))
+        } else {
+            (crate::video::extract(vob, *track, &ctx.cancel, &mut progress), file_name(vob))
+        };
         ctx.advance(((size >> 20) + 1).saturating_sub(ticked) as usize);
-        let name = files::show_name(&crate::dvd::output_dir(vob));
         match result {
             Ok(x) => {
                 let what = match x.samples {
@@ -2205,7 +2223,7 @@ fn op_extract_dvd(ctx: &Ctx, tracks: &[(PathBuf, usize)]) -> String {
     if ctx.cancelled() {
         return "Stopped.".into();
     }
-    let mut text = format!("{} extracted", plural(done, "DVD audio track", "DVD audio tracks"));
+    let mut text = format!("{} extracted", plural(done, "audio track", "audio tracks"));
     if failed > 0 {
         text.push_str(&format!(", {failed} failed"));
     }

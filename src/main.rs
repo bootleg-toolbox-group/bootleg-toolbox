@@ -126,22 +126,30 @@ fn run_cli(args: &[String]) -> i32 {
             None => return 0,
         },
         "setlist" => Op::Setlist,
-        // Each DVD title: track BT_TRACK (1, 2...), else the first lossless one, else the first.
-        "extract-dvd" => {
+        // Each DVD title and video: track BT_TRACK (1, 2...), else the first lossless one
+        // (for a video, the first that extracts to FLAC), else the first that extracts.
+        // "extract-dvd" was its name before videos.
+        "extract-audio" | "extract-dvd" => {
             let wanted: Option<usize> = std::env::var("BT_TRACK").ok().and_then(|t| t.parse::<usize>().ok()).filter(|t| *t > 0);
             let given: Vec<PathBuf> = args[1..].iter().map(PathBuf::from).collect();
-            let titles: Vec<PathBuf> = files::scan_paths(&given, &Default::default())
+            let sources: Vec<PathBuf> = files::scan_paths(&given, &Default::default())
                 .into_iter()
                 .flat_map(|s| s.files)
-                .filter(|f| audio::Format::from_path(f) == Some(audio::Format::Vob))
+                .filter(|f| audio::Format::from_path(f).is_some_and(|f| f == audio::Format::Vob || f.video()))
                 .collect();
-            Op::ExtractDvd(
-                titles
+            Op::ExtractAudio(
+                sources
                     .into_iter()
-                    .map(|vob| {
-                        let tracks = dvd::dvd_audio(&dvd::title_of(&vob));
-                        let track = wanted.map(|t| t - 1).unwrap_or_else(|| tracks.iter().position(|t| t.lossless()).unwrap_or(0));
-                        (vob, track)
+                    .map(|source| {
+                        let first = if audio::Format::from_path(&source) == Some(audio::Format::Vob) {
+                            let tracks = dvd::dvd_audio(&dvd::title_of(&source));
+                            tracks.iter().position(|t| t.lossless()).unwrap_or(0)
+                        } else {
+                            let tracks = bootleg_toolbox::video::audio_tracks(&source);
+                            let flac = tracks.iter().position(|t| t.output() == Some("FLAC"));
+                            flac.or_else(|| tracks.iter().position(|t| t.output().is_some())).unwrap_or(0)
+                        };
+                        (source, wanted.map(|t| t - 1).unwrap_or(first))
                     })
                     .collect(),
             )

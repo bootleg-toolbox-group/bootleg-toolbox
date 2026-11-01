@@ -41,7 +41,7 @@ Sixteen groups of tasks, all in one window and all from the same right-click men
 
 ## Supported formats
 
-All five lossless formats found in trading circles are read natively, as are AIFF, ALAC, MP3, MP2, AAC and Vorbis, the M4A, MKA and Ogg containers, and the audio track of MP4 videos; FLAC, WAV and MP3 are written.
+All five lossless formats found in trading circles are read natively, as are AIFF, ALAC, MP3, MP2, AAC and Vorbis, the M4A, MKA and Ogg containers, and the audio track of MP4 and MKV videos; FLAC, WAV and MP3 are written.
 
 | Format | Read and check | Write | Notes |
 | --- | --- | --- | --- |
@@ -54,10 +54,11 @@ All five lossless formats found in trading circles are read natively, as are AIF
 | MP3, MP2 | Yes, gapless | MP3 only, 320 CBR and V0 | Always flagged as lossy; never converted to FLAC ("fake lossless") |
 | M4A (ALAC or AAC) | Yes, ALAC 16 to 32-bit, AAC-LC | No | ALAC converts to FLAC bit for bit; AAC is flagged as lossy; iTunes tags carried over |
 | MP4 (video) | The audio track: AAC or ALAC | No | For concert videos: the video is not read. An MP4 next to the audio files of a show is a bonus, not a track, and is left out; a folder of MP4 files is a show of its own. Media info gives the file's bit rate "with the video" |
+| MKV (Matroska video) | The audio track: PCM, FLAC, AAC, MP2, MP3 or Vorbis | No | As for MP4: the video is not read, a bonus MKV next to a show's audio files is left out. Media info adds the video codec and size, and every audio track when there are several. An AC-3, E-AC-3 or DTS soundtrack is described (Details, Media info) but not decoded yet; Extract audio saves it as it is |
 | MKA (Matroska audio) | Yes, with FLAC, PCM, AAC, MP2, MP3 or Vorbis inside | No | AC-3, DTS and Opus tracks are not decoded yet: the file is named with its codec; tags carried over |
 | OGG (.ogg, .oga) | Yes, Vorbis or FLAC inside | No | Vorbis is flagged as lossy; FLAC in Ogg converts to FLAC bit for bit; Opus is not decoded yet (said so); tags carried over |
 
-Older Monkey's Audio files (before 3.95, from the late 1990s), hybrid WavPack files and AC-3 audio in MKA files are not read yet; when one turns up, Bootleg Toolbox says exactly why it cannot read it.
+Older Monkey's Audio files (before 3.95, from the late 1990s), hybrid WavPack files and AC-3 or DTS audio in MKA and MKV files are not decoded yet; when one turns up, Bootleg Toolbox says exactly why it cannot read it.
 
 ## Features in detail
 
@@ -123,7 +124,7 @@ Torrent check answers the question every downloader has: is this show complete a
 Conversions keep the originals and verify every result before it is kept.
 
 - **To FLAC**, levels 0 to 8 (the level is remembered). Each file is written to a temporary ".part" file, decoded again and compared with the source audio (MD5 and sample count), and only then renamed. The audio is identical bit for bit (checked after every file), and so is the MD5 signature stored in the FLAC, so FFP files match those of any other encoder; only the compression differs slightly, so files come within 0.3% of the size the reference flac encoder would give.
-- **Tags carried over:** FLAC Vorbis comments, APEv2 tags from APE and WavPack files (year, track and disc numbers, album artist), iTunes tags from M4A files, Matroska tags from MKA files and Vorbis comments from Ogg files.
+- **Tags carried over:** FLAC Vorbis comments, APEv2 tags from APE and WavPack files (year, track and disc numbers, album artist), iTunes tags from M4A files, Matroska tags from MKA and MKV files and Vorbis comments from Ogg files.
 - **To WAV** from any format, also verified.
 - **After a conversion to FLAC**, a window offers to move the converted originals to the trash, to remove the old .md5/.st5 files that list them, and to create the new FFP. Your choices are remembered.
 
@@ -192,7 +193,7 @@ Tools > Get setlist from setlist.fm (also in the Convert menu and the right-clic
 
 ### Lossy files (MP3, MP2, AAC, Vorbis)
 
-MP3 and MP2 files, AAC in M4A, MP4 or MKA files, and Ogg Vorbis files can be added like any other show, mostly to recognise them for what they are.
+MP3 and MP2 files, AAC in M4A, MP4, MKA or MKV files, and Ogg Vorbis files can be added like any other show, mostly to recognise them for what they are.
 
 - Details, decode test, spectrogram, checksums and torrents work on them; decoding is gapless when the LAME header gives the encoder delay (AAC files include the encoder delay, which only matters for joining tracks).
 - They are marked "Lossy file" and never called CD-ready. Lossless? gives a firm "Lossy (MP3)" or "Lossy (AAC)" verdict, with the measures for reference.
@@ -239,7 +240,7 @@ Media info writes a technical summary in the manner of MediaInfo, as plain text 
 
 - **For a show** (Ctrl+I, the Check menu or the right-click menu): file count, total length and size, average bit rate, common format ("CD audio" when it applies) and sector boundary errors, then for each file its format and compression, encoder (libFLAC version, LAME version and its "-V 0" setting for VBR MP3, Monkey's Audio version and compression level), length, bit rate, channels, rate, bits, audio MD5 and tags.
 - **DVDs in the list:** add or drop a DVD folder (VIDEO_TS or the folder above it), or use Add > Add DVD. Each title joins the list as one row (its first VOB stands for it), under the DVD's folder, with its length, rate and channels; the Format column says which codec it holds and whether it is lossy or lossless ("VOB · LPCM (lossless)"), and Details lists every audio track ("1: AC-3 (lossy), 5.1 ch, English · 2: LPCM (lossless), 2 ch, 16-bit, French"). The audio of a DVD is not decoded: Decode test, Lossless?, Speed?, conversions and checksums leave its titles out, saying so. Media info (Ctrl+I) on a title opens the summary of its whole DVD.
-- **Extract DVD audio:** pick one track per title (the lossless one is picked first); its audio is gathered from every VOB file of the title (a title is split in files of about 1 GB, the audio woven in with the video) into one file in the DVD's folder. An LPCM track (16, 20 or 24-bit, any number of channels) becomes a FLAC file, bit for bit, read back and checked; a lossy track (AC-3, DTS, MPEG audio) is saved as its original stream (.ac3, .dts, .mp2), unchanged, since converting it to MP3 would only lose more. The DVD files are never changed, and an existing file is kept.
+- **Extract audio:** pick one track per DVD title or video (the lossless one is picked first). A DVD title's audio is gathered from every VOB file of the title (a title is split in files of about 1 GB, the audio woven in with the video) into one file in the DVD's folder; an MKV or MP4 video's goes beside it ("<video> - audio 1 PCM English.flac"). A lossless track (LPCM at 16, 20 or 24 bits, PCM, FLAC or ALAC, any number of channels) becomes a FLAC file, bit for bit, read back and checked; a lossy track is saved as its original stream (.ac3, .eac3, .dts, .aac, .mp3, .mp2), unchanged, since converting it to MP3 would only lose more. Vorbis and Opus soundtracks cannot be saved on their own yet. The source files are never changed, and an existing file is kept.
 - **What a DVD summary gives:** whether it fits a DVD-5 or needs a DVD-9, the main title, and for each title set its length, overall bit rate, video (MPEG-2 profile, resolution, PAL or NTSC, frame rate, 16:9 or 4:3, interlaced or progressive), an estimate of the video bit rate, every audio track (AC-3, DTS, LPCM or MPEG, channels such as 5.1, rate, bit rate, language), subtitles, and every title with its chapters.
 - **Lossless or lossy, said plainly:** each DVD audio track is marked as lossless (LPCM) or lossy (AC-3, DTS, MPEG), and an "Audio extraction" line says whether a track can be extracted to WAV or FLAC without loss.
 - Loose VOB files without their IFO are read too, their length taken from the video timestamps.
@@ -385,7 +386,7 @@ Bootleg Toolbox covers the everyday jobs TLH is used for and adds Linux, WavPack
 | Read FLAC, WAV, SHN, APE | Yes | Yes |
 | Read WavPack | No | Yes |
 | Read MP2, MP3 | Yes | Yes, gapless, always flagged as lossy |
-| Read M4A (ALAC, AAC), MKA, AIFF, Ogg and the audio of MP4 videos | No | Yes (AC-3 in MKA and Opus not yet) |
+| Read M4A (ALAC, AAC), MKA, AIFF, Ogg and the audio of MP4 and MKV videos | No | Yes (AC-3, DTS and Opus not decoded yet) |
 | Read MKW | Yes | No |
 | 32-bit float WAV | Not described | Read; bit-exact or measured 24-bit conversion to FLAC |
 | Encode FLAC | Yes, through flac.exe | Yes, built in, verified after every file |
@@ -429,7 +430,7 @@ APE and SHN encoding, MKW and SKT were left out on purpose: these formats are no
 
 Bootleg Toolbox is free software by Rattlehead80, released under the GNU General Public License v3.0 or later: anyone may use, study, share and improve it, and improved versions stay open.
 
-- **Built with open-source components:** egui and eframe (interface), Symphonia (FLAC, MP3, AAC, ALAC and Vorbis decoding, M4A, MKA, AIFF and Ogg files), flacenc (FLAC encoding), ape-decoder (Monkey's Audio), wavicle (WavPack), LAME 3.100 (MP3), rustls (encrypted update check) and the Noto fonts, among others. Every component is under an OSI-approved open-source licence. The full list with licences is in the About window and in THIRD-PARTY.md in the source.
+- **Built with open-source components:** egui and eframe (interface), Symphonia (FLAC, MP3, AAC, ALAC and Vorbis decoding, M4A, MP4, MKA, MKV, AIFF and Ogg files), flacenc (FLAC encoding), ape-decoder (Monkey's Audio), wavicle (WavPack), LAME 3.100 (MP3), rustls (encrypted update check) and the Noto fonts, among others. Every component is under an OSI-approved open-source licence. The full list with licences is in the About window and in THIRD-PARTY.md in the source.
 - **The Shorten (SHN) decoder** was written for Bootleg Toolbox and checked bit for bit against ffmpeg.
 - **Not affiliated with Trader's Little Helper:** the two programs share no code.
 

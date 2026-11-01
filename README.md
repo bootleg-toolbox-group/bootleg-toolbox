@@ -17,7 +17,8 @@ ffmpeg or LAME. Every decoder and encoder is built in.
 - **Reads** FLAC, WAV (integer and float), AIFF, SHN (Shorten), APE (Monkey's Audio 3.95
   and later), WavPack and ALAC (lossless), MP3, MP2, AAC and Ogg Vorbis (always flagged as
   lossy), the M4A, MKA and Ogg containers (AAC, ALAC, FLAC, MP2, MP3, PCM, Vorbis inside;
-  AC-3 and Opus not yet), the audio track of MP4 concert videos, and DVD-Video folders.
+  AC-3, DTS and Opus described but not decoded yet), the audio track of MP4 and MKV concert
+  videos, and DVD-Video folders.
 - **File details**: format, length, CD-readiness, MD5 signature, sector boundary errors
   (SBE), for every track and every show.
 - **Checksums**: verifies and creates `.ffp` (FLAC fingerprints), `.st5` (MD5 of the
@@ -48,8 +49,9 @@ ffmpeg or LAME. Every decoder and encoder is built in.
   resolution, bit rates, audio tracks marked lossless or lossy, subtitles, titles and
   chapters), as text to copy into a forum post or an info file. DVDs join the list, one
   row per title, with each audio track's codec (LPCM, AC-3, DTS, MPEG) marked lossless or
-  lossy; **Extract DVD audio** saves the track you pick, from all the title's VOB files, as
-  one FLAC file (LPCM, bit for bit) or as its original stream (lossy codecs).
+  lossy; **Extract audio** saves the track you pick of a DVD title (from all its VOB files)
+  or of an MKV or MP4 video as one FLAC file (LPCM, PCM, FLAC, ALAC: bit for bit, checked) or
+  as its original stream (AC-3, DTS, AAC, MP3...).
 - **Tag and rename from the info file**: the artist, date, place and titles are read from
   the show's text file (numbered or plain tracklists, discs and sets, "Artist:" fields),
   shown in a window to check and correct, then written as FLAC tags; the files can be
@@ -120,7 +122,7 @@ bootleg-toolbox --cli <command> <folders or files...>
 | `tag-info` | Tag and rename the FLAC files from the info file (`BT_RENAME=number`, `disc`, `etree` or `keep`; `BT_DRY=1` only prints what it read) |
 | `undo-tagging` | Roll back the latest Tag and rename: former tags, names and checksum files, byte for byte |
 | `setlist` | Write the setlist of each show from setlist.fm in its folder (`BT_SETLISTFM_KEY` = your API key) |
-| `extract-dvd` | Extract one audio track of each DVD title to one file beside the DVD: FLAC for LPCM, the original stream for AC-3, DTS and MPEG audio (`BT_TRACK=n`) |
+| `extract-audio` | Extract one audio track of each DVD title or video (MKV, MP4) to one file: FLAC for a lossless track, the original stream for AC-3, DTS, AAC and MPEG audio (`BT_TRACK=n`) |
 | `torrent-check` | Check the `.torrent` files given against their shows |
 | `media-info` | Media info of the shows and of the DVDs (`VIDEO_TS` folders, VOB files) |
 | `check-update` | Look for a newer release |

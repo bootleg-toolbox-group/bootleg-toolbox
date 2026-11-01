@@ -67,6 +67,9 @@ fn round_py(x: f64) -> usize {
 /// shows: the measures then only tell how much was cut. `aac`: also look for AAC coding
 /// traces (several times slower, an option in Settings).
 pub fn analyse(path: &Path, info: &AudioInfo, aac: bool, cancel: &AtomicBool) -> Result<Verdict, String> {
+    if info.codec.is_some_and(|c| !c.decoded()) {
+        return Ok(by_format(path, info));
+    }
     let mut verdict = analyse_signal(path, info, aac, cancel)?;
     if info.lossy() {
         let name = info.name();
@@ -93,6 +96,32 @@ pub fn analyse(path: &Path, info: &AudioInfo, aac: bool, cancel: &AtomicBool) ->
         );
     }
     Ok(verdict)
+}
+
+/// The verdict for a file lossy by its format, without measuring its sound: "Lossy (AAC)".
+/// For the Source column as soon as a file is read, and for codecs this version does not
+/// decode (AC-3, DTS).
+pub fn by_format(path: &Path, info: &AudioInfo) -> Verdict {
+    let name = info.name();
+    let mut verdict = Verdict::new(format!("Lossy ({name})"), format!("{name} file: lossy by its format"), Level::Error, Vec::new());
+    let measured = if info.codec.is_some_and(|c| !c.decoded()) {
+        "This version does not decode it, so nothing was measured."
+    } else {
+        "Lossless? (Ctrl+L) also measures how much was cut."
+    };
+    verdict.report = Report {
+        heading: "Lossless analysis".into(),
+        title: crate::files::file_name(path),
+        label: verdict.label.clone(),
+        level: verdict.level,
+        sentence: verdict.sentence.clone(),
+        reasoning: vec![format!(
+            "The file is an {name}: this format always discards part of the sound when it is made, so it is lossy whatever \
+             its spectrum shows. {measured}"
+        )],
+        ..Default::default()
+    };
+    verdict
 }
 
 fn analyse_signal(path: &Path, info: &AudioInfo, aac_check: bool, cancel: &AtomicBool) -> Result<Verdict, String> {

@@ -11,6 +11,9 @@ TPE = "TPE"
 TPOS = "TPOS"
 # MP4 atom name.
 trak = "trak"
+# ISO 639-2 language codes (Matroska tracks).
+fre = "fre"
+mis = "mis"
 
 [files]
 extend-exclude = [

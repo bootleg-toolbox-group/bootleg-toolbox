@@ -108,10 +108,11 @@ pub fn read_file(path: &Path) -> Result<FileInfo, String> {
         Format::Mp3 => "MPEG Audio Layer 3 (MP3)".into(),
         Format::Mp2 => "MPEG Audio Layer 2 (MP2)".into(),
         Format::Vob => format!("{}, in DVD-Video (VOB)", info.codec.map_or("unknown", audio::Codec::long_name)),
-        Format::M4a | Format::Mp4 | Format::Mka | Format::Aiff | Format::Ogg => {
+        Format::M4a | Format::Mp4 | Format::Mkv | Format::Mka | Format::Aiff | Format::Ogg => {
             let container = match info.format {
                 Format::M4a => "MPEG-4 (M4A)",
                 Format::Mp4 => "MPEG-4 video (MP4), audio track",
+                Format::Mkv => "Matroska video (MKV), audio track",
                 Format::Aiff => "AIFF",
                 Format::Ogg => "Ogg",
                 _ => "Matroska (MKA)",
@@ -168,6 +169,18 @@ pub fn read_file(path: &Path) -> Result<FileInfo, String> {
                 tags = mp3.tags;
             }
         }
+        Format::Mkv => {
+            if let Ok(c) = crate::matroska::contents(path) {
+                if let Some(v) = c.tracks.iter().find(|t| t.video()) {
+                    let size = if v.width > 0 && v.height > 0 { format!(", {} x {}", v.width, v.height) } else { String::new() };
+                    lines.push(("Video", format!("{}{size}", crate::matroska::codec_name(&v.codec_id))));
+                }
+                let sounds: Vec<String> = c.tracks.iter().filter(|t| t.audio()).map(track_summary).collect();
+                if sounds.len() > 1 {
+                    lines.push(("Audio tracks", sounds.join("; ")));
+                }
+            }
+        }
         _ => {}
     }
     Ok(FileInfo { path: path.to_path_buf(), info, bytes, lines, tags })
@@ -186,7 +199,7 @@ fn write_file(doc: &mut Doc, f: &FileInfo) {
     doc.line("File size", size(f.bytes));
     doc.line("Duration", i.length());
     if i.seconds() > 0.0 {
-        let label = if i.format == Format::Mp4 { "Overall bit rate (with the video)" } else { "Overall bit rate" };
+        let label = if i.format.video() { "Overall bit rate (with the video)" } else { "Overall bit rate" };
         doc.line(label, kbps(f.bytes as f64 * 8.0 / i.seconds() / 1000.0));
     }
     doc.line("Channels", if i.channels == 1 { "1 channel".to_string() } else { format!("{} channels", i.channels) });
@@ -210,6 +223,15 @@ fn write_file(doc: &mut Doc, f: &FileInfo) {
     }
 }
 
+/// "AC-3, 6 ch, English" for the list of a video's audio tracks.
+fn track_summary(t: &crate::matroska::Track) -> String {
+    let mut p = vec![crate::matroska::codec_name(&t.codec_id), format!("{} ch", t.channels)];
+    if !t.language.is_empty() {
+        p.push(language_name(&t.language));
+    }
+    p.join(", ")
+}
+
 /// The summary of a show's files (or of the selected ones).
 pub fn audio_text(show: &Path, files: &[FileInfo], failed: &[(PathBuf, String)]) -> String {
     let mut doc = Doc(String::new());
@@ -224,7 +246,7 @@ pub fn audio_text(show: &Path, files: &[FileInfo], failed: &[(PathBuf, String)])
     doc.line("Total duration", hms(seconds));
     doc.line("Total size", size(bytes));
     if seconds > 0.0 {
-        let video = files.iter().any(|f| f.info.format == Format::Mp4);
+        let video = files.iter().any(|f| f.info.format.video());
         doc.line(if video { "Average bit rate (with the video)" } else { "Average bit rate" }, kbps(bytes as f64 * 8.0 / seconds / 1000.0));
     }
     let quality = |i: &AudioInfo| {

@@ -216,10 +216,11 @@ pub fn scan_paths(paths: &[PathBuf], excluded: &HashSet<PathBuf>) -> Vec<Show> {
     let mut list: Vec<Show> = shows
         .into_iter()
         .map(|(root, mut files)| {
-            // A video beside the audio of a show is a bonus, not a track: MP4 files count
-            // only in a show made of them (a concert video).
-            if files.iter().any(|f| Format::from_path(f) != Some(Format::Mp4)) {
-                files.retain(|f| Format::from_path(f) != Some(Format::Mp4));
+            // A video beside the audio of a show is a bonus, not a track: MP4 and MKV files
+            // count only in a show made of them (a concert video).
+            let video = |f: &PathBuf| Format::from_path(f).is_some_and(Format::video);
+            if files.iter().any(|f| !video(f)) {
+                files.retain(|f| !video(f));
             }
             (root, files)
         })
@@ -374,7 +375,7 @@ mod tests {
     fn videos_are_tracks_only_on_their_own() {
         let tmp = tempfile::tempdir().unwrap();
         let (audio, video) = (tmp.path().join("Band - 1990-01-01"), tmp.path().join("Band - 1991-01-01 (video)"));
-        for (dir, names) in [(&audio, &["01 - Intro.flac", "bonus.mp4"][..]), (&video, &["Band 1991.mp4"][..])] {
+        for (dir, names) in [(&audio, &["01 - Intro.flac", "bonus.mp4", "bonus.mkv"][..]), (&video, &["Band 1991.mp4"][..])] {
             fs::create_dir(dir).unwrap();
             for name in names {
                 fs::write(dir.join(name), b"x").unwrap();

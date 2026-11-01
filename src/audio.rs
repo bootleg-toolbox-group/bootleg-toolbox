@@ -32,8 +32,9 @@ pub enum Format {
     Mp2,
     /// Containers: what they hold (AAC, ALAC...) is in `AudioInfo::codec`.
     M4a,
-    /// MPEG-4 video files: their audio track only (concert videos).
+    /// MPEG-4 and Matroska video files: their audio track only (concert videos).
     Mp4,
+    Mkv,
     Mka,
     /// AIFF (big-endian PCM, the Apple counterpart of WAV), and OGG (Vorbis, FLAC; Opus is
     /// recognised but not decoded).
@@ -59,6 +60,7 @@ impl Format {
             "mp4" => Some(Format::Mp4),
             "vob" => Some(Format::Vob),
             "mka" => Some(Format::Mka),
+            "mkv" => Some(Format::Mkv),
             "aif" | "aiff" | "aifc" => Some(Format::Aiff),
             "ogg" | "oga" => Some(Format::Ogg),
             _ => None,
@@ -78,6 +80,7 @@ impl Format {
             Format::Mp4 => "MP4",
             Format::Vob => "VOB",
             Format::Mka => "MKA",
+            Format::Mkv => "MKV",
             Format::Aiff => "AIFF",
             Format::Ogg => "OGG",
         }
@@ -94,7 +97,16 @@ impl Format {
     }
 
     pub fn container(self) -> bool {
-        matches!(self, Format::M4a | Format::Mp4 | Format::Mka | Format::Aiff | Format::Ogg | Format::Vob)
+        matches!(self, Format::M4a | Format::Mp4 | Format::Mkv | Format::Mka | Format::Aiff | Format::Ogg | Format::Vob)
+    }
+
+    /// Concert videos: their sound is read, and they are tracks only in a show made of them.
+    pub fn video(self) -> bool {
+        matches!(self, Format::Mp4 | Format::Mkv)
+    }
+
+    pub fn matroska(self) -> bool {
+        matches!(self, Format::Mka | Format::Mkv)
     }
 }
 
@@ -112,10 +124,13 @@ pub enum Codec {
     Ac3,
     Dts,
     Lpcm,
+    /// Video soundtracks: described, not decoded.
+    Eac3,
+    Opus,
 }
 
 impl Codec {
-    fn from_type(codec: symphonia::core::codecs::CodecType) -> Option<Codec> {
+    pub fn from_type(codec: symphonia::core::codecs::CodecType) -> Option<Codec> {
         use symphonia::core::codecs::*;
         Some(match codec {
             CODEC_TYPE_AAC => Codec::Aac,
@@ -142,6 +157,8 @@ impl Codec {
             Codec::Ac3 => "AC-3",
             Codec::Dts => "DTS",
             Codec::Lpcm => "LPCM",
+            Codec::Eac3 => "E-AC-3",
+            Codec::Opus => "Opus",
         }
     }
 
@@ -158,6 +175,8 @@ impl Codec {
             Codec::Ac3 => "AC-3 (Dolby Digital)",
             Codec::Dts => "DTS",
             Codec::Lpcm => "LPCM (uncompressed PCM)",
+            Codec::Eac3 => "E-AC-3 (Dolby Digital Plus)",
+            Codec::Opus => "Opus",
         }
     }
 
@@ -172,8 +191,24 @@ impl Codec {
         })
     }
 
+    /// A Matroska codec ID this version describes without decoding it ("A_AC3").
+    pub fn from_matroska(id: &str) -> Option<Codec> {
+        Some(match crate::matroska::codec_name(id).as_str() {
+            "AC-3" => Codec::Ac3,
+            "E-AC-3" => Codec::Eac3,
+            "DTS" if id != "A_DTS/LOSSLESS" => Codec::Dts,
+            "Opus" => Codec::Opus,
+            _ => return None,
+        })
+    }
+
+    /// Whether this version decodes it (DVD and video soundtracks are only described).
+    pub fn decoded(self) -> bool {
+        !matches!(self, Codec::Ac3 | Codec::Dts | Codec::Lpcm | Codec::Eac3 | Codec::Opus)
+    }
+
     pub fn lossy(self) -> bool {
-        matches!(self, Codec::Aac | Codec::Mp3 | Codec::Mp2 | Codec::Vorbis | Codec::Ac3 | Codec::Dts)
+        matches!(self, Codec::Aac | Codec::Mp3 | Codec::Mp2 | Codec::Vorbis | Codec::Ac3 | Codec::Dts | Codec::Eac3 | Codec::Opus)
     }
 }
 
@@ -312,7 +347,7 @@ fn probe_header(path: &Path, format: Option<Format>) -> Result<AudioInfo, String
         }),
         Some(Format::Wav) => probe_wav(path).map(|(info, _, _)| info),
         Some(f @ (Format::Mp3 | Format::Mp2)) => probe_mpa(path, f),
-        Some(f @ (Format::M4a | Format::Mp4 | Format::Mka | Format::Aiff | Format::Ogg)) => probe_container(path, f),
+        Some(f @ (Format::M4a | Format::Mp4 | Format::Mkv | Format::Mka | Format::Aiff | Format::Ogg)) => probe_container(path, f),
         Some(Format::Vob) => crate::dvd::probe_title(path),
         Some(Format::Ape) => {
             let decoder = open_ape(path)?;
@@ -568,7 +603,7 @@ pub fn read_pcm_as(
         Some(Format::Ape) => decode_ape(path, cancel, sink),
         Some(Format::WavPack) => crate::wv::decode(path, cancel, sink),
         Some(f @ (Format::Mp3 | Format::Mp2)) => decode_mpa(path, f, cancel, sink),
-        Some(f @ (Format::M4a | Format::Mp4 | Format::Mka | Format::Aiff | Format::Ogg)) => decode_container(path, f, cancel, sink),
+        Some(f @ (Format::M4a | Format::Mp4 | Format::Mkv | Format::Mka | Format::Aiff | Format::Ogg)) => decode_container(path, f, cancel, sink),
         Some(Format::Vob) => Err(DVD_NOT_DECODED.into()),
         None => Err("not an audio file".into()),
     }
@@ -715,96 +750,51 @@ fn probe_for(format: Format) -> &'static symphonia::core::probe::Probe {
     match format {
         Format::Mp3 | Format::Mp2 => &probes[1],
         Format::M4a | Format::Mp4 => &probes[2],
-        Format::Mka => &probes[3],
+        Format::Mka | Format::Mkv => &probes[3],
         Format::Aiff => &probes[4],
         Format::Ogg => &probes[5],
         _ => &probes[0],
     }
 }
 
-/// Matroska elements that hold other elements (the ones symphonia reads).
-const EBML_MASTERS: [u32; 31] = [
-    0x1A45DFA3, 0x18538067, 0x114D9B74, 0x4DBB, 0x1549A966, 0x1654AE6B, 0xAE, 0xE0, 0xE1, 0x6D80, 0x6240, 0x5034,
-    0x5035, 0x1F43B675, 0xA0, 0x75A1, 0xA6, 0x1C53BB6B, 0xBB, 0xB7, 0xDB, 0x1043A770, 0x45B9, 0xB6, 0x8F, 0x80,
-    0x1254C367, 0x7373, 0x63C0, 0x67C8, 0x1941A469,
-];
+type Reader = Box<dyn symphonia::core::formats::FormatReader>;
+type Track = symphonia::core::formats::Track;
 
-/// Checks an MKA file's element sizes before symphonia reads it: symphonia 0.5 allocates
-/// an element's announced size before reading it, and a damaged size made it ask for
-/// terabytes, which ends the program (found by fuzzing). Every element must fit in its
-/// parent and in the file; only the headers are read.
-fn ebml_sizes_ok(path: &Path) -> Result<(), String> {
-    let mut f = BufReader::new(File::open(path).map_err(io_err)?);
-    let len = f.get_ref().metadata().map_err(io_err)?.len();
-    // A variable-length integer: (value, width); for a size, all ones means "unknown".
-    fn vint(f: &mut impl Read, keep_marker: bool) -> Option<(u64, u32, bool)> {
-        let mut b = [0u8];
-        f.read_exact(&mut b).ok()?;
-        let width = b[0].leading_zeros() + 1;
-        if width > 8 {
-            return None;
-        }
-        let mut value = if keep_marker { b[0] as u64 } else { (b[0] as u64) & (0xFF >> width) };
-        let mut all_ones = value == (0xFF >> width) as u64;
-        for _ in 1..width {
-            f.read_exact(&mut b).ok()?;
-            value = value << 8 | b[0] as u64;
-            all_ones &= b[0] == 0xFF;
-        }
-        Some((value, width, all_ones))
-    }
-    let damaged = || "damaged MKA file: an element is larger than the file".to_string();
-    // (end of the element being walked), from the outside in.
-    let mut ends = vec![len];
-    let mut pos = 0u64;
-    let mut elements = 0u32;
-    while let Some(&end) = ends.last() {
-        if pos >= end {
-            ends.pop();
-            continue;
-        }
-        elements += 1;
-        if elements > 1_000_000 {
-            return Ok(());
-        }
-        f.seek(SeekFrom::Start(pos)).map_err(io_err)?;
-        let Some((id, id_width, _)) = vint(&mut f, true) else { return Err(damaged()) };
-        let Some((size, size_width, unknown)) = vint(&mut f, false) else { return Err(damaged()) };
-        let start = pos + (id_width + size_width) as u64;
-        let stop = if unknown { end } else { start.checked_add(size).filter(|&s| s <= end).ok_or_else(damaged)? };
-        if u32::try_from(id).is_ok_and(|id| EBML_MASTERS.contains(&id)) {
-            ends.push(stop);
-            pos = start;
-        } else {
-            pos = stop;
-        }
-    }
-    Ok(())
-}
-
-/// An M4A, MKA, AIFF or OGG file, with its first audio track this version can decode.
-fn open_container(
-    path: &Path,
-    format: Format,
-) -> Result<(Box<dyn symphonia::core::formats::FormatReader>, symphonia::core::formats::Track, Codec), String> {
-    if format == Format::Mka {
-        ebml_sizes_ok(path)?;
+/// Symphonia's reader for an M4A, MP4, MKA, MKV, AIFF or OGG file.
+fn open_reader(path: &Path, format: Format) -> Result<Reader, String> {
+    if format.matroska() {
+        crate::matroska::sizes_ok(path, format.name())?;
     }
     let file = File::open(path).map_err(io_err)?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
     hint.with_extension(match format {
         Format::Mka => "mka",
+        Format::Mkv => "mkv",
         Format::Aiff => "aiff",
         Format::Ogg => "ogg",
         _ => "m4a",
     });
     let options = FormatOptions { enable_gapless: true, ..Default::default() };
-    let reader = probe_for(format)
+    Ok(probe_for(format)
         .format(&hint, mss, &options, &MetadataOptions::default())
         .map_err(|e| format!("cannot open {} file: {e}", format.name()))?
-        .format;
-    let found = reader.tracks().iter().find_map(|t| Codec::from_type(t.codec_params.codec).map(|c| (t.clone(), c)));
+        .format)
+}
+
+/// A container file with its first audio track this version can decode, or with the track
+/// `id` (a Matroska TrackNumber, an MP4 track ID).
+fn open_container(path: &Path, format: Format) -> Result<(Reader, Track, Codec), String> {
+    open_track(path, format, None)
+}
+
+fn open_track(path: &Path, format: Format, id: Option<u32>) -> Result<(Reader, Track, Codec), String> {
+    let reader = open_reader(path, format)?;
+    let found = reader
+        .tracks()
+        .iter()
+        .filter(|t| id.is_none_or(|id| t.id == id))
+        .find_map(|t| Codec::from_type(t.codec_params.codec).map(|c| (t.clone(), c)));
     match found {
         Some((mut track, codec)) => {
             let p = &mut track.codec_params;
@@ -822,12 +812,69 @@ fn open_container(
             }
             Ok((reader, track, codec))
         }
+        None if id.is_some() => Err("this version cannot decode this audio track".into()),
         None => Err(match mka_codec_id(path) {
             Some(id) => format!("{} audio is not supported yet", mka_codec_name(&id)),
             None if format == Format::Ogg && ogg_opus(path) => "Opus audio is not supported yet".into(),
             None => "no audio track this version can decode".into(),
         }),
     }
+}
+
+/// The sound of a Matroska file this version describes but does not decode (AC-3, DTS...),
+/// from its first audio track.
+fn probe_undecoded(path: &Path, format: Format) -> Option<AudioInfo> {
+    let c = crate::matroska::contents(path).ok()?;
+    let t = c.tracks.iter().find(|t| t.audio())?;
+    let codec = Codec::from_matroska(&t.codec_id)?;
+    let rate = t.rate.round() as u32;
+    let samples = (c.seconds? * rate as f64).round() as u64;
+    Some(AudioInfo { format, rate, bits: 16, channels: t.channels as u32, samples, md5: None, float: false, codec: Some(codec) })
+}
+
+/// The audio track `id` of a video file: its format, as `probe` gives a file's.
+pub fn probe_track(path: &Path, id: u32) -> Result<AudioInfo, String> {
+    let format = Format::from_path(path).ok_or("not an audio file")?;
+    let (reader, track, codec) = open_track(path, format, Some(id))?;
+    container_info(path, format, reader, track, codec)
+}
+
+/// Decodes the audio track `id` of a video file, as `read_pcm` does a file's.
+pub fn read_track_pcm(path: &Path, id: u32, cancel: &AtomicBool, sink: impl FnMut(&[u8])) -> Result<u64, String> {
+    let format = Format::from_path(path).ok_or("not an audio file")?;
+    let (reader, track, codec) = open_track(path, format, Some(id))?;
+    let bits = container_bits(&track, codec)?;
+    decode_track(reader, &track, bits, cancel, sink)
+}
+
+/// The tracks of a container file as symphonia sees them (ID, codec parameters).
+pub fn container_tracks(path: &Path) -> Result<Vec<Track>, String> {
+    let format = Format::from_path(path).filter(|f| f.container() && *f != Format::Vob).ok_or("not a container file")?;
+    Ok(open_reader(path, format)?.tracks().to_vec())
+}
+
+/// Hands the packets of track `id` to `each`, as they are stored (no decoding);
+/// `progress` gets the bytes of every packet read, of any track.
+pub fn track_packets(path: &Path, id: u32, cancel: &AtomicBool, each: &mut dyn FnMut(&[u8]) -> Result<(), String>, progress: &mut dyn FnMut(u64)) -> Result<u64, String> {
+    let format = Format::from_path(path).ok_or("not an audio file")?;
+    let mut reader = open_reader(path, format)?;
+    let mut count = 0u64;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("cancelled".into());
+        }
+        let packet = match reader.next_packet() {
+            Ok(p) => p,
+            Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(format!("read error: {e}")),
+        };
+        progress(packet.data.len() as u64);
+        if packet.track_id() == id {
+            each(&packet.data)?;
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 /// The bit depth a lossless codec decodes to; None for lossy codecs (decoded as 16-bit).
@@ -848,7 +895,14 @@ fn container_bits(track: &symphonia::core::formats::Track, codec: Codec) -> Resu
 }
 
 fn probe_container(path: &Path, format: Format) -> Result<AudioInfo, String> {
-    let (mut reader, track, codec) = open_container(path, format)?;
+    match open_container(path, format) {
+        Ok((reader, track, codec)) => container_info(path, format, reader, track, codec),
+        Err(e) if format.matroska() => probe_undecoded(path, format).ok_or(e),
+        Err(e) => Err(e),
+    }
+}
+
+fn container_info(path: &Path, format: Format, mut reader: Reader, track: Track, codec: Codec) -> Result<AudioInfo, String> {
     let bits = container_bits(&track, codec)?;
     let p = &track.codec_params;
     let rate = p.sample_rate.ok_or("unknown sample rate")?;
@@ -903,6 +957,9 @@ fn aiff_frames(path: &Path) -> Result<u64, String> {
 pub fn length_ok(info: &AudioInfo, frames: u64) -> bool {
     if info.format.container() && info.lossy() {
         frames + 4096 >= info.samples && frames <= info.samples + 8192
+    } else if info.format == Format::Mkv {
+        // The length is the video's: the sound may stop a few frames before the picture.
+        frames <= info.samples + info.rate as u64 / 1000 + 1 && frames + info.rate as u64 >= info.samples
     } else if info.format == Format::Mka {
         frames.abs_diff(info.samples) <= info.rate as u64 / 1000 + 1
     } else {
@@ -966,7 +1023,7 @@ pub fn source_tags(path: &Path) -> Vec<(String, String)> {
     match Format::from_path(path) {
         Some(Format::Flac) => return flac_tags(path).unwrap_or_default(),
         Some(Format::Ape | Format::WavPack) => {}
-        Some(f @ (Format::M4a | Format::Mp4 | Format::Mka | Format::Ogg)) => return container_tags(path, f),
+        Some(f @ (Format::M4a | Format::Mp4 | Format::Mkv | Format::Mka | Format::Ogg)) => return container_tags(path, f),
         _ => return Vec::new(),
     }
     let Ok(mut file) = File::open(path) else { return Vec::new() };
@@ -983,7 +1040,7 @@ pub fn source_tags(path: &Path) -> Vec<(String, String)> {
 /// The tags of an M4A (iTunes) or MKA file, under their Vorbis names.
 fn container_tags(path: &Path, format: Format) -> Vec<(String, String)> {
     use symphonia::core::meta::StandardTagKey as K;
-    if format == Format::Mka {
+    if format.matroska() {
         return mka_tags(path);
     }
     let Ok((mut reader, _, _)) = open_container(path, format) else { return Vec::new() };
