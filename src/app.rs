@@ -3456,11 +3456,13 @@ impl App {
                     ui.add(egui::DragValue::new(&mut draft.jobs).range(1..=64));
                 });
                 ui.checkbox(&mut draft.auto_details, "Read file details automatically when adding files");
-                ui.checkbox(&mut draft.aac_check, "Lossless?: also look for AAC coding traces (slower)")
+                ui.checkbox(&mut draft.aac_check, "Lossless?: look for AAC coding traces in every file (slower)")
                     .on_hover_text("Finds files decoded from an AAC (M4A, iTunes, YouTube, streams) and converted back \
                                     to a lossless format, even at high bitrates.\n\
-                                    The analysis then takes several times longer: about 10 seconds of processor time \
-                                    per track, spread over the files processed in parallel.\n\
+                                    Without this option they are looked for only in the files with a doubtful lowpass \
+                                    (Lossy?, Unsure, 15 kHz lowpass). With it, in every file: the analysis then takes \
+                                    several times longer, about 10 seconds of processor time per track, spread over the \
+                                    files processed in parallel.\n\
                                     MP3 coding traces are always looked for.");
                 ui.horizontal(|ui| {
                     ui.label("Tag and rename from info file:");

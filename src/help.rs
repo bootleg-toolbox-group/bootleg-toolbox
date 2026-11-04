@@ -75,7 +75,7 @@ pub const VARIABLES: &[(&str, &str)] = &[
     ("BT_DRY=1", "tag-info: only print what would be written"),
     ("BT_SETLISTFM_KEY=key", "setlist: your setlist.fm API key"),
     ("BT_TRACK=n", "extract-audio: the audio track (1, 2...; default: the first lossless one, else the first)"),
-    ("BT_AAC=1", "lossless: also look for AAC coding traces (slower)"),
+    ("BT_AAC=1", "lossless: look for AAC coding traces in every file (slower; otherwise only in doubtful ones)"),
     ("BT_REPORT=1", "lossless, speed: print the full report"),
     ("BT_WAYLAND=1", "Linux, window mode: native Wayland window (no drag and drop)"),
 ];
