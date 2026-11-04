@@ -558,7 +558,8 @@ pub fn describe_details(info: &AudioInfo, last_of_disc: bool) -> (String, String
     }
     let (text, level) = if !problems.is_empty() {
         let text = problems.iter().map(|k| problem(k).0).collect::<Vec<_>>().join("; ");
-        (text, if problems.contains(&"empty") { Level::Error } else { Level::Warn })
+        // A lossy file counts as an error, as in Lossless?: it is not for lossless trading.
+        (text, if problems.contains(&"empty") || problems.contains(&"lossy") { Level::Error } else { Level::Warn })
     } else {
         let mut parts = vec![format!("{}{sbe_note}", quality_label(info))];
         if info.md5_set() == Some(true) {
@@ -688,8 +689,9 @@ pub fn op_details(ctx: &Ctx, shows: &[Show], files: &[PathBuf], verbose: bool) -
                 plural(*n, one, many)
             }).collect::<Vec<_>>().join(", ");
             let flagged: Vec<String> = show.files.iter().filter(|f| by_path.get(f).is_some_and(|r| !r.1.is_empty())).map(|f| rel_posix(f, &show.root)).collect();
-            ctx.status(&show.root, &text, Level::Warn, format!("Tracks to check:\n{}", flagged.join("\n")));
-            (text, Level::Warn)
+            let level = if counts.iter().any(|(k, _)| *k == "lossy" || *k == "empty") { Level::Error } else { Level::Warn };
+            ctx.status(&show.root, &text, level, format!("Tracks to check:\n{}", flagged.join("\n")));
+            (text, level)
         } else {
             let infos: Vec<&AudioInfo> = done.iter().filter_map(|r| r.0.as_ref()).collect();
             let mut qualities: Vec<String> = infos.iter().map(|i| quality_label(i)).collect();
@@ -1031,8 +1033,9 @@ pub fn op_lossless(ctx: &Ctx, shows: &[Show], files: &[PathBuf]) -> String {
         let text = counts.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", ");
         let flagged: usize =
             counts.iter().filter(|(k, _)| !["Lossless", crate::lossless::LIKELY_LOSSLESS, "FM broadcast", crate::lossless::FM_15K, "Unclear", "Silent"].contains(&k.as_str())).map(|(_, n)| n).sum();
-        // "Lossy" (encoder holes found) in red; "Lossy?" alone is only a doubt.
-        let level = if counts.iter().any(|(k, _)| k == "Lossy") {
+        // "Lossy" (encoder holes found) and the lossy formats or traces ("Lossy (MP3)",
+        // "Lossy (MP3 traces)") in red; "Lossy?" alone is only a doubt.
+        let level = if counts.iter().any(|(k, _)| k == "Lossy" || k.starts_with("Lossy (")) {
             Level::Error
         } else if flagged > 0 {
             Level::Warn

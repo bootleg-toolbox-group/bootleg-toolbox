@@ -374,14 +374,240 @@ fn desktop_prefers_dark() -> Option<bool> {
     }
 }
 
+/// The colours of the interface, light and dark: warm neutrals and an amber accent.
+#[derive(Clone, Copy)]
+struct Palette {
+    /// Buttons that stand out, icons, links.
+    accent: Color32,
+    /// Hover and selection.
+    tint: Color32,
+    tint_strong: Color32,
+    /// Menu bar, toolbar and status bar.
+    chrome: Color32,
+    /// The list and the windows.
+    ground: Color32,
+    /// The rows of the shows.
+    show_row: Color32,
+    border: Color32,
+    button: Color32,
+    button_border: Color32,
+    weak: Color32,
+}
+
+impl Palette {
+    fn of(dark: bool) -> Palette {
+        let rgb = Color32::from_rgb;
+        if dark {
+            Palette {
+                accent: rgb(232, 161, 74),
+                tint: rgb(74, 53, 36),
+                tint_strong: rgb(96, 68, 42),
+                chrome: rgb(38, 36, 31),
+                ground: rgb(28, 27, 24),
+                show_row: rgb(46, 42, 36),
+                border: rgb(58, 54, 47),
+                button: rgb(47, 44, 39),
+                button_border: rgb(71, 66, 58),
+                weak: rgb(163, 157, 146),
+            }
+        } else {
+            Palette {
+                accent: rgb(168, 86, 12),
+                tint: rgb(251, 236, 217),
+                tint_strong: rgb(243, 217, 184),
+                chrome: rgb(247, 245, 241),
+                ground: Color32::WHITE,
+                show_row: rgb(246, 241, 233),
+                border: rgb(227, 221, 210),
+                button: Color32::WHITE,
+                button_border: rgb(221, 214, 202),
+                weak: rgb(107, 101, 92),
+            }
+        }
+    }
+
+    fn now() -> Palette {
+        Palette::of(DARK_THEME.load(Ordering::Relaxed))
+    }
+
+    /// A verdict's badge: (fill, text).
+    fn badge(self, level: Level) -> (Color32, Color32) {
+        let rgb = Color32::from_rgb;
+        let dark = self.ground != Color32::WHITE;
+        match (level, dark) {
+            (Level::Ok, false) => (rgb(231, 244, 236), rgb(23, 99, 59)),
+            (Level::Ok, true) => (rgb(31, 58, 41), rgb(127, 208, 155)),
+            (Level::Warn, false) => (rgb(255, 243, 191), rgb(110, 84, 0)),
+            (Level::Warn, true) => (rgb(64, 54, 14), rgb(244, 210, 100)),
+            (Level::Error, false) => (rgb(253, 236, 235), rgb(161, 37, 28)),
+            (Level::Error, true) => (rgb(67, 32, 29), rgb(242, 139, 130)),
+            // Inconclusive verdicts ("Unclear"): blue, apart from the others.
+            (Level::Info, false) => (rgb(229, 239, 253), rgb(26, 84, 168)),
+            (Level::Info, true) => (rgb(24, 40, 66), rgb(140, 185, 250)),
+        }
+    }
+}
+
+/// A rounded badge with the colours of `level`: a verdict, an SBE, a count. Drawn at the
+/// size of its text, so that a column fitted to its content shows it whole.
+fn badge(ui: &mut egui::Ui, text: impl Into<String>, level: Level) -> egui::Response {
+    let (fill, ink) = Palette::now().badge(level);
+    let galley = ui.painter().layout_no_wrap(text.into(), egui::FontId::proportional(12.0), ink);
+    let (rect, response) = ui.allocate_exact_size(galley.size() + egui::vec2(16.0, 4.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, rect.height() / 2.0, fill);
+    ui.painter().galley(rect.min + egui::vec2(8.0, 2.0), galley, ink);
+    response
+}
+
+/// The symbol of a verdict in its badge.
+fn mark(level: Level) -> &'static str {
+    match level {
+        Level::Ok => "✔ ",
+        Level::Warn => "⚠ ",
+        Level::Error => "✖ ",
+        Level::Info => "? ",
+    }
+}
+
+/// The empty list: a drop zone with the three ways to add shows and the formats read.
+/// Returns the button clicked: 0 folder, 1 files, 2 DVD. Scrolled when the window is too small.
+fn welcome(ui: &mut egui::Ui, p: Palette, busy: bool) -> Option<usize> {
+    let mut clicked = None;
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        let space = ui.available_rect_before_wrap().shrink(20.0);
+        let zone = egui::Rect::from_min_size(space.min, egui::vec2(space.width(), space.height().max(380.0)));
+        ui.painter().rect_filled(zone, 16.0, p.ground.lerp_to_gamma(p.show_row, 0.6));
+        let dash = egui::Stroke::new(2.0f32, p.button_border.lerp_to_gamma(p.accent, 0.25));
+        ui.painter().extend(egui::Shape::dashed_line(&rounded_outline(zone.shrink(1.0), 16.0), dash, 8.0, 6.0));
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(zone), |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(((zone.height() - 330.0) / 2.0).max(16.0));
+                // A folder with an arrow going in, drawn (the emoji fonts have no clear one).
+                let (icon, _) = ui.allocate_exact_size(egui::vec2(68.0, 68.0), egui::Sense::hover());
+                ui.painter().rect_filled(icon, 18.0, p.tint);
+                let f = icon.shrink2(egui::vec2(17.0, 19.0));
+                let at = |x: f32, y: f32| egui::pos2(f.left() + x * f.width(), f.top() + y * f.height());
+                let pen = egui::Stroke::new(2.2f32, p.accent);
+                let outline = [at(0.0, 1.0), at(0.0, 0.0), at(0.38, 0.0), at(0.5, 0.18), at(1.0, 0.18), at(1.0, 1.0), at(0.0, 1.0)];
+                ui.painter().add(egui::Shape::line(outline.to_vec(), pen));
+                ui.painter().line_segment([at(0.5, 0.38), at(0.5, 0.82)], pen);
+                ui.painter().add(egui::Shape::line(vec![at(0.32, 0.64), at(0.5, 0.82), at(0.68, 0.64)], pen));
+                ui.add_space(14.0);
+                ui.label(RichText::new("Drop show folders or audio files here").size(21.0).family(crate::fonts::bold()));
+                ui.add_space(4.0);
+                ui.label(RichText::new("A new drop replaces the list. Hold Ctrl to add to it instead.").size(14.0).color(p.weak));
+                ui.add_space(16.0);
+                let buttons = ["Add folder...", "Add files...", "Add DVD..."];
+                centered_row(ui, &buttons.map(|b| text_width(ui, b, 14.0) + 36.0), |ui| {
+                    for (i, text) in buttons.iter().enumerate() {
+                        let label = RichText::new(*text).size(14.0);
+                        let button = if i == 0 {
+                            egui::Button::new(label.color(p.ground).family(crate::fonts::bold())).fill(p.accent)
+                        } else {
+                            egui::Button::new(label)
+                        };
+                        if ui.add_enabled(!busy, button.min_size(egui::vec2(0.0, 38.0))).clicked() {
+                            clicked = Some(i);
+                        }
+                    }
+                });
+                ui.add_space(18.0);
+                let groups: [(&[&str], Level); 3] = [
+                    (&["FLAC", "WAV", "AIFF", "APE", "SHN", "WavPack", "ALAC"], Level::Warn),
+                    (&["MP3", "MP2", "AAC", "Ogg Vorbis"], Level::Info),
+                    (&["M4A", "MKA", "MP4 videos", "MKV videos", "DVD folders"], Level::Ok),
+                ];
+                for (names, kind) in groups {
+                    let widths: Vec<f32> = names.iter().map(|n| text_width(ui, n, 12.0) + 20.0).collect();
+                    centered_row(ui, &widths, |ui| {
+                        for name in names {
+                            // Lossless in amber, lossy in grey, containers and videos in white.
+                            let (fill, ink) = match kind {
+                                Level::Warn => (p.tint, p.accent),
+                                Level::Info => (p.chrome, p.weak),
+                                _ => (p.ground, p.weak),
+                            };
+                            egui::Frame::none()
+                                .fill(fill)
+                                .stroke(egui::Stroke::new(1.0f32, if kind == Level::Ok { p.button_border } else { fill }))
+                                .rounding(egui::Rounding::same(10.0))
+                                .inner_margin(egui::Margin::symmetric(8.0, 2.0))
+                                .show(ui, |ui| ui.add(egui::Label::new(RichText::new(*name).size(12.0).color(ink)).extend()));
+                        }
+                    });
+                    ui.add_space(2.0);
+                }
+                ui.add_space(4.0);
+                ui.label(RichText::new("Lossless formats in amber, lossy ones in grey, containers and videos in white").size(12.0).color(p.weak));
+            });
+        });
+        ui.allocate_rect(zone, egui::Sense::hover());
+    });
+    clicked
+}
+
+/// The outline of a rounded rectangle, as points for a dashed line.
+fn rounded_outline(rect: egui::Rect, radius: f32) -> Vec<egui::Pos2> {
+    let r = radius.min(rect.width() / 2.0).min(rect.height() / 2.0);
+    let corners = [
+        (egui::pos2(rect.right() - r, rect.top() + r), -90.0f32),
+        (egui::pos2(rect.right() - r, rect.bottom() - r), 0.0),
+        (egui::pos2(rect.left() + r, rect.bottom() - r), 90.0),
+        (egui::pos2(rect.left() + r, rect.top() + r), 180.0),
+    ];
+    let mut points = Vec::new();
+    for (centre, start) in corners {
+        for step in 0..=8 {
+            let a = (start + step as f32 * 90.0 / 8.0).to_radians();
+            points.push(centre + egui::vec2(a.cos(), a.sin()) * r);
+        }
+    }
+    points.push(points[0]);
+    points
+}
+
+/// The width of a text at this size.
+fn text_width(ui: &egui::Ui, text: &str, size: f32) -> f32 {
+    ui.fonts(|f| f.layout_no_wrap(text.to_string(), egui::FontId::proportional(size), Color32::WHITE).size().x)
+}
+
+/// A row of items of these widths, centred in the space (vertical_centered does not
+/// centre a horizontal row).
+fn centered_row(ui: &mut egui::Ui, widths: &[f32], add: impl FnOnce(&mut egui::Ui)) {
+    let gap = ui.spacing().item_spacing.x;
+    let total = widths.iter().sum::<f32>() + gap * widths.len().saturating_sub(1) as f32;
+    ui.allocate_ui(egui::vec2(total.min(ui.available_width()), 0.0), |ui| {
+        ui.horizontal_wrapped(add);
+    });
+}
+
+/// A toolbar menu's title: its icon in the accent colour while it can be used, its name,
+/// and the arrow of a menu.
+fn tool_title(icon: &str, name: &str, enabled: bool, style: &egui::Style) -> egui::WidgetText {
+    use egui::text::{LayoutJob, TextFormat};
+    let font = egui::TextStyle::Button.resolve(style);
+    // PLACEHOLDER: the button's own text colour (weaker when disabled).
+    let icon_color = if enabled { Palette::of(style.visuals.dark_mode).accent } else { Color32::PLACEHOLDER };
+    let mut job = LayoutJob::default();
+    job.append(&format!("{icon}  "), 0.0, TextFormat::simple(font.clone(), icon_color));
+    job.append(&format!("{name}  "), 0.0, TextFormat::simple(font.clone(), Color32::PLACEHOLDER));
+    job.append("⏷", 0.0, TextFormat::simple(font, Color32::PLACEHOLDER));
+    job.into()
+}
+
+/// The room for the dot before a Result text.
+const DOT_WIDTH: f32 = 14.0;
+
 fn color(level: Level) -> Option<Color32> {
     let dark = DARK_THEME.load(Ordering::Relaxed);
     match level {
         Level::Info => None,
         Level::Ok if dark => Some(Color32::from_rgb(58, 157, 93)),
         Level::Ok => Some(Color32::from_rgb(25, 128, 56)),
-        Level::Warn if dark => Some(Color32::from_rgb(200, 138, 18)),
-        Level::Warn => Some(Color32::from_rgb(176, 104, 0)),
+        // Yellow rather than orange, so that a doubt never looks like an error; dark
+        // enough to read on white.
+        Level::Warn if dark => Some(Color32::from_rgb(240, 196, 60)),
+        Level::Warn => Some(Color32::from_rgb(138, 101, 0)),
         Level::Error if dark => Some(Color32::from_rgb(217, 69, 61)),
         Level::Error => Some(Color32::from_rgb(196, 36, 30)),
     }
@@ -672,30 +898,36 @@ impl App {
             update_check: None,
             newer_version: None,
         };
-        // A more modern look: roomier, rounded buttons, a blue tint on hover.
+        // The look: warm neutral panels, amber accent, rounded white buttons.
         cc.egui_ctx.set_fonts(crate::fonts::definitions());
         cc.egui_ctx.all_styles_mut(|style| {
             style.spacing.button_padding = egui::vec2(10.0, 5.0);
-            style.spacing.interact_size.y = style.spacing.interact_size.y.max(26.0);
+            style.spacing.interact_size.y = style.spacing.interact_size.y.max(28.0);
+            let p = Palette::of(style.visuals.dark_mode);
             let v = &mut style.visuals;
-            v.window_rounding = egui::Rounding::same(8.0);
-            v.menu_rounding = egui::Rounding::same(6.0);
+            v.window_rounding = egui::Rounding::same(10.0);
+            v.menu_rounding = egui::Rounding::same(8.0);
             for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
-                w.rounding = egui::Rounding::same(6.0);
+                w.rounding = egui::Rounding::same(7.0);
                 w.expansion = 0.0;
             }
-            let dark = v.dark_mode;
-            let accent = if dark { Color32::from_rgb(95, 130, 200) } else { Color32::from_rgb(90, 130, 210) };
-            v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0f32, if dark { Color32::from_gray(70) } else { Color32::from_gray(205) });
-            v.widgets.inactive.weak_bg_fill = if dark { Color32::from_gray(52) } else { Color32::from_gray(236) };
-            v.widgets.hovered.weak_bg_fill = if dark { Color32::from_rgb(52, 62, 84) } else { Color32::from_rgb(222, 232, 248) };
-            v.widgets.hovered.bg_fill = v.widgets.hovered.weak_bg_fill;
-            v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0f32, accent);
-            v.widgets.active.weak_bg_fill = if dark { Color32::from_rgb(62, 78, 110) } else { Color32::from_rgb(200, 216, 242) };
-            v.widgets.active.bg_fill = v.widgets.active.weak_bg_fill;
-            v.widgets.active.bg_stroke = egui::Stroke::new(1.0f32, accent);
-            v.widgets.open.weak_bg_fill = v.widgets.hovered.weak_bg_fill;
-            v.widgets.open.bg_stroke = egui::Stroke::new(1.0f32, accent);
+            v.panel_fill = p.chrome;
+            v.window_fill = p.ground;
+            v.hyperlink_color = p.accent;
+            v.selection.bg_fill = p.tint;
+            v.selection.stroke = egui::Stroke::new(1.0f32, p.accent);
+            v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0f32, p.border);
+            v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0f32, p.button_border);
+            v.widgets.inactive.weak_bg_fill = p.button;
+            v.widgets.inactive.bg_fill = p.button;
+            v.widgets.hovered.weak_bg_fill = p.tint;
+            v.widgets.hovered.bg_fill = p.tint;
+            v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0f32, p.accent);
+            v.widgets.active.weak_bg_fill = p.tint_strong;
+            v.widgets.active.bg_fill = p.tint_strong;
+            v.widgets.active.bg_stroke = egui::Stroke::new(1.0f32, p.accent);
+            v.widgets.open.weak_bg_fill = p.tint;
+            v.widgets.open.bg_stroke = egui::Stroke::new(1.0f32, p.accent);
         });
         // egui's light theme writes text in mid grey (80/255, and fainter for weak text):
         // darker, for reading on white.
@@ -2297,7 +2529,7 @@ impl App {
             ui.horizontal(|ui| {
                 // Grouped in a few menus, as compact as Trader's Little Helper; shortcuts unchanged.
                 ui.add_enabled_ui(!busy, |ui| {
-                    ui.menu_button("📂 Add ⏷", |ui| fit_below(ui, |ui| {
+                    ui.menu_button(tool_title("🗀", "Add", !busy, ui.style()), |ui| fit_below(ui, |ui| {
                         menu_open = true;
                         if ui.button("Add folder...").clicked() {
                             ui.close_menu();
@@ -2323,7 +2555,7 @@ impl App {
                 let on = !busy && has;
                 let kinds = self.checksum_kinds();
                 ui.add_enabled_ui(on, |ui| {
-                    ui.menu_button("✔ Check ⏷", |ui| fit_below(ui, |ui| {
+                    ui.menu_button(tool_title("✔", "Check", on, ui.style()), |ui| fit_below(ui, |ui| {
                         menu_open = true;
                         let items: [(&str, &str, Op, String); 7] = [
                             ("🛡 Verify checksums", "F5", Op::Verify, format!("Check the files of {scope} against their .ffp, .md5, .st5 and .sfv files.\nAn FFP line only compares the MD5 stored in the FLAC header: use Decode test to find damaged audio.")),
@@ -2349,7 +2581,7 @@ impl App {
                     }))
                     .response
                     .on_hover_text(format!("Verify, test and analyse {scope}"));
-                    ui.menu_button("✚ Create ⏷", |ui| fit_below(ui, |ui| {
+                    ui.menu_button(tool_title("✚", "Create", on, ui.style()), |ui| fit_below(ui, |ui| {
                         menu_open = true;
                         if ui
                             .add(egui::Button::new("✚ Create checksums").shortcut_text("F6"))
@@ -2378,7 +2610,7 @@ impl App {
                 ui.separator();
                 ui.add_enabled_ui(on, |ui| {
                     let level = self.opt.flac_level;
-                    ui.menu_button("🎵 Convert ⏷", |ui| fit_below(ui, |ui| {
+                    ui.menu_button(tool_title("🎵", "Convert", on, ui.style()), |ui| fit_below(ui, |ui| {
                         menu_open = true;
                         ui.label(RichText::new("To FLAC (verified), level:").strong());
                         // The levels on one row: a sub-menu would stay open over the other entries (egui 0.29).
@@ -2420,17 +2652,19 @@ impl App {
                 ui.separator();
                 let trackers = tracker_entries(&self.opt);
                 ui.add_enabled_ui(on, |ui| {
-                    let torrent = ui.menu_button("🌐 Torrent ⏷", |ui| fit_below(ui, |ui| {
+                    let torrent = ui.menu_button(tool_title("🌐", "Torrent", on, ui.style()), |ui| fit_below(ui, |ui| {
                         menu_open = true;
                         torrent_menu(ui, &trackers, actions)
                     }));
                     torrent.response.on_hover_text(format!("Create torrents for the shows of {scope}"));
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add_enabled(!busy, egui::Button::new("⚙ Settings")).clicked() {
+                    if ui.add_enabled(!busy, egui::Button::new(RichText::new("⚙").size(16.0))).on_hover_text("Settings").clicked() {
                         self.settings = Some(self.opt.clone());
                     }
-                    if ui.add_enabled(busy, egui::Button::new("⏹ Stop")).on_hover_text("Stop the running task (Esc)").clicked() {
+                    // Red while a task runs, so that it can be stopped at a glance.
+                    let stop = if busy { RichText::new("⏹ Stop").color(color(Level::Error).unwrap_or_default()) } else { RichText::new("⏹ Stop") };
+                    if ui.add_enabled(busy, egui::Button::new(stop)).on_hover_text("Stop the running task (Esc)").clicked() {
                         self.stop();
                     }
                 });
@@ -2470,6 +2704,20 @@ impl App {
                             RichText::new(format!("Selected: {counts}"))
                         };
                         ui.add(egui::Label::new(text).wrap());
+                        // The results of the last task, file by file, at a glance.
+                        let mut tally = [0usize; 3];
+                        for f in self.shows.iter().flat_map(|s| &s.files) {
+                            match self.status.get(f).map(|s| s.1) {
+                                Some(Level::Ok) => tally[0] += 1,
+                                Some(Level::Warn) => tally[1] += 1,
+                                Some(Level::Error) => tally[2] += 1,
+                                _ => {}
+                            }
+                        }
+                        ui.add_space(8.0);
+                        for (n, level, what) in [(tally[2], Level::Error, "with an error"), (tally[1], Level::Warn, "to check"), (tally[0], Level::Ok, "OK")].into_iter().filter(|t| t.0 > 0) {
+                            badge(ui, format!("{}{n} {what}", mark(level)), level);
+                        }
                     });
                 }
             });
@@ -2537,23 +2785,16 @@ impl App {
     }
 
     fn table(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+        let palette = Palette::now();
+        egui::CentralPanel::default().frame(egui::Frame::central_panel(&ctx.style()).fill(palette.ground)).show(ctx, |ui| {
             if self.shows.is_empty() {
-                // Wrapped, centred, and scrolled when the window is too small for it.
-                let height = ui.available_height();
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    ui.add_space((height / 2.0 - 60.0).max(8.0));
-                    ui.vertical_centered(|ui| {
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new("Drop show folders or audio files here\n(FLAC, WAV, AIFF, APE, SHN, WavPack, ALAC, MP3, MP2, AAC, OGG, M4A, MKA, MP4 and MKV videos, DVD folders)\n\nA new drop replaces the list. Hold Ctrl to add to it instead.")
-                                    .size(15.0)
-                                    .weak(),
-                            )
-                            .wrap(),
-                        );
-                    });
-                });
+                let busy = self.running.is_some();
+                match welcome(ui, palette, busy) {
+                    Some(0) => self.ask(Dialog::AddFolder),
+                    Some(1) => self.ask(Dialog::AddFiles),
+                    Some(_) => self.pick_dvd(),
+                    None => {}
+                }
                 return;
             }
             let rows = self.rows();
@@ -2572,6 +2813,8 @@ impl App {
             let keys_taken = ctx.wants_keyboard_input() || self.info_choice.is_some() || self.float_dialog.is_some() || self.settings.is_some();
             // A little air between columns fitted to their content.
             ui.spacing_mut().item_spacing.x = 16.0;
+            // The column edges (resize handles) barely show until hovered.
+            ui.visuals_mut().widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0f32, palette.ground.lerp_to_gamma(palette.border, 0.25));
             // The Result column wraps its text: a row grows to show it all.
             let mut result_width: f32 = 0.0;
             egui::ScrollArea::horizontal().show(ui, |ui| {
@@ -2579,7 +2822,6 @@ impl App {
                     // Each set of visible columns keeps its own widths. The number changes with
                     // the default widths, so that widths saved before are not kept over them.
                     .id_salt((2, cols.iter().map(|c| c.title()).collect::<Vec<_>>()))
-                    .striped(true)
                     .resizable(true)
                     .sense(egui::Sense::click_and_drag())
                     .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
@@ -2588,14 +2830,15 @@ impl App {
                 }
                 table
                     .min_scrolled_height(0.0)
-                    .header(22.0, |mut header| {
+                    .header(30.0, |mut header| {
                         for col in &cols {
                             header.col(|ui| {
                                 // The part in view: the list may be wider than the window.
                                 if *col == Col::Result {
                                     result_width = visible_width(ui);
                                 }
-                                ui.strong(col.title()).on_hover_text(col.describe());
+                                let title = RichText::new(col.title().to_uppercase()).size(11.0).family(crate::fonts::bold()).color(palette.weak);
+                                ui.label(title).on_hover_text(col.describe());
                                 // Right-click on a header: choose the columns.
                                 let all = ui.interact(ui.max_rect(), ui.id().with("columns menu"), egui::Sense::click());
                                 all.context_menu(|ui| {
@@ -2626,14 +2869,14 @@ impl App {
                             }
                         }
                         let (mut first_shown, mut last_shown) = (usize::MAX, 0usize);
-                        let row_height: f32 = if compact { 18.0 } else { 20.0 };
+                        let row_height: f32 = if compact { 20.0 } else { 27.0 };
                         let font = egui::TextStyle::Body.resolve(&ctx.style());
                         let heights: Vec<f32> = rows
                             .iter()
                             .map(|r| match self.status.get(self.row_path(*r)) {
-                                Some((text, _, _)) if result_width > 0.0 => {
-                                    let galley = ctx.fonts(|f| f.layout(text.clone(), font.clone(), Color32::WHITE, result_width));
-                                    row_height.max(galley.size().y + 4.0)
+                                Some((text, _, _)) if result_width > DOT_WIDTH => {
+                                    let galley = ctx.fonts(|f| f.layout(text.clone(), font.clone(), Color32::WHITE, result_width - DOT_WIDTH));
+                                    row_height.max(galley.size().y + 6.0)
                                 }
                                 _ => row_height,
                             })
@@ -2663,7 +2906,7 @@ impl App {
                             row.set_selected(self.selected.contains(&path));
                             let mut responses = Vec::new();
                             match r {
-                                Row::Show(si) => self.show_cells(&mut row, si, &cols, &mut responses, actions),
+                                Row::Show(si) => self.show_cells(&mut row, si, &cols, visible, &mut responses, actions),
                                 Row::File(si, fi) => self.file_cells(&mut row, si, fi, &cols, &mut responses, actions),
                             }
                             let Some(mut response) = responses.pop() else { return };
@@ -2756,13 +2999,36 @@ impl App {
         match self.status.get(path) {
             Some((text, level, tooltip)) => {
                 let tip = if tooltip.is_empty() { text } else { tooltip };
-                let label = egui::Label::new(colored(text.clone(), *level));
-                if wrap > 0.0 {
-                    ui.set_max_width(wrap);
-                    ui.add(label.wrap()).on_hover_text(tip)
+                // A dot of the level's colour, then the text in the ordinary colour, in a
+                // column of its own (a wrapped label would come back under the dot).
+                let left = ui.cursor().left();
+                ui.add_space(DOT_WIDTH);
+                let label = egui::Label::new(text.as_str());
+                let one_line = wrap > DOT_WIDTH && text_width(ui, text, egui::TextStyle::Body.resolve(ui.style()).size) <= wrap - DOT_WIDTH;
+                let response = if one_line || wrap <= DOT_WIDTH {
+                    // On one line: centred in the row like the other cells.
+                    ui.add(label.truncate())
                 } else {
-                    ui.add(label.truncate()).on_hover_text(tip)
+                    ui.vertical(|ui| {
+                        ui.set_max_width(wrap - DOT_WIDTH);
+                        ui.add(label.wrap())
+                    })
+                    .inner
+                };
+                // A dot needs no contrast with text: the vivid yellow for a doubt, blue for
+                // what is only information.
+                let dark = DARK_THEME.load(Ordering::Relaxed);
+                let dot = match *level {
+                    Level::Warn if !dark => Some(Color32::from_rgb(232, 176, 0)),
+                    Level::Info if dark => Some(Color32::from_rgb(110, 160, 240)),
+                    Level::Info => Some(Color32::from_rgb(52, 120, 220)),
+                    level => color(level),
+                };
+                if let Some(c) = dot {
+                    let line = ui.text_style_height(&egui::TextStyle::Body);
+                    ui.painter().circle_filled(egui::pos2(left + 4.0, response.rect.top() + line / 2.0), 4.0, c);
                 }
+                response.on_hover_text(tip)
             }
             None => ui.label(""),
         }
@@ -2790,20 +3056,7 @@ impl App {
     fn verdict_cell(ui: &mut egui::Ui, verdict: Option<&(String, Level, String)>) -> egui::Response {
         match verdict {
             Some((text, level, tooltip)) => {
-                // "Lossless (upsampled)", "Lossless, but ...": the lossless part in green,
-                // the remark in orange.
-                let split = (*level == Level::Warn && text.starts_with("Lossless") && text.len() > 8).then(|| text.split_at(8));
-                let response = match split {
-                    Some((head, rest)) => {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 0.0;
-                            let head = ui.label(colored(head, Level::Ok));
-                            head.union(ui.label(colored(rest, Level::Warn)))
-                        })
-                        .inner
-                    }
-                    None => ui.label(colored(text.clone(), *level)),
-                };
+                let response = badge(ui, format!("{}{text}", mark(*level)), *level);
                 let tip = if tooltip.is_empty() { text } else { tooltip };
                 response.on_hover_text(tip)
             }
@@ -2811,13 +3064,25 @@ impl App {
         }
     }
 
-    fn show_cells(&self, row: &mut egui_extras::TableRow, si: usize, cols: &[Col], responses: &mut Vec<egui::Response>, actions: &mut Vec<Action>) {
+    /// `band`: the part of the list in view, across which a show row is tinted.
+    fn show_cells(&self, row: &mut egui_extras::TableRow, si: usize, cols: &[Col], band: egui::Rect, responses: &mut Vec<egui::Response>, actions: &mut Vec<Action>) {
         let show = &self.shows[si];
         let infos: Vec<&AudioInfo> = show.files.iter().filter_map(|f| self.info.get(f)).collect();
         let expanded = !self.collapsed.contains(&show.root);
+        // The show rows stand out on their own tint across the list (the selection colour
+        // when selected), painted by the first cell under all the others.
+        let fill = (!self.selected.contains(&show.root)).then(|| Palette::now().show_row);
+        let shade = |ui: &mut egui::Ui| {
+            if let Some(fill) = fill {
+                let rect = egui::Rect::from_x_y_ranges(band.x_range(), ui.max_rect().y_range());
+                // The cell's own painter is clipped to the cell: the layer's, to the list.
+                ui.ctx().layer_painter(ui.layer_id()).with_clip_rect(band).rect_filled(rect, 0.0, fill);
+            }
+        };
         for &col in cols {
             match col {
                 Col::Name => responses.push(row.col(|ui| {
+                    shade(ui);
                     let arrow = if expanded { "⏷" } else { "⏵" };
                     if ui.add(egui::Label::new(arrow).sense(egui::Sense::click())).clicked() {
                         actions.push(Action::Toggle(show.root.clone()));
@@ -2829,7 +3094,7 @@ impl App {
                     } else {
                         crate::files::show_name(&show.root)
                     };
-                    ui.label(RichText::new(label).strong()).on_hover_text(show.root.display().to_string());
+                    ui.label(RichText::new(label).family(crate::fonts::bold())).on_hover_text(show.root.display().to_string());
                 }).1),
                 Col::Format => {
                     let mut labels: Vec<String> = infos.iter().map(|i| i.label()).collect();
@@ -2852,7 +3117,7 @@ impl App {
                         .filter(|&fi| self.info.get(&show.files[fi]).and_then(|i| i.sbe()) == Some(true))
                         .count();
                     if sbe > 0 {
-                        ui.label(colored(sbe.to_string(), Level::Warn))
+                        badge(ui, sbe.to_string(), Level::Warn)
                             .on_hover_text(format!("{sbe} track(s) with a sector boundary error before the last track of a disc: Fix SBE corrects them"));
                     }
                 }).1),
@@ -2898,7 +3163,7 @@ impl App {
                                 ui.label("Last").on_hover_text("Sector boundary error on the last track of the disc: normal, it burns without gaps");
                             }
                             Some(true) => {
-                                ui.label(colored("Yes", Level::Warn)).on_hover_text("Sector boundary error before the last track of the disc: a short gap or click if burned. Fix SBE corrects it");
+                                badge(ui, "Yes", Level::Warn).on_hover_text("Sector boundary error before the last track of the disc: a short gap or click if burned. Fix SBE corrects it");
                             }
                             Some(false) => { ui.label("No"); }
                         }

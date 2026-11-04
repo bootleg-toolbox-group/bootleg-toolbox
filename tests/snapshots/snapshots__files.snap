@@ -2,6 +2,7 @@
 source: tests/snapshots.rs
 expression: text
 ---
+2ea7c6a4156617fc6d5759845d9b4d5b  01 - Hires - spectrogram.png
 37cceb1be477cad76aa69b7a5a78998f  Wav Band 2002-04-04/WAV-cleaned/01 - Extra chunk.wav
 398bf2893f8bb949a6901f32f9701b6a  Hires Band 2000-02-02/Hires Band 2000-02-02.sfv
 3d642d5d1060edb43738cb8998d53216  Synthetic Band 1990-01-01/Synthetic Band 1990-01-01.st5
@@ -11,7 +12,6 @@ expression: text
 4ffc50942fe616f7fc3c8a33352853a7  Hires Band 2000-02-02/Hires Band 2000-02-02.ffp
 5019acbff75631889fb305b2a0282bb1  Wav Band 2002-04-04/01 - Extra chunk.wav
 5393c8ef0bade5c7c2e6f541e0250a65  Hires Band 2000-02-02/01 - Hires.flac
-5534f101e7743af4050f5efd69bcc3cf  01 - Hires - spectrogram.png
 600e7e0154a781f38cb918f51139f7ac  Synthetic Band 1990-01-01/Synthetic Band 1990-01-01.md5
 63894708d664ee85e6a243c77d687274  Synthetic Band 1990-01-01/info.txt
 794bc5bac9efa20dd76d7598c05ffe77  Hires Band 2000-02-02/Hires Band 2000-02-02.st5
