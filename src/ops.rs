@@ -1035,7 +1035,7 @@ pub fn op_lossless(ctx: &Ctx, shows: &[Show], files: &[PathBuf]) -> String {
             counts.iter().filter(|(k, _)| !["Lossless", crate::lossless::LIKELY_LOSSLESS, "FM broadcast", crate::lossless::FM_15K, "Unclear", "Silent"].contains(&k.as_str())).map(|(_, n)| n).sum();
         // "Lossy" (encoder holes found) and the lossy formats or traces ("Lossy (MP3)",
         // "Lossy (MP3 traces)") in red; "Lossy?" alone is only a doubt.
-        let level = if counts.iter().any(|(k, _)| k == "Lossy" || k.starts_with("Lossy (")) {
+        let level = if counts.iter().any(|(k, _)| k == "Lossy" || k.starts_with("Lossy (") || k == crate::lossless::LOSSY_UPSTREAM) {
             Level::Error
         } else if flagged > 0 {
             Level::Warn

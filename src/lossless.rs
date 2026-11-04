@@ -490,6 +490,15 @@ fn analyse_signal(path: &Path, info: &AudioInfo, aac_check: bool, cancel: &Atomi
         let corr = cov / (var(&above, ma) * var(&music, mm)).sqrt().max(1e-12);
         Some((quiet, loud, corr))
     });
+    let masked = masked_cutoff(&kept, kept_bands, &|b| band_freq(kept_lo + b), &|f| (18900.0..19100.0).contains(&f) || in_tone(f), lsb);
+    if let Some(m) = masked.filter(|m| m.dithered()) {
+        details.push(format!(
+            "The music stops at {:.1} kHz; above it only steady noise ({:+.0} dB over digital silence{}), as the noise-shaped dither of a conversion to 16-bit leaves",
+            m.cutoff / 1000.0,
+            m.floor_above,
+            m.rise.map(|r| format!(", rising {r:.0} dB toward 19 kHz")).unwrap_or_default()
+        ));
+    }
     let holes = traces.map(|t| t.0).unwrap_or(0.0);
     let encoder_holes = holes >= 15.0;
     // Encoder holes, yet steady hiss above the cutoff: the hiss was added after the encoder,
@@ -500,10 +509,10 @@ fn analyse_signal(path: &Path, info: &AudioInfo, aac_check: bool, cancel: &Atomi
         Verdict::new(
             format!("{LOSSY_UPSTREAM} {:.1} kHz", c / 1000.0),
             format!(
-                "Lossless capture of a lossy-coded program: encoder holes below the {:.1} kHz lowpass, but steady hiss above it, so the coding happened before an analog stage (a radio's digital link or internet stream), not by converting a lossy file back",
+                "Lossy-coded program: encoder holes below the {:.1} kHz lowpass, with steady noise above it that came later (an analog stage such as a radio's digital link or a sound card, or dither added when converting): the content itself was lossy-coded",
                 c / 1000.0
             ),
-            Level::Warn,
+            Level::Error,
             details,
         )
     };
@@ -728,6 +737,24 @@ fn analyse_signal(path: &Path, info: &AudioInfo, aac_check: bool, cancel: &Atomi
             details,
         )
     };
+    // A lowpass hidden under noise-shaped dither: no FM capture (no pilot tone) and no
+    // plain lossless file leaves the music stopping dead under such a noise.
+    let hidden = masked.filter(|m| m.dithered() && !fm_pilot && matches!(verdict.label.as_str(), "Lossless" | LIKELY_LOSSLESS | FM_15K));
+    if let Some(m) = hidden {
+        let c = m.cutoff;
+        let (label, doubt) = if c < 20500.0 {
+            (format!("Lossy? {} kHz", khz(c)), format!("as an MP3/AAC/Opus at {} leaves", lossy_bitrate_hint(c)))
+        } else {
+            (format!("Unsure {} kHz", khz(c)), "as an MP3 at 320 kbps or an AAC/Opus at a high bitrate leaves, but some converters' filters also cut there".to_string())
+        };
+        let sentence = format!(
+            "Possibly lossy: the music stops at {} kHz, {doubt}; the band above holds only steady noise rising toward 19 kHz, the noise-shaped dither of a conversion to 16-bit, which hides the lowpass",
+            khz(c)
+        );
+        let mut doubtful = Verdict::new(label, sentence, Level::Warn, verdict.details.clone());
+        doubtful.report = std::mem::take(&mut verdict.report);
+        verdict = doubtful;
+    }
     if (verdict.label.starts_with("Unsure") || verdict.label.starts_with("Lossy?")) && mp3_trace.is_some_and(|t| !t.found()) && aac_trace.is_some() && aac_found.is_none() {
         verdict.sentence.push_str("; no MP3 or AAC coding traces, so not an MP3 or AAC converted straight back");
     }
@@ -804,6 +831,68 @@ fn analyse_signal(path: &Path, info: &AudioInfo, aac_check: bool, cancel: &Atomi
 }
 
 /// Everything measured, for the report.
+/// A lowpass seen through the noise: where the music stops above its own steady floor.
+#[derive(Clone, Copy, Debug)]
+struct Masked {
+    cutoff: f64,
+    /// The steady floor above the cutoff, in dB over 16-bit digital silence.
+    floor_above: f64,
+    /// How much that floor rises toward 18.5-19.5 kHz (None when the cutoff is too high).
+    rise: Option<f64>,
+}
+
+impl Masked {
+    /// Noise-shaped dither: a moderate floor (louder than plain dither, quieter than most tape
+    /// or FM hiss), rising toward 19 kHz where it can be measured (FM hiss stays flat).
+    fn dithered(&self) -> bool {
+        (24.0..=42.0).contains(&self.floor_above) && self.rise.is_none_or(|r| r >= 8.0)
+    }
+}
+
+/// Per ~100 Hz band of the kept frames, how far the mean power stands above the 10th
+/// percentile (the steady floor): steady noise alone gives about 3 dB, music far more.
+/// The cutoff is the lowest frequency from 13 kHz up whose band, and 90 % of the bands above,
+/// are steady noise, while the music stands 8 dB or more above the floor in the 1.5 kHz below.
+fn masked_cutoff(kept: &[f32], kept_bands: usize, freq: &dyn Fn(usize) -> f64, skip: &dyn Fn(f64) -> bool, lsb: f64) -> Option<Masked> {
+    if kept_bands == 0 || kept.len() / kept_bands < 100 {
+        return None;
+    }
+    let frames = kept.len() / kept_bands;
+    let db = |p: f64| 10.0 * (p + 1e-30).log10();
+    // (frequency, mean over floor, floor over digital silence)
+    let bands: Vec<(f64, f64, f64)> = (0..kept_bands)
+        .filter(|&b| !skip(freq(b)))
+        .map(|b| {
+            let values: Vec<f64> = (0..frames).map(|i| kept[i * kept_bands + b] as f64).collect();
+            let mean = values.iter().sum::<f64>() / frames as f64;
+            let floor = dsp::percentile(&values, 10.0).unwrap_or(0.0);
+            (freq(b), db(mean) - db(floor), db(floor) - lsb)
+        })
+        .collect();
+    let median = |lo: f64, hi: f64, pick: &dyn Fn(&(f64, f64, f64)) -> f64| {
+        let v: Vec<f64> = bands.iter().filter(|b| b.0 >= lo && b.0 < hi).map(pick).collect();
+        dsp::median(&v)
+    };
+    let i = (0..bands.len()).find(|&i| {
+        let c = bands[i].0;
+        let above = &bands[i..];
+        c >= 13000.0
+            && above.len() >= 3
+            && above[0].1 <= 4.0
+            && above.iter().filter(|b| b.1 <= 4.0).count() * 10 >= above.len() * 9
+            && bands.iter().filter(|b| b.0 >= c - 1500.0 && b.0 < c - 300.0).count() >= 5
+            && median(c - 1500.0, c - 300.0, &|b| b.1).is_some_and(|m| m >= 8.0)
+    })?;
+    let cutoff = bands[i].0;
+    let floor_above = dsp::median(&bands[i..].iter().map(|b| b.2).collect::<Vec<_>>())?;
+    let rise = if cutoff < 18000.0 {
+        median(18500.0, 19500.0, &|b| b.2).zip(median(cutoff + 300.0, cutoff + 1300.0, &|b| b.2)).map(|(high, low)| high - low)
+    } else {
+        None
+    };
+    Some(Masked { cutoff, floor_above, rise })
+}
+
 struct Facts {
     rate: f64,
     cutoff: Option<f64>,
@@ -1137,7 +1226,7 @@ fn reasoning(verdict: &Verdict, f: &Facts) -> Vec<String> {
     } else if label.starts_with(LOSSY_UPSTREAM) {
         r.push(format!("Encoder holes of {holes:.0} dB below the {cut} lowpass are the fingerprint of a perceptual encoder (MP3, MP2, AAC). FM and analog recordings stay under about 5 dB."));
         r.push(format!("Yet steady hiss ({above:+.0} dB over digital silence, the same in quiet and loud passages) fills the band above the cutoff. An encoder removes everything above its lowpass, so this hiss was added afterwards, by an analog stage (tuner, sound card)."));
-        r.push("So the file was not made by converting a lossy file back: it is a lossless capture of a program that had already been lossy-coded.".into());
+        r.push("The noise above the cutoff came after the encoder (an analog stage, or dither added when converting): either way, the content itself was lossy-coded.".into());
         let mut hints = 0;
         if f.cutoff.is_some_and(|c| c > 15800.0) && !f.pilot_on_19k && f.shifted_pilot.is_none() {
             r.push(format!("The audio goes up to {cut}, beyond the 15 kHz an FM stereo transmitter passes, and there is no 19 kHz pilot: probably not captured off air."));
@@ -1273,6 +1362,35 @@ fn trace_none(likelihood: f64, threshold: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Music up to 16 kHz over a steady floor; above it the floor alone, rising toward
+    /// 19 kHz (noise-shaped dither) or flat (FM hiss).
+    #[test]
+    fn lowpass_under_dither() {
+        let freq = |b: usize| 10050.0 + b as f64 * 100.0;
+        let bands = 115;
+        let frames = 400;
+        let make = |rising: bool| -> Vec<f32> {
+            let mut kept = Vec::new();
+            for i in 0..frames {
+                for b in 0..bands {
+                    let f = freq(b);
+                    let floor_db = if rising && f > 16000.0 { 25.0 + (f - 16000.0).min(3000.0) / 3000.0 * 12.0 } else { 30.0 };
+                    // A little frame to frame variation; music comes and goes 20 dB above.
+                    let wobble = 1.0 + 0.2 * ((i * 7 + b * 3) % 5) as f64 / 4.0;
+                    let music = if f < 16000.0 && i % 2 == 0 { 100.0 } else { 0.0 };
+                    kept.push((10f64.powf(floor_db / 10.0) * wobble + 10f64.powf((floor_db + 20.0) / 10.0) * music / 100.0) as f32);
+                }
+            }
+            kept
+        };
+        let none = |_: f64| false;
+        let m = masked_cutoff(&make(true), bands, &freq, &none, 0.0).unwrap();
+        assert!((m.cutoff - 16050.0).abs() <= 100.0, "{m:?}");
+        assert!(m.dithered(), "{m:?}");
+        let flat = masked_cutoff(&make(false), bands, &freq, &none, 0.0).unwrap();
+        assert!(!flat.dithered(), "{flat:?}");
+    }
 
     #[test]
     fn lossywav_varies_resolution_does_not() {
