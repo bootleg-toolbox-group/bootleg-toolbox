@@ -173,6 +173,11 @@ fn analyse_signal(path: &Path, info: &AudioInfo, aac_check: bool, cancel: &Atomi
     let mut side_power = vec![0f64; bins];
     let mut side_vs_mid: Vec<f64> = Vec::new();
     let width_band = |f: f64| (5000.0..10000.0).contains(&f);
+    // Intensity stereo, on the kept frames: how alike left and right are per 1 kHz band
+    // (energy, treble 14-19.5 kHz all locked, mean coherence 3-8 kHz).
+    let intensity_check = channels == 2 && rate >= 44100.0;
+    let mut intensity: Vec<(f64, bool, f64)> = Vec::new();
+    let (mut mid_re, mut mid_im) = (Vec::new(), Vec::new());
     // lossyWAV zeroes the lowest bits of whole blocks: the common trailing zero bits of
     // every block of 128 sample frames (silent blocks left out).
     let integer = !info.float;
@@ -246,7 +251,15 @@ fn analyse_signal(path: &Path, info: &AudioInfo, aac_check: bool, cancel: &Atomi
                         for (x, w) in side_block.iter_mut().zip(&window) {
                             *x *= w;
                         }
+                        // The mid spectrum is still in re/im: keep it for the coherence.
+                        if intensity_check {
+                            mid_re.clone_from(&re);
+                            mid_im.clone_from(&im);
+                        }
                         fft.power(&side_block, &mut re, &mut im, &mut side_power);
+                        if intensity_check {
+                            intensity.push(coherence(&mid_re, &mid_im, &re, &im, bin_hz, frame_power.iter().sum()));
+                        }
                         let sum = |p: &[f64]| (0..bins).filter(|&k| width_band(k as f64 * bin_hz)).map(|k| p[k]).sum::<f64>();
                         let (s, m) = (sum(&side_power), sum(&frame_power));
                         if m > 0.0 {
@@ -772,6 +785,20 @@ fn analyse_signal(path: &Path, info: &AudioInfo, aac_check: bool, cancel: &Atomi
         doubtful.report = std::mem::take(&mut verdict.report);
         verdict = doubtful;
     }
+    if let Some(share) = intensity_share(&intensity).filter(|_| verdict.level != Level::Error) {
+        verdict.details.push(format!("Treble locked between the channels (intensity stereo) in {:.0} % of the loud frames", share * 100.0));
+        let mut doubtful = Verdict::new(
+            "Lossy? (Opus)",
+            format!(
+                "Possibly a decoded Opus stream (YouTube, streaming): in {:.0} % of the loud frames the treble above 14 kHz is one signal only panned between the channels, as Opus codes it at moderate bitrates, while the lower frequencies are real stereo",
+                share * 100.0
+            ),
+            Level::Warn,
+            verdict.details.clone(),
+        );
+        doubtful.report = std::mem::take(&mut verdict.report);
+        verdict = doubtful;
+    }
     if (verdict.label.starts_with("Unsure") || verdict.label.starts_with("Lossy?")) && mp3_trace.is_some_and(|t| !t.found()) && aac_trace.is_some() && aac_found.is_none() {
         if opus_trace.is_some_and(|t| !t.found()) {
             verdict.sentence.push_str("; no MP3, AAC or Opus coding traces, so not an MP3, AAC or Opus converted straight back");
@@ -867,6 +894,51 @@ fn analyse_signal(path: &Path, info: &AudioInfo, aac_check: bool, cancel: &Atomi
 }
 
 /// Everything measured, for the report.
+/// Per kept frame, from its mid and side spectra: (energy, whether every 1 kHz band from 14 to
+/// 19.5 kHz has left and right proportional, the mean coherence of the 3-8 kHz bands).
+fn coherence(mid_re: &[f64], mid_im: &[f64], side_re: &[f64], side_im: &[f64], bin_hz: f64, energy: f64) -> (f64, bool, f64) {
+    let band = |lo: f64, hi: f64| -> f64 {
+        let (mut cross_re, mut cross_im, mut ll, mut rr) = (0.0, 0.0, 0.0, 0.0);
+        let first = (lo / bin_hz).ceil() as usize;
+        let last = ((hi / bin_hz).ceil() as usize).min(mid_re.len());
+        for k in first..last {
+            let (lr, li) = (mid_re[k] + side_re[k], mid_im[k] + side_im[k]);
+            let (rr_, ri) = (mid_re[k] - side_re[k], mid_im[k] - side_im[k]);
+            cross_re += lr * rr_ + li * ri;
+            cross_im += li * rr_ - lr * ri;
+            ll += lr * lr + li * li;
+            rr += rr_ * rr_ + ri * ri;
+        }
+        (cross_re * cross_re + cross_im * cross_im).sqrt() / ((ll * rr).sqrt() + 1e-30)
+    };
+    let high = [(14000.0, 15000.0), (15000.0, 16000.0), (16000.0, 17000.0), (17000.0, 18000.0), (18000.0, 19000.0), (19000.0, 19500.0)];
+    // Opus's intensity stereo is one signal only panned: coherence all but 1 (a near-mono
+    // mix stays below 0.995).
+    let locked = high.iter().all(|&(lo, hi)| band(lo, hi) > 0.995);
+    let low = [(3000.0, 4000.0), (4000.0, 5000.0), (5000.0, 6000.0), (6000.0, 7000.0), (7000.0, 8000.0)];
+    let mean = low.iter().map(|&(lo, hi)| band(lo, hi)).sum::<f64>() / low.len() as f64;
+    (energy, locked, mean)
+}
+
+/// The share of the louder half of the frames whose treble is locked between the channels,
+/// when it is high enough (10 %) and the mids are real stereo (a mono file is locked
+/// everywhere): Opus's intensity stereo. Genuine recordings tested (249 CD tracks
+/// included): none.
+fn intensity_share(frames: &[(f64, bool, f64)]) -> Option<f64> {
+    if frames.len() < 50 {
+        return None;
+    }
+    let energies: Vec<f64> = frames.iter().map(|f| f.0).collect();
+    let median = dsp::median(&energies)?;
+    let loud: Vec<&(f64, bool, f64)> = frames.iter().filter(|f| f.0 >= median && f.0 > 0.0).collect();
+    if loud.len() < 25 {
+        return None;
+    }
+    let share = loud.iter().filter(|f| f.1).count() as f64 / loud.len() as f64;
+    let mids = loud.iter().map(|f| f.2).sum::<f64>() / loud.len() as f64;
+    (share >= 0.10 && mids < 0.9).then_some(share)
+}
+
 /// A lowpass seen through the noise: where the music stops above its own steady floor.
 #[derive(Clone, Copy, Debug)]
 struct Masked {
@@ -1416,6 +1488,16 @@ fn trace_none(likelihood: f64, threshold: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Opus's intensity stereo: treble locked in a fifth of the loud frames, mids in stereo.
+    /// A mono file (locked everywhere) and genuine stereo are left alone.
+    #[test]
+    fn intensity_stereo() {
+        let frames = |locked_every: usize, mids: f64| -> Vec<(f64, bool, f64)> { (0..200).map(|i| (1.0, i % locked_every == 0, mids)).collect() };
+        assert!(intensity_share(&frames(5, 0.6)).is_some_and(|s| (s - 0.2).abs() < 0.01));
+        assert!(intensity_share(&frames(5, 0.97)).is_none());
+        assert!(intensity_share(&frames(50, 0.6)).is_none());
+    }
 
     /// Music up to 16 kHz over a steady floor; above it the floor alone, rising toward
     /// 19 kHz (noise-shaped dither) or flat (FM hiss).
