@@ -19,11 +19,13 @@ pub struct Verdict {
     pub details: Vec<String>,
     /// The full analysis ("See more").
     pub report: Report,
+    /// The origin is left open: worth the slower search for AAC and Opus traces.
+    pub(crate) doubt: bool,
 }
 
 impl Verdict {
     fn new(label: impl Into<String>, sentence: impl Into<String>, level: Level, details: Vec<String>) -> Self {
-        Verdict { label: label.into(), sentence: sentence.into(), level, details, report: Report::default() }
+        Verdict { label: label.into(), sentence: sentence.into(), level, details, report: Report::default(), doubt: false }
     }
 }
 
@@ -73,7 +75,7 @@ pub fn analyse(path: &Path, info: &AudioInfo, aac: bool, cancel: &AtomicBool) ->
     let mut verdict = analyse_signal(path, info, aac, cancel)?;
     // The AAC search is slow, so an option; a doubt is worth it anyway: the file is analysed
     // again with it, and an AAC converted straight back turns the doubt into a certainty.
-    if !aac && doubtful(&verdict.label) && !cancel.load(std::sync::atomic::Ordering::Relaxed) {
+    if !aac && verdict.doubt && !cancel.load(std::sync::atomic::Ordering::Relaxed) {
         verdict = analyse_signal(path, info, true, cancel)?;
     }
     if info.lossy() {
@@ -184,6 +186,8 @@ fn analyse_signal(path: &Path, info: &AudioInfo, aac_check: bool, cancel: &Atomi
     let codec_rates = matches!(info.rate, 32000 | 44100 | 48000) && channels <= 2 && !info.lossy();
     let mut mp3 = codec_rates.then(|| crate::mp3trace::Collector::new(channels));
     let mut aac = (codec_rates && aac_check).then(|| crate::aactrace::collector(channels));
+    // Opus traces, with the AAC search (Opus is 48 kHz; 44.1 to 96 kHz are resampled to it).
+    let mut opus = (aac_check && channels <= 2 && !info.lossy()).then(|| crate::opustrace::Collector::new(channels, info.rate)).flatten();
     const SPAN: i32 = 1 << 16;
     let mut histogram = if comb_check { vec![0u32; 2 * SPAN as usize] } else { Vec::new() };
 
@@ -212,6 +216,9 @@ fn analyse_signal(path: &Path, info: &AudioInfo, aac_check: bool, cancel: &Atomi
         }
         if let Some(a) = aac.as_mut() {
             a.push(values);
+        }
+        if let Some(o) = opus.as_mut() {
+            o.push(values);
         }
         let mono = values.iter().sum::<f64>() / channels as f64;
         if mono != 0.0 {
@@ -260,6 +267,8 @@ fn analyse_signal(path: &Path, info: &AudioInfo, aac_check: bool, cancel: &Atomi
     // AAC only when no MP3 was found (the slower search).
     let aac_trace = if mp3_trace.is_some_and(|t| t.found()) { None } else { aac.and_then(|a| crate::aactrace::detect(a, info.rate)) };
     let aac_found = aac_trace.filter(crate::aactrace::found);
+    let opus_trace = if mp3_trace.is_some_and(|t| t.found()) || aac_found.is_some() { None } else { opus.and_then(|o| o.detect()) };
+    let opus_found = opus_trace.filter(|t| t.found());
     if let Some(t) = mp3_trace.filter(|t| t.found()) {
         details.push(format!("MP3 coding traces found ({:.1} % of the bands, {:.0} standard deviations above chance)", t.likelihood * 100.0, t.contrast));
     }
@@ -764,7 +773,22 @@ fn analyse_signal(path: &Path, info: &AudioInfo, aac_check: bool, cancel: &Atomi
         verdict = doubtful;
     }
     if (verdict.label.starts_with("Unsure") || verdict.label.starts_with("Lossy?")) && mp3_trace.is_some_and(|t| !t.found()) && aac_trace.is_some() && aac_found.is_none() {
-        verdict.sentence.push_str("; no MP3 or AAC coding traces, so not an MP3 or AAC converted straight back");
+        if opus_trace.is_some_and(|t| !t.found()) {
+            verdict.sentence.push_str("; no MP3, AAC or Opus coding traces, so not an MP3, AAC or Opus converted straight back");
+        } else {
+            verdict.sentence.push_str("; no MP3 or AAC coding traces, so not an MP3 or AAC converted straight back");
+        }
+    }
+    if let Some(t) = opus_found {
+        let sentence = format!(
+            "Decoded from an Opus stream (YouTube, streaming): {} of the {} frames analysed are exactly Opus codewords, which only a lossy file converted back leaves",
+            t.clean, t.frames
+        );
+        let label = if verdict.label.starts_with("Lossy ") && !verdict.label.starts_with(LOSSY_UPSTREAM) { verdict.label.clone() } else { "Lossy (Opus traces)".into() };
+        let mut lossy = Verdict::new(label, sentence, Level::Error, verdict.details.clone());
+        lossy.details.push(format!("Opus coding traces found ({} of {} frames)", t.clean, t.frames));
+        lossy.report = std::mem::take(&mut verdict.report);
+        verdict = lossy;
     }
     if let Some(t) = aac_found {
         let sentence = format!(
@@ -832,8 +856,13 @@ fn analyse_signal(path: &Path, info: &AudioInfo, aac_check: bool, cancel: &Atomi
         edge,
         mp3_trace,
         aac_trace,
+        opus_trace,
     };
     verdict.report = build_report(crate::files::file_name(path), &verdict, &facts);
+    // An FM pilot tone survives an Opus or AAC stream at a high bitrate: with the music
+    // stopping dead around 20 kHz (FM itself stops at 15 kHz), the origin is open too.
+    let stream_lowpass = cutoff.is_some_and(|c| (19500.0..20800.0).contains(&c));
+    verdict.doubt = doubtful(&verdict.label) || (fm_pilot && stream_lowpass);
     Ok(verdict)
 }
 
@@ -932,6 +961,8 @@ struct Facts {
     mp3_trace: Option<crate::mp3trace::Trace>,
     /// The same with AAC's transform (not looked for when MP3 traces were found).
     aac_trace: Option<crate::mp3trace::Trace>,
+    /// Frames that are Opus codewords (looked for with AAC, when no MP3 or AAC was found).
+    opus_trace: Option<crate::opustrace::Trace>,
 }
 
 /// Blocks whose lowest bits are all zero beyond the file's own resolution (lossyWAV).
@@ -1148,6 +1179,18 @@ fn build_report(title: String, verdict: &Verdict, f: &Facts) -> Report {
             if found { Level::Error } else { Level::Ok },
         );
     }
+    if let Some(t) = f.opus_trace {
+        add(
+            "Opus coding traces",
+            if t.found() {
+                format!("found: {} of {} frames are Opus codewords (frames at sample {} of 48 kHz)", t.clean, t.frames, t.offset)
+            } else {
+                format!("none ({} of {} frames)", t.clean, t.frames)
+            },
+            "The sound is brought to 48 kHz, its de-emphasis undone, and analysed with Opus's own transform (20 ms frames). In the frames where Opus's pitch filter was off, every band of a decoded Opus is a vector of small integers, scaled; genuine audio never is. A resampling back and forth keeps this trace; added noise, equalising or a speed change erase it.",
+            if t.found() { Level::Error } else { Level::Ok },
+        );
+    }
     if let Some(e) = f.edge {
         add(
             if f.cutoff.is_some() { "Edge of the lowpass" } else { "Treble roll-off" },
@@ -1331,6 +1374,15 @@ fn reasoning(verdict: &Verdict, f: &Facts) -> Vec<String> {
                 t.likelihood * 100.0,
                 t.offset,
                 t.contrast
+            ),
+        );
+    }
+    if let Some(t) = f.opus_trace.filter(|t| t.found()) {
+        r.insert(
+            0,
+            format!(
+                "Analysed again with Opus's transform at 48 kHz, {} of the {} frames are exactly Opus codewords: in every band, a vector of small integers. Genuine audio never is: this file was decoded from an Opus stream (YouTube and most streaming services use Opus) and converted back to a lossless format.",
+                t.clean, t.frames
             ),
         );
     }

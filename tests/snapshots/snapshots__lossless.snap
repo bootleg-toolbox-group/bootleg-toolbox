@@ -149,6 +149,14 @@ expression: text
   The sound is analysed again with an MP3 encoder's own filter bank, at every possible position. A file decoded from an MP3 falls back onto the encoder's rounding grid in many bands (3 % and more, far above the other positions), even at 320 kbps; genuine audio stays around 2 %, at no particular position. Resampling or effects after the decoder erase this trace, so its absence does not prove a file lossless.
   The sound is analysed again with an MP3 encoder's own filter bank, at every possible position. A file decoded from an MP3 falls back onto the encoder's rounding grid in many bands (3 % and more, far above the other positions), even at 320 kbps; genuine audio stays around 2 %, at no particular position. Resampling or effects after the decoder erase this trace, so its absence does not prove a file lossless.
   The sound is analysed again with an MP3 encoder's own filter bank, at every possible position. A file decoded from an MP3 falls back onto the encoder's rounding grid in many bands (3 % and more, far above the other positions), even at 320 kbps; genuine audio stays around 2 %, at no particular position. Resampling or effects after the decoder erase this trace, so its absence does not prove a file lossless.
+  The sound is brought to 48 kHz, its de-emphasis undone, and analysed with Opus's own transform (20 ms frames). In the frames where Opus's pitch filter was off, every band of a decoded Opus is a vector of small integers, scaled; genuine audio never is. A resampling back and forth keeps this trace; added noise, equalising or a speed change erase it.
+  The sound is brought to 48 kHz, its de-emphasis undone, and analysed with Opus's own transform (20 ms frames). In the frames where Opus's pitch filter was off, every band of a decoded Opus is a vector of small integers, scaled; genuine audio never is. A resampling back and forth keeps this trace; added noise, equalising or a speed change erase it.
+  The sound is brought to 48 kHz, its de-emphasis undone, and analysed with Opus's own transform (20 ms frames). In the frames where Opus's pitch filter was off, every band of a decoded Opus is a vector of small integers, scaled; genuine audio never is. A resampling back and forth keeps this trace; added noise, equalising or a speed change erase it.
+  The sound is brought to 48 kHz, its de-emphasis undone, and analysed with Opus's own transform (20 ms frames). In the frames where Opus's pitch filter was off, every band of a decoded Opus is a vector of small integers, scaled; genuine audio never is. A resampling back and forth keeps this trace; added noise, equalising or a speed change erase it.
+  The sound is brought to 48 kHz, its de-emphasis undone, and analysed with Opus's own transform (20 ms frames). In the frames where Opus's pitch filter was off, every band of a decoded Opus is a vector of small integers, scaled; genuine audio never is. A resampling back and forth keeps this trace; added noise, equalising or a speed change erase it.
+  The sound is brought to 48 kHz, its de-emphasis undone, and analysed with Opus's own transform (20 ms frames). In the frames where Opus's pitch filter was off, every band of a decoded Opus is a vector of small integers, scaled; genuine audio never is. A resampling back and forth keeps this trace; added noise, equalising or a speed change erase it.
+  The sound is brought to 48 kHz, its de-emphasis undone, and analysed with Opus's own transform (20 ms frames). In the frames where Opus's pitch filter was off, every band of a decoded Opus is a vector of small integers, scaled; genuine audio never is. A resampling back and forth keeps this trace; added noise, equalising or a speed change erase it.
+  The sound is brought to 48 kHz, its de-emphasis undone, and analysed with Opus's own transform (20 ms frames). In the frames where Opus's pitch filter was off, every band of a decoded Opus is a vector of small integers, scaled; genuine audio never is. A resampling back and forth keeps this trace; added noise, equalising or a speed change erase it.
 (Lossless analysis, Bootleg Toolbox <version>)
 (Lossless analysis, Bootleg Toolbox <version>)
 (Lossless analysis, Bootleg Toolbox <version>)
@@ -212,6 +220,14 @@ expression: text
 - MP3 coding traces: none (1.9 % of the bands, within the normal range)
 - MP3 coding traces: none (1.9 % of the bands, within the normal range)
 - MP3 coding traces: none (31.5 % of the bands, but at every position alike: not an encoder's grid)
+- Opus coding traces: none (0 of 247 frames)
+- Opus coding traces: none (0 of 247 frames)
+- Opus coding traces: none (0 of 247 frames)
+- Opus coding traces: none (0 of 298 frames)
+- Opus coding traces: none (0 of 373 frames)
+- Opus coding traces: none (0 of 497 frames)
+- Opus coding traces: none (0 of 497 frames)
+- Opus coding traces: none (0 of 598 frames)
 - Stereo width: difference channel (L-R) 11 dB below the sum
 - Stereo width: difference channel (L-R) 11 dB below the sum
 - Stereo width: difference channel (L-R) 12 dB below the sum

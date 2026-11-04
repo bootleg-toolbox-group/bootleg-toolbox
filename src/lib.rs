@@ -13,6 +13,7 @@ pub mod integration;
 pub mod lossless;
 pub mod aactrace;
 pub mod mp3trace;
+pub mod opustrace;
 pub mod matroska;
 pub mod mediainfo;
 pub mod ops;

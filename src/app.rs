@@ -3456,9 +3456,9 @@ impl App {
                     ui.add(egui::DragValue::new(&mut draft.jobs).range(1..=64));
                 });
                 ui.checkbox(&mut draft.auto_details, "Read file details automatically when adding files");
-                ui.checkbox(&mut draft.aac_check, "Lossless?: look for AAC coding traces in every file (slower)")
-                    .on_hover_text("Finds files decoded from an AAC (M4A, iTunes, YouTube, streams) and converted back \
-                                    to a lossless format, even at high bitrates.\n\
+                ui.checkbox(&mut draft.aac_check, "Lossless?: look for AAC and Opus coding traces in every file (slower)")
+                    .on_hover_text("Finds files decoded from an AAC (M4A, iTunes, streams) or an Opus stream (YouTube) and \
+                                    converted back to a lossless format, even at high bitrates and resampled to 44.1 kHz.\n\
                                     Without this option they are looked for only in the files with a doubtful lowpass \
                                     (Lossy?, Unsure, 15 kHz lowpass). With it, in every file: the analysis then takes \
                                     several times longer, about 10 seconds of processor time per track, spread over the \
