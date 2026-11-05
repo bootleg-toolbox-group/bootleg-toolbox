@@ -776,16 +776,17 @@ fn checksum_line(kind: &str, line: &str) -> Option<(std::ops::Range<usize>, std:
 fn match_entry<'a>(base: &Path, name: &str, known: &'a [PathBuf]) -> Option<&'a PathBuf> {
     let rel = name.trim().replace('\\', "/");
     let rel = rel.trim_start_matches("./");
-    let full = base.join(rel).to_string_lossy().to_lowercase();
+    // Joined part by part: the system's own separators (on Windows, "CD1/01.flac" joined as
+    // is would never equal the file's path).
+    let full = rel.split('/').filter(|p| !p.is_empty()).fold(base.to_path_buf(), |p, part| p.join(part)).to_string_lossy().to_lowercase();
     if let Some(p) = known.iter().find(|p| p.to_string_lossy().to_lowercase() == full) {
         return Some(p);
     }
+    // Else the one file of that name (a file both tagged and renamed is listed twice).
     let last = rel.rsplit('/').next().unwrap_or(rel).to_lowercase();
     let mut same = known.iter().filter(|p| file_name(p).to_lowercase() == last);
-    match (same.next(), same.next()) {
-        (Some(p), None) => Some(p),
-        _ => None,
-    }
+    let first = same.next()?;
+    same.all(|p| p == first).then_some(first)
 }
 
 /// What changed in a show, for its checksum files.
@@ -1316,6 +1317,12 @@ mod tests {
         fs::write(&sfv, "; comment\nCD1\\01.flac 01234567\n").unwrap();
         assert_eq!(update_checksum_file(&sfv, &changes, &tagged).unwrap().wrong_before, 1);
         assert_eq!(fs::read_to_string(&sfv).unwrap(), "; comment\nCD1\\01 - A.flac 89abcdef\n");
+        // A line without the sub-folder: found by its file name, although the file is listed
+        // twice (tagged and renamed).
+        let short = dir.join("short.md5");
+        fs::write(&short, "ffffffffffffffffffffffffffffffff  01.flac\n").unwrap();
+        assert_eq!(update_checksum_file(&short, &changes, &tagged).unwrap(), ChecksumUpdate { changed: 1, stale: 0, wrong_before: 0 });
+        assert_eq!(fs::read_to_string(&short).unwrap(), "0123456789abcdef0123456789abcdef  01 - A.flac\n");
         fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -22,6 +22,8 @@ fn cli(dir: &Path, command: &str, paths: &[&str], env: &[(&str, &str)]) -> Strin
         .arg("--cli")
         .arg(command)
         .args(paths)
+        // The same checksum files on every system (CRLF is the default on Windows only).
+        .env("BT_CRLF", "0")
         .envs(env.iter().copied())
         .output()
         .expect("the executable runs");
@@ -30,7 +32,7 @@ fn cli(dir: &Path, command: &str, paths: &[&str], env: &[(&str, &str)]) -> Strin
 }
 
 /// Lines in a fixed order (files are processed in parallel), without the temporary folder
-/// nor the program's version;
+/// nor the program's version, with "/" in paths;
 /// the growing "MD5 OK, ST5 OK" lines of Verify are reduced to their final state.
 fn normalise(text: &str, dir: &Path) -> String {
     let dir = dir.display().to_string();
@@ -38,6 +40,8 @@ fn normalise(text: &str, dir: &Path) -> String {
     let mut lines = Vec::new();
     for line in text.lines() {
         let line = line.replace(&dir, "<dir>").replace(env!("CARGO_PKG_VERSION"), "<version>");
+        // Paths shown with the system's separator: the same snapshots on Windows.
+        let line = if cfg!(windows) { line.replace('\\', "/") } else { line };
         if let Some((head, checks)) = verify_marks(&line) {
             match finals.iter_mut().find(|(h, _)| *h == head) {
                 Some((_, c)) if checks.len() > c.len() => *c = checks,
@@ -82,8 +86,25 @@ fn file_sums(dir: &Path) -> String {
             }
             data = replace_bytes(&data, env!("CARGO_PKG_VERSION").as_bytes(), b"<version>");
             let rel = p.strip_prefix(dir).unwrap().to_string_lossy().replace('\\', "/");
+            // Images apart (`png_sums`): on Windows a few pixels can differ by one unit.
+            if p.extension().is_some_and(|e| e == "png") {
+                return format!("(image)  {rel}");
+            }
             format!("{}  {rel}", hex(&Md5::digest(&data)))
         })
+        .collect();
+    lines.sort();
+    lines.join("\n")
+}
+
+/// The MD5 of the images (spectrograms) under `dir`.
+fn png_sums(dir: &Path) -> String {
+    let mut files = Vec::new();
+    walk(dir, &mut files);
+    let mut lines: Vec<String> = files
+        .iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "png"))
+        .map(|p| format!("{}  {}", hex(&Md5::digest(fs::read(p).unwrap())), p.strip_prefix(dir).unwrap().to_string_lossy().replace('\\', "/")))
         .collect();
     lines.sort();
     lines.join("\n")
@@ -269,6 +290,11 @@ fn synthetic_shows() {
     snap("details_mp3", cli(dir, "details", &[&format!("{MUFFLED} [MP3 V0]")], &[]));
     snap("spectrogram", cli(dir, "spectrogram", &[&format!("{HIRES}/01 - Hires.flac")], &[]));
     snap("files", file_sums(dir));
+    // The spectrogram's image, exactly: not on Windows, whose C library rounds the last digit
+    // of log and pow otherwise than glibc (a few pixels one unit apart).
+    if !cfg!(windows) {
+        snap("images", png_sums(dir));
+    }
 }
 
 /// Tag and rename (tags, new names, .md5 and .sfv updated), then undo-tagging: every file
@@ -341,6 +367,9 @@ fn testdata_shows() {
         snap("real_to_flac", cli(dir, "to-flac", &["ape"], &[]));
         snap("real_mp3_v0", cli(dir, "mp3-v0", &["shn"], &[]));
         snap("real_files", file_sums(dir));
+        if !cfg!(windows) {
+            snap("real_images", png_sums(dir));
+        }
     });
 }
 

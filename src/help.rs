@@ -67,6 +67,7 @@ pub const VARIABLES: &[(&str, &str)] = &[
     ("BT_OVERWRITE=1", "create: replace existing checksum files"),
     ("BT_MD5=1", "create: also write a .md5 file"),
     ("BT_SFV=1", "create: also write a .sfv file"),
+    ("BT_CRLF=0|1", "create: checksum files with Windows line ends (default: on Windows only)"),
     ("BT_LEVEL=0..8", "to-flac: compression level (8 by default)"),
     ("BT_FLOAT=round", "to-flac: round float WAVs to 24 bits when they are not exact"),
     ("BT_MP3_DIR=folder", "mp3-320, mp3-v0: write the copies there (default: next to the show)"),

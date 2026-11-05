@@ -189,6 +189,9 @@ fn run_cli(args: &[String]) -> i32 {
     if std::env::var("BT_MD5").is_ok() {
         opt.create_md5 = true;
     }
+    if let Ok(v) = std::env::var("BT_CRLF") {
+        opt.crlf = v != "0";
+    }
     // setlist: the user's setlist.fm API key.
     opt.setlistfm_key = std::env::var("BT_SETLISTFM_KEY").unwrap_or_default();
     let (tx, rx) = mpsc::channel();

@@ -324,8 +324,9 @@ pub(crate) mod tests {
         })
         .join()
         .unwrap();
-        // Windows: THREAD_PRIORITY_BELOW_NORMAL; Linux: nice 10 more (from 0).
-        let lowered = if cfg!(windows) { -1 } else { before + 10 };
+        // Windows: THREAD_PRIORITY_BELOW_NORMAL; Linux: nice 10, or lower already (a process
+        // started by a build tool can run at nice 1).
+        let lowered = if cfg!(windows) { -1 } else { before.max(10) };
         assert_eq!(after, lowered, "priority before {before}, after {after}");
         // The thread that started it (the window's, in the application) keeps its own.
         assert_eq!(thread_priority(), own, "the calling thread's priority changed (lowered one: {before} -> {after})");

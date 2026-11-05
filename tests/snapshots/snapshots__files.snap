@@ -2,7 +2,7 @@
 source: tests/snapshots.rs
 expression: text
 ---
-2ea7c6a4156617fc6d5759845d9b4d5b  01 - Hires - spectrogram.png
+(image)  01 - Hires - spectrogram.png
 37cceb1be477cad76aa69b7a5a78998f  Wav Band 2002-04-04/WAV-cleaned/01 - Extra chunk.wav
 398bf2893f8bb949a6901f32f9701b6a  Hires Band 2000-02-02/Hires Band 2000-02-02.sfv
 3d642d5d1060edb43738cb8998d53216  Synthetic Band 1990-01-01/Synthetic Band 1990-01-01.st5
