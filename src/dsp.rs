@@ -292,6 +292,45 @@ pub(crate) mod tests {
         }
     }
 
+    /// The priority of the calling thread, as the system reports it.
+    #[cfg(windows)]
+    fn thread_priority() -> i32 {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetCurrentThread() -> isize;
+            fn GetThreadPriority(thread: isize) -> i32;
+        }
+        // SAFETY: plain calls on the current thread's pseudo-handle.
+        unsafe { GetThreadPriority(GetCurrentThread()) }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn thread_priority() -> i32 {
+        extern "C" {
+            fn gettid() -> i32;
+            fn getpriority(which: i32, who: u32) -> i32;
+        }
+        // SAFETY: reads this thread's nice value.
+        unsafe { getpriority(0, gettid() as u32) }
+    }
+
+    #[test]
+    fn priority_is_lowered_for_this_thread_only() {
+        let own = thread_priority();
+        let (before, after) = std::thread::spawn(|| {
+            let before = thread_priority();
+            lower_priority();
+            (before, thread_priority())
+        })
+        .join()
+        .unwrap();
+        // Windows: THREAD_PRIORITY_BELOW_NORMAL; Linux: nice 10 more (from 0).
+        let lowered = if cfg!(windows) { -1 } else { before + 10 };
+        assert_eq!(after, lowered, "priority before {before}, after {after}");
+        // The thread that started it (the window's, in the application) keeps its own.
+        assert_eq!(thread_priority(), own, "the calling thread's priority changed (lowered one: {before} -> {after})");
+    }
+
     #[test]
     fn fft_plain_and_avx2_agree() {
         for bits in 1..=13 {
