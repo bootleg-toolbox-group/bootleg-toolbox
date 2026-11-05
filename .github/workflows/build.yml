@@ -49,6 +49,13 @@ jobs:
       - name: Tests
         run: cargo test --release
 
+      # The kernels have an AVX2 version, chosen at run time: the plain one, which processors
+      # without AVX2 run, must give the same results (snapshots).
+      - name: Tests without AVX2
+        run: cargo test --release --target-dir target/no-avx2
+        env:
+          RUSTFLAGS: --cfg bt_no_avx2
+
       - name: Version check
         if: startsWith(github.ref, 'refs/tags/v')
         run: |

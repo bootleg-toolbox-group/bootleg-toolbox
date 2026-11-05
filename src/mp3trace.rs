@@ -142,30 +142,37 @@ impl Collector {
         } else {
             &[(false, |f| f[0] as f64)]
         };
+        // The filter bank's output (one slot every 32 samples) for every start in the segment,
+        // per channel and segment: a window at position `offset` takes the 36 slots from
+        // offset + 96 on, 32 apart, so positions 32 apart share them.
+        let slots: Vec<Vec<[f64; 32]>> = modes
+            .iter()
+            .flat_map(|&(_, take)| segments.iter().map(move |seg| (take, seg)))
+            .collect::<Vec<_>>()
+            .into_par_iter()
+            .map(|(take, seg)| {
+                let x: Vec<f64> = seg.iter().map(|f| take(*f)).collect();
+                (0..SLOT_STARTS).map(|q| tables.slot(&x[FIRST_SLOT + q..FIRST_SLOT + q + 512])).collect()
+            })
+            .collect();
         // Every position on its own (in parallel), then taken in order as before.
         let likelihoods: Vec<Vec<f64>> = (0..GRANULE)
             .into_par_iter()
-            .map_init(
-                || vec![0f64; 4 * GRANULE],
-                |buf, offset| {
-                    modes
-                        .iter()
-                        .map(|&(_, take)| {
-                            let (mut hits, mut total) = (0usize, 0usize);
-                            for seg in &segments {
-                                // granule1 starts at `offset` in the segment (granules 1 to 3 then follow).
-                                for (i, f) in seg[offset..offset + 3 * GRANULE].iter().enumerate() {
-                                    buf[i] = take(*f);
-                                }
-                                let (h, t) = tables.window(&buf[..3 * GRANULE]);
-                                hits += h;
-                                total += t;
-                            }
-                            if total > 0 { hits as f64 / total as f64 } else { 0.0 }
-                        })
-                        .collect()
-                },
-            )
+            .map(|offset| {
+                slots
+                    .chunks(segments.len())
+                    .map(|per_segment| {
+                        let (mut hits, mut total) = (0usize, 0usize);
+                        for seg_slots in per_segment {
+                            // granule1 starts at `offset` in the segment (granules 1 to 3 then follow).
+                            let (h, t) = tables.window(&seg_slots[offset..]);
+                            hits += h;
+                            total += t;
+                        }
+                        if total > 0 { hits as f64 / total as f64 } else { 0.0 }
+                    })
+                    .collect()
+            })
             .collect();
         let mut best = Trace { likelihood: 0.0, offset: 0, mid_side: false, contrast: 0.0 };
         let mut per_offset = vec![0f64; GRANULE];
@@ -191,6 +198,11 @@ impl Collector {
 
 /// A channel to analyse: whether it is a mid/side one, and how to take it from (L, R).
 type Mode = (bool, fn([f32; 2]) -> f64);
+
+/// The first filter bank slot of a window starts 96 samples into it (granule 2 starts at 576,
+/// with the 480 samples before it); the positions 0 to 575 need 576 + 35 x 32 slot starts.
+const FIRST_SLOT: usize = GRANULE - 480;
+const SLOT_STARTS: usize = GRANULE + 35 * 32;
 
 /// The scale factor bands of MP3 (first line of each band, end of the last one).
 struct Bands {
@@ -240,14 +252,14 @@ struct Tables {
     /// Error threshold of each band: genuine audio falls under it in 1 % of the cases.
     tau_long: Vec<f64>,
     tau_short: Vec<f64>,
-    /// Polyphase modulation, 32 x 64.
+    /// Polyphase modulation, 32 x 64, stored column after column (64 x 32).
     modulation: Vec<f64>,
     /// MDCT windows: long, start, stop (36) and short (12).
     win_long: [f64; 36],
     win_start: [f64; 36],
     win_stop: [f64; 36],
     win_short: [f64; 12],
-    /// MDCT kernels: 18 x 36 and 6 x 12.
+    /// MDCT kernels: 18 x 36 and 6 x 12, stored column after column.
     mdct_long: Vec<f64>,
     mdct_short: Vec<f64>,
     scale: [f64; SCALE_FACTORS],
@@ -271,7 +283,7 @@ impl Tables {
         let mut modulation = vec![0f64; 32 * 64];
         for i in 0..32 {
             for k in 0..64 {
-                modulation[i * 64 + k] = ((2 * i + 1) as f64 * (k as f64 - 16.0) * std::f64::consts::PI / 64.0).cos();
+                modulation[k * 32 + i] = ((2 * i + 1) as f64 * (k as f64 - 16.0) * std::f64::consts::PI / 64.0).cos();
             }
         }
         let sine = |n: usize, len: usize| ((n as f64 + 0.5) * std::f64::consts::PI / len as f64).sin();
@@ -303,7 +315,7 @@ impl Tables {
             for f in 0..n_out {
                 for t in 0..n2 {
                     let phase = std::f64::consts::PI / n_out as f64 * (t as f64 + 0.5 + n_out as f64 / 2.0) * (f as f64 + 0.5);
-                    k[f * n2 + t] = phase.cos();
+                    k[t * n_out + f] = phase.cos();
                 }
             }
             k
@@ -315,47 +327,74 @@ impl Tables {
         Tables { long_bands, short_bands, tau_long, tau_short, modulation, win_long, win_start, win_stop, win_short, mdct_long: kernel(18), mdct_short: kernel(6), scale }
     }
 
-    /// Polyphase analysis of one granule: `input` holds the 480 samples before it and its
-    /// 576 samples; returns 32 subbands x 18 samples (subband-major).
-    fn polyphase(&self, input: &[f64], out: &mut [f64; 32 * 18]) {
-        let mut z = [0f64; 64];
-        for k in 0..18 {
-            // The last 512 samples, newest first, weighted.
-            let start = k * 32;
-            for v in z.iter_mut() {
-                *v = 0.0;
+    /// One slot of the polyphase analysis: the 32 subband samples of the 512 samples of
+    /// `input`, newest last.
+    fn slot(&self, input: &[f64]) -> [f64; 32] {
+        #[cfg(all(target_arch = "x86_64", not(bt_no_avx2)))]
+        if std::is_x86_feature_detected!("avx2") {
+            #[target_feature(enable = "avx2")]
+            fn avx2(tables: &Tables, input: &[f64]) -> [f64; 32] {
+                tables.slot_plain(input)
             }
-            for j in 0..512 {
-                let x = input[start + 511 - j] * crate::mp3trace::PQMF_WINDOW[j];
-                z[j % 64] += x;
-            }
-            for i in 0..32 {
-                let row = &self.modulation[i * 64..(i + 1) * 64];
-                out[i * 18 + k] = row.iter().zip(&z).map(|(m, v)| m * v).sum();
-            }
+            // SAFETY: the processor has AVX2 (checked just above).
+            return unsafe { avx2(self, input) };
         }
+        self.slot_plain(input)
     }
 
+    #[inline(always)]
+    fn slot_plain(&self, input: &[f64]) -> [f64; 32] {
+        let mut z = [0f64; 64];
+        // The last 512 samples, newest first, weighted.
+        for j in 0..512 {
+            let x = input[511 - j] * crate::mp3trace::PQMF_WINDOW[j];
+            z[j % 64] += x;
+        }
+        // The 32 subbands side by side, each summed in order (from -0.0, as Iterator::sum).
+        let mut out = [-0.0f64; 32];
+        for (column, v) in self.modulation.as_chunks::<32>().0.iter().zip(&z) {
+            for (o, m) in out.iter_mut().zip(column) {
+                *o += m * v;
+            }
+        }
+        out
+    }
+
+    /// `kernel` stored column after column; the lines side by side, each summed in order.
+    #[inline(always)]
     fn mdct(kernel: &[f64], x: &[f64], out: &mut [f64]) {
-        let n2 = x.len();
-        for (f, o) in out.iter_mut().enumerate() {
-            *o = kernel[f * n2..(f + 1) * n2].iter().zip(x).map(|(k, v)| k * v).sum();
+        out.fill(-0.0);
+        for (column, v) in kernel.chunks_exact(out.len()).zip(x) {
+            for (o, k) in out.iter_mut().zip(column) {
+                *o += k * v;
+            }
         }
     }
 
     /// One analysis window (3 granules: the first one only feeds the filter bank):
     /// (bands with a too small rounding error, bands tried) for the block type that fits best.
-    fn window(&self, signal: &[f64]) -> (usize, usize) {
-        let mut sub2 = [0f64; 32 * 18];
-        let mut sub3 = [0f64; 32 * 18];
-        self.polyphase(&signal[GRANULE - 480..2 * GRANULE], &mut sub2);
-        self.polyphase(&signal[2 * GRANULE - 480..3 * GRANULE], &mut sub3);
+    /// `slots`: the filter bank's slots from the window's first one on (granules 2 and 3 are
+    /// the 36 slots 32 apart).
+    fn window(&self, slots: &[[f64; 32]]) -> (usize, usize) {
+        #[cfg(all(target_arch = "x86_64", not(bt_no_avx2)))]
+        if std::is_x86_feature_detected!("avx2") {
+            #[target_feature(enable = "avx2")]
+            fn avx2(tables: &Tables, slots: &[[f64; 32]]) -> (usize, usize) {
+                tables.window_plain(slots)
+            }
+            // SAFETY: the processor has AVX2 (checked just above).
+            return unsafe { avx2(self, slots) };
+        }
+        self.window_plain(slots)
+    }
+
+    #[inline(always)]
+    fn window_plain(&self, slots: &[[f64; 32]]) -> (usize, usize) {
         // 32 subbands x 36 samples, every other sample of the odd subbands inverted.
         let mut rows = [[0f64; 36]; 32];
         for i in 0..32 {
-            for k in 0..18 {
-                rows[i][k] = sub2[i * 18 + k];
-                rows[i][18 + k] = sub3[i * 18 + k];
+            for k in 0..36 {
+                rows[i][k] = slots[32 * k][i];
             }
             if i % 2 == 1 {
                 for j in (1..36).step_by(2) {
@@ -447,32 +486,44 @@ impl Tables {
         }
         let sf_max = 4.0 * max.log2() + 16.0 / 3.0 + 80.0;
         let powered: Vec<f64> = band.iter().map(|x| { let r = x.abs().sqrt(); r * r.sqrt() }).collect();
-        self.scale
-            .iter()
-            .filter(|&&sf| {
-                let gain = 2f64.powf(-3.0 / 16.0 * (sf * sf_max - 80.0));
-                grid_error(&powered, gain) < tau
-            })
-            .count()
+        let gains = self.scale.map(|sf| 2f64.powf(-3.0 / 16.0 * (sf * sf_max - 80.0)));
+        grid_errors(&powered, &gains).iter().filter(|&&e| e < tau).count()
     }
 }
 
 /// Mean squared distance of `values × gain` (all ≥ 0) to the nearest integers: how well
 /// they fit an encoder's quantisation grid.
-pub(crate) fn grid_error(values: &[f64], gain: f64) -> f64 {
+/// The mean squared rounding error of `values` scaled by each gain, in one pass over the
+/// values (the bulk of the detectors' time). Each gain's sum still adds its terms one after
+/// the other, in order: the gains are only computed side by side (4 at a time with AVX2).
+pub(crate) fn grid_errors<const N: usize>(values: &[f64], gains: &[f64; N]) -> [f64; N] {
+    #[cfg(all(target_arch = "x86_64", not(bt_no_avx2)))]
+    if std::is_x86_feature_detected!("avx2") {
+        #[target_feature(enable = "avx2")]
+        fn avx2<const N: usize>(values: &[f64], gains: &[f64; N]) -> [f64; N] {
+            grid_errors_plain(values, gains)
+        }
+        // SAFETY: the processor has AVX2 (checked just above).
+        return unsafe { avx2(values, gains) };
+    }
+    grid_errors_plain(values, gains)
+}
+
+#[inline(always)]
+fn grid_errors_plain<const N: usize>(values: &[f64], gains: &[f64; N]) -> [f64; N] {
     // Adding then removing 2^52 rounds to the nearest integer in plain arithmetic: f64::round
-    // is a call into the C library on x86-64 without SSE4.1, the bulk of the detectors' time.
-    // Halves go to the even integer instead of away from zero, which leaves e² unchanged.
+    // is a call into the C library on x86-64 without SSE4.1. Halves go to the even integer
+    // instead of away from zero, which leaves e² unchanged.
     const SHIFT: f64 = 4_503_599_627_370_496.0;
-    let sum: f64 = values
-        .iter()
-        .map(|p| {
+    let mut sums = [0f64; N];
+    for p in values {
+        for (sum, gain) in sums.iter_mut().zip(gains) {
             let v = p * gain;
             let e = if v < SHIFT { (v + SHIFT) - SHIFT - v } else { 0.0 };
-            e * e
-        })
-        .sum();
-    sum / values.len() as f64
+            *sum += e * e;
+        }
+    }
+    sums.map(|s| s / values.len() as f64)
 }
 
 /// erf, to 1.2e-7 (Numerical Recipes, Chebyshev fit of erfc).
@@ -569,6 +620,24 @@ pub const PQMF_WINDOW: [f64; 512] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::dsp::tests::{noise, same_bits};
+
+    #[test]
+    fn kernels_plain_and_avx2_agree() {
+        let tables = Tables::new(&Bands::for_rate(44100).unwrap());
+        let x = noise(SLOT_STARTS + 512, 7);
+        let slots: Vec<[f64; 32]> = (0..SLOT_STARTS).map(|q| tables.slot(&x[q..q + 512])).collect();
+        for q in [0, 1, 33, SLOT_STARTS - 1] {
+            same_bits(&tables.slot(&x[q..q + 512]), &tables.slot_plain(&x[q..q + 512]));
+        }
+        for offset in [0, 1, 17, 300, GRANULE - 1] {
+            assert_eq!(tables.window(&slots[offset..]), tables.window_plain(&slots[offset..]));
+        }
+        let values: Vec<f64> = noise(400, 9).iter().map(|v| v.abs() * 300.0).collect();
+        let gains = [0.01, 0.1, 0.5, 1.0, 1.7, 3.3, 10.0, 1e17];
+        same_bits(&grid_errors(&values, &gains), &grid_errors_plain(&values, &gains));
+    }
 
     #[test]
     fn error_function() {

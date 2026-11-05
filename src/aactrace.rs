@@ -273,6 +273,20 @@ impl Tables {
     /// One analysis window of 2048 samples: (bands with a too small rounding error, bands
     /// tried) for the block type and window shape that fit best.
     fn window(&self, signal: &[f64], w: &mut Work) -> (usize, usize) {
+        #[cfg(all(target_arch = "x86_64", not(bt_no_avx2)))]
+        if std::is_x86_feature_detected!("avx2") {
+            #[target_feature(enable = "avx2")]
+            fn avx2(tables: &Tables, signal: &[f64], w: &mut Work) -> (usize, usize) {
+                tables.window_plain(signal, w)
+            }
+            // SAFETY: the processor has AVX2 (checked just above).
+            return unsafe { avx2(self, signal, w) };
+        }
+        self.window_plain(signal, w)
+    }
+
+    #[inline(always)]
+    fn window_plain(&self, signal: &[f64], w: &mut Work) -> (usize, usize) {
         let ratio = |c: (usize, usize)| if c.1 > 0 { c.0 as f64 / c.1 as f64 } else { 0.0 };
         let mut best = (0usize, 0usize);
         for window in &self.windows {
@@ -326,19 +340,27 @@ impl Tables {
         let sf_max = 4.0 * max.log2() + 16.0 / 3.0 + 60.0;
         powered.clear();
         powered.extend(band.iter().map(|x| { let r = x.abs().sqrt(); r * r.sqrt() }));
-        self.scale
-            .iter()
-            .filter(|&&sf| {
-                let gain = 2f64.powf(-3.0 / 16.0 * (sf * sf_max - 60.0));
-                crate::mp3trace::grid_error(powered, gain) < tau
-            })
-            .count()
+        let gains = self.scale.map(|sf| 2f64.powf(-3.0 / 16.0 * (sf * sf_max - 60.0)));
+        crate::mp3trace::grid_errors(powered, &gains).iter().filter(|&&e| e < tau).count()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::dsp::tests::noise;
+
+    #[test]
+    fn window_plain_and_avx2_agree() {
+        let long: Vec<usize> = (0..49).map(|b| 1 + b * 19).collect();
+        let tables = Tables::new(&long, &[1, 5, 9, 13, 17, 21, 29, 37, 45, 57, 69, 81, 97, 113]);
+        let (mut w1, mut w2) = (Work::new(), Work::new());
+        for seed in 1..6 {
+            let x: Vec<f64> = noise(2 * FRAME, seed).iter().map(|v| v * 0.3).collect();
+            assert_eq!(tables.window(&x, &mut w1), tables.window_plain(&x, &mut w2));
+        }
+    }
 
     #[test]
     fn kbd_window() {

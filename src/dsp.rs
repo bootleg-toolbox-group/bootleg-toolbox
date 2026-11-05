@@ -69,7 +69,9 @@ pub fn lower_priority() {}
 /// In-place radix-2 complex FFT.
 pub struct Fft {
     rev: Vec<usize>,
-    twiddles: Vec<(f64, f64)>,
+    /// Per stage (butterflies of 2, 4, 8... points), the twiddles of its butterflies in a
+    /// row: exp(-2 pi i k / len), cos and sin apart.
+    stages: Vec<(Vec<f64>, Vec<f64>)>,
 }
 
 impl Fft {
@@ -77,13 +79,19 @@ impl Fft {
         assert!(n.is_power_of_two());
         let bits = n.trailing_zeros();
         let rev = (0..n).map(|i| i.reverse_bits() >> (usize::BITS - bits)).collect();
-        let twiddles = (0..n / 2)
+        let twiddles: Vec<(f64, f64)> = (0..n / 2)
             .map(|k| {
                 let angle = -2.0 * std::f64::consts::PI * k as f64 / n as f64;
                 (angle.cos(), angle.sin())
             })
             .collect();
-        Fft { rev, twiddles }
+        let stages = (1..=bits)
+            .map(|s| {
+                let (len, step) = (1usize << s, n >> s);
+                ((0..len / 2).map(|k| twiddles[k * step].0).collect(), (0..len / 2).map(|k| twiddles[k * step].1).collect())
+            })
+            .collect();
+        Fft { rev, stages }
     }
 
     // A transform always has a size: no is_empty.
@@ -93,6 +101,22 @@ impl Fft {
     }
 
     pub fn run(&self, re: &mut [f64], im: &mut [f64]) {
+        #[cfg(all(target_arch = "x86_64", not(bt_no_avx2)))]
+        if std::is_x86_feature_detected!("avx2") {
+            #[target_feature(enable = "avx2")]
+            fn avx2(fft: &Fft, re: &mut [f64], im: &mut [f64]) {
+                fft.run_plain(re, im)
+            }
+            // SAFETY: the processor has AVX2 (checked just above).
+            return unsafe { avx2(self, re, im) };
+        }
+        self.run_plain(re, im)
+    }
+
+    /// The butterflies of a stage are independent: computed side by side, each with the same
+    /// operations as one at a time.
+    #[inline(always)]
+    fn run_plain(&self, re: &mut [f64], im: &mut [f64]) {
         let n = self.rev.len();
         for i in 0..n {
             let j = self.rev[i];
@@ -101,23 +125,20 @@ impl Fft {
                 im.swap(i, j);
             }
         }
-        let mut len = 2;
-        while len <= n {
-            let half = len / 2;
-            let step = n / len;
-            for base in (0..n).step_by(len) {
+        for (s, (wr, wi)) in self.stages.iter().enumerate() {
+            let half = 1usize << s;
+            for (re, im) in re[..n].chunks_exact_mut(2 * half).zip(im[..n].chunks_exact_mut(2 * half)) {
+                let (re_a, re_b) = re.split_at_mut(half);
+                let (im_a, im_b) = im.split_at_mut(half);
                 for k in 0..half {
-                    let (wr, wi) = self.twiddles[k * step];
-                    let (a, b) = (base + k, base + k + half);
-                    let tr = re[b] * wr - im[b] * wi;
-                    let ti = re[b] * wi + im[b] * wr;
-                    re[b] = re[a] - tr;
-                    im[b] = im[a] - ti;
-                    re[a] += tr;
-                    im[a] += ti;
+                    let tr = re_b[k] * wr[k] - im_b[k] * wi[k];
+                    let ti = re_b[k] * wi[k] + im_b[k] * wr[k];
+                    re_b[k] = re_a[k] - tr;
+                    im_b[k] = im_a[k] - ti;
+                    re_a[k] += tr;
+                    im_a[k] += ti;
                 }
             }
-            len *= 2;
         }
     }
 
@@ -247,8 +268,43 @@ pub fn percentile(values: &[f64], p: f64) -> Option<f64> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// Pseudo-random values in -1..1 (xorshift), the same on every run.
+    pub(crate) fn noise(n: usize, seed: u64) -> Vec<f64> {
+        let mut s = seed.max(1);
+        (0..n)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                (s >> 11) as f64 / (1u64 << 52) as f64 - 1.0
+            })
+            .collect()
+    }
+
+    /// Two results equal to the bit (the AVX2 and plain versions of a kernel).
+    pub(crate) fn same_bits(a: &[f64], b: &[f64]) {
+        assert_eq!(a.len(), b.len());
+        for (i, (x, y)) in a.iter().zip(b).enumerate() {
+            assert_eq!(x.to_bits(), y.to_bits(), "value {i}: {x} vs {y}");
+        }
+    }
+
+    #[test]
+    fn fft_plain_and_avx2_agree() {
+        for bits in 1..=13 {
+            let n = 1 << bits;
+            let fft = Fft::new(n);
+            let (mut re, mut im) = (noise(n, bits), noise(n, bits + 100));
+            let (mut re2, mut im2) = (re.clone(), im.clone());
+            fft.run(&mut re, &mut im);
+            fft.run_plain(&mut re2, &mut im2);
+            same_bits(&re, &re2);
+            same_bits(&im, &im2);
+        }
+    }
 
     #[test]
     fn fft_matches_naive_dft() {

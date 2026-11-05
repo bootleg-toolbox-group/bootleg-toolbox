@@ -159,29 +159,52 @@ fn band_ok(band: &[f64]) -> bool {
 
 /// How far a piece is from the nearest direction of a small-integer vector (|sum| <= K_MAX).
 fn codeword_error(piece: &[f64]) -> f64 {
+    #[cfg(all(target_arch = "x86_64", not(bt_no_avx2)))]
+    if std::is_x86_feature_detected!("avx2") {
+        #[target_feature(enable = "avx2")]
+        fn avx2(piece: &[f64]) -> f64 {
+            codeword_error_plain(piece)
+        }
+        // SAFETY: the processor has AVX2 (checked just above).
+        return unsafe { avx2(piece) };
+    }
+    codeword_error_plain(piece)
+}
+
+/// K tried 4 at a time (side by side: each K's sums still add their terms in order), then
+/// taken in order, as one after the other.
+#[inline(always)]
+fn codeword_error_plain(piece: &[f64]) -> f64 {
+    const LANES: usize = 4;
+    const _: () = assert!(K_MAX.is_multiple_of(LANES));
     let norm = energy(piece).sqrt();
     if norm < 1e-12 {
         return 0.0;
     }
     let l1: f64 = piece.iter().map(|v| v.abs()).sum::<f64>() / norm;
     let mut best = f64::INFINITY;
-    for k in 1..=K_MAX {
-        let scale = k as f64 / l1;
-        let (mut dot, mut yy) = (0.0, 0.0);
+    for k0 in (1..=K_MAX).step_by(LANES) {
+        let scale: [f64; LANES] = std::array::from_fn(|l| (k0 + l) as f64 / l1);
+        let (mut dot, mut yy) = ([0f64; LANES], [0f64; LANES]);
         for &v in piece {
-            let y = (v / norm * scale).round();
-            dot += y * v / norm;
-            yy += y * y;
+            let unit = v / norm;
+            for l in 0..LANES {
+                let y = (unit * scale[l]).round();
+                dot[l] += y * v / norm;
+                yy[l] += y * y;
+            }
         }
-        if yy == 0.0 {
-            continue;
-        }
-        // |v - y/|y||^2 = 2 - 2 v.y/|y| for a unit v.
-        let e = (2.0 - 2.0 * dot / yy.sqrt()).max(0.0).sqrt();
-        if e < best {
-            best = e;
-            if best < TOLERANCE {
-                break;
+        for l in 0..LANES {
+            if yy[l] == 0.0 {
+                continue;
+            }
+            // |v - y/|y||^2 = 2 - 2 v.y/|y| for a unit v.
+            let e = (2.0 - 2.0 * dot[l] / yy[l].sqrt()).max(0.0).sqrt();
+            if e < best {
+                best = e;
+                if best < TOLERANCE {
+                    return best;
+                }
             }
         }
     }
@@ -294,6 +317,20 @@ impl Mdct {
     }
 
     fn forward(&mut self, input: &[f64], out: &mut [f64]) {
+        #[cfg(all(target_arch = "x86_64", not(bt_no_avx2)))]
+        if std::is_x86_feature_detected!("avx2") {
+            #[target_feature(enable = "avx2")]
+            fn avx2(mdct: &mut Mdct, input: &[f64], out: &mut [f64]) {
+                mdct.forward_plain(input, out)
+            }
+            // SAFETY: the processor has AVX2 (checked just above).
+            return unsafe { avx2(self, input, out) };
+        }
+        self.forward_plain(input, out)
+    }
+
+    #[inline(always)]
+    fn forward_plain(&mut self, input: &[f64], out: &mut [f64]) {
         let w = |i: usize| input[i] * self.window[i];
         // TDAC folding of the quarters (a, b, c, d) to (-c_r - d, a - b_r).
         let h = N / 2;
@@ -306,6 +343,7 @@ impl Mdct {
 }
 
 /// DCT-IV of N points, X[k] = sum u[n] cos(pi/N (n + 1/2)(k + 1/2)), with an N/2-point complex DFT.
+#[inline(always)]
 fn dct4(u: &[f64], out: &mut [f64], dft: &mut Bluestein, re: &mut [f64], im: &mut [f64]) {
     let n = u.len();
     let h = n / 2;
@@ -368,6 +406,7 @@ impl Bluestein {
         Bluestein { n, fft, chirp, kernel_re, kernel_im, a_re: vec![0.0; m], a_im: vec![0.0; m] }
     }
 
+    #[inline(always)]
     fn run(&mut self, re: &mut [f64], im: &mut [f64]) {
         let m = self.a_re.len();
         self.a_re.iter_mut().for_each(|v| *v = 0.0);
@@ -458,6 +497,25 @@ fn resample_to_48k(x: &[f64], rate: u32) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::dsp::tests::{noise, same_bits};
+
+    #[test]
+    fn kernels_plain_and_avx2_agree() {
+        let (mut a, mut b) = (Mdct::new(), Mdct::new());
+        let x = noise(2 * N, 3);
+        let (mut out1, mut out2) = (vec![0f64; N], vec![0f64; N]);
+        a.forward(&x, &mut out1);
+        b.forward_plain(&x, &mut out2);
+        same_bits(&out1, &out2);
+        for len in [4, 8, 16, 32] {
+            let piece = noise(len, len as u64);
+            assert_eq!(codeword_error(&piece).to_bits(), codeword_error_plain(&piece).to_bits());
+            // A codeword (small integers), found at its own K.
+            let word: Vec<f64> = (0..len).map(|i| ((i * 7) % 5) as f64 - 2.0).collect();
+            assert_eq!(codeword_error(&word).to_bits(), codeword_error_plain(&word).to_bits());
+        }
+    }
 
     fn direct_mdct(input: &[f64], window: &[f64]) -> Vec<f64> {
         let pi = std::f64::consts::PI;

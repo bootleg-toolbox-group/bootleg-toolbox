@@ -55,6 +55,11 @@ zbus = { version = "5", default-features = false, features = ["async-io", "block
 [package.metadata.cargo-machete]
 ignored = ["md-5"]
 
+[lints.rust]
+# `--cfg bt_no_avx2` (tests only): the plain versions of the AVX2 kernels, as processors without
+# AVX2 run them (RUSTFLAGS="--cfg bt_no_avx2" cargo test --release).
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(bt_no_avx2)"] }
+
 [profile.release]
 opt-level = 3
 lto = "thin"
