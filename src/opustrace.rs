@@ -185,37 +185,49 @@ fn codeword_error(piece: &[f64]) -> f64 {
     best
 }
 
-/// The frame position: where the band above 20 kHz, which CELT leaves empty, is emptiest;
-/// the best candidates are then compared by their clean frames (added noise can fill that
-/// band).
+/// The frame position: where the band above 20 kHz, which CELT leaves empty, is emptiest, or
+/// where the middle bands of the loudest frames are most often codewords (a 16-bit file's
+/// rounding noise can fill the empty band as much as a misaligned clean stream leaks); the best
+/// candidates of both are then compared by their clean frames.
 fn align(mdct: &mut Mdct, mid: &[f64], side: &[f64]) -> usize {
-    const PROBE: usize = 8;
+    const PROBE: usize = 16;
+    // The loudest frames: a show often opens on silence, crowd or a fade, where the leak
+    // above 20 kHz is only noise.
+    let blocks = (mid.len() / N).saturating_sub(3);
+    let mut loudest: Vec<(f64, usize)> = (1..blocks).map(|f| (energy(&mid[f * N..(f + 1) * N]), f)).collect();
+    loudest.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let probe: Vec<usize> = loudest.iter().take(PROBE).map(|&(_, f)| f).collect();
     let mut out = vec![0f64; N];
-    let mut leaks: Vec<(f64, usize)> = (0..N)
-        .map(|offset| {
-            let mut leak = 0.0;
-            for x in [mid, side].into_iter().filter(|x| !x.is_empty()) {
-                let mut ratios = Vec::with_capacity(PROBE);
-                for f in 1..=PROBE {
-                    let start = offset + N / 2 + f * N;
-                    if start + 2 * N > x.len() {
-                        break;
-                    }
-                    mdct.forward(&x[start..start + 2 * N], &mut out);
-                    let total = energy(&out);
-                    if total > 0.0 {
-                        ratios.push(energy(&out[800..]) / total);
-                    }
+    let mut leaks = Vec::with_capacity(N);
+    let mut codewords = Vec::with_capacity(N);
+    for offset in 0..N {
+        let (mut leak, mut words) = (0.0, 0usize);
+        for x in [mid, side].into_iter().filter(|x| !x.is_empty()) {
+            let mut ratios = Vec::with_capacity(PROBE);
+            for &f in &probe {
+                let start = offset + N / 2 + f * N;
+                if start + 2 * N > x.len() {
+                    continue;
                 }
-                leak += crate::dsp::median(&ratios).unwrap_or(1.0);
+                mdct.forward(&x[start..start + 2 * N], &mut out);
+                let total = energy(&out);
+                if total > 0.0 {
+                    ratios.push(energy(&out[800..]) / total);
+                }
+                // Bands 8 to 14 (16 to 32 lines): seldom codewords by chance.
+                words += BANDS[8..16].windows(2).filter(|b| band_ok(&out[b[0]..b[1]])).count();
             }
-            (leak, offset)
-        })
-        .collect();
+            leak += crate::dsp::median(&ratios).unwrap_or(1.0);
+        }
+        leaks.push((leak, offset));
+        codewords.push((words, offset));
+    }
     leaks.sort_by(|a, b| a.0.total_cmp(&b.0));
-    // The best few by leak, by their clean frames over the first frames.
+    codewords.sort_by_key(|c| std::cmp::Reverse(c.0));
+    // The best few of each, by their clean frames over the first frames.
     let mut best = (0, leaks[0].1);
-    for &(_, offset) in leaks.iter().take(6) {
+    let candidates = leaks.iter().take(6).map(|l| l.1).chain(codewords.iter().take(6).map(|c| c.1));
+    for offset in candidates {
         let mut clean = 0;
         for x in [mid, side].into_iter().filter(|x| !x.is_empty()) {
             for f in 1..=300 {
