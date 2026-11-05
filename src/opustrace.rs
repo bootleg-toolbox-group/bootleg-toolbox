@@ -9,6 +9,8 @@
 //! per cent of the frames in music; none in any genuine file tested). Other rates are first
 //! resampled to 48 kHz: a good resampler keeps the audio band, and the codewords with it.
 
+use rayon::prelude::*;
+
 use crate::dsp::Fft;
 
 const N: usize = 960;
@@ -49,6 +51,7 @@ impl Trace {
 }
 
 /// Collects the first minute of the mid and side channels, at the file's rate.
+#[derive(Clone)]
 pub struct Collector {
     channels: usize,
     rate: u32,
@@ -89,31 +92,31 @@ impl Collector {
         if mid.len() < 40 * N {
             return None;
         }
-        let mut mdct = Mdct::new();
-        let offset = align(&mut mdct, &mid, &side);
-        let count = |x: &[f64], mdct: &mut Mdct| -> (usize, usize) {
+        let offset = align(&mid, &side);
+        // Every frame on its own (in parallel): (loud enough, clean).
+        let count = |x: &[f64]| -> (usize, usize) {
             if x.is_empty() {
                 return (0, 0);
             }
-            let (mut clean, mut frames) = (0, 0);
-            let mut out = vec![0f64; N];
-            let mut start = offset + N / 2;
-            while start + 2 * N <= x.len() {
-                mdct.forward(&x[start..start + 2 * N], &mut out);
-                start += N;
-                let loud = BANDS.windows(2).filter(|b| energy(&out[b[0]..b[1]]) > 1e-14).count();
-                if loud < CLEAN_BANDS {
-                    continue;
-                }
-                frames += 1;
-                if clean_bands(&out) >= CLEAN_BANDS {
-                    clean += 1;
-                }
-            }
-            (clean, frames)
+            let starts: Vec<usize> = (0..).map(|f| offset + N / 2 + f * N).take_while(|s| s + 2 * N <= x.len()).collect();
+            starts
+                .par_iter()
+                .map_init(
+                    || (Mdct::new(), vec![0f64; N]),
+                    |(mdct, out), &start| {
+                        mdct.forward(&x[start..start + 2 * N], out);
+                        let loud = BANDS.windows(2).filter(|b| energy(&out[b[0]..b[1]]) > 1e-14).count();
+                        if loud < CLEAN_BANDS {
+                            (0, 0)
+                        } else {
+                            (usize::from(clean_bands(out) >= CLEAN_BANDS), 1)
+                        }
+                    },
+                )
+                .reduce(|| (0, 0), |a, b| (a.0 + b.0, a.1 + b.1))
         };
-        let (mc, mf) = count(&mid, &mut mdct);
-        let (sc, sf) = count(&side, &mut mdct);
+        let (mc, mf) = count(&mid);
+        let (sc, sf) = count(&side);
         let (clean, frames) = if sc > mc { (sc, sf) } else { (mc, mf) };
         Some(Trace { clean, frames, offset })
     }
@@ -189,7 +192,7 @@ fn codeword_error(piece: &[f64]) -> f64 {
 /// where the middle bands of the loudest frames are most often codewords (a 16-bit file's
 /// rounding noise can fill the empty band as much as a misaligned clean stream leaks); the best
 /// candidates of both are then compared by their clean frames.
-fn align(mdct: &mut Mdct, mid: &[f64], side: &[f64]) -> usize {
+fn align(mid: &[f64], side: &[f64]) -> usize {
     const PROBE: usize = 16;
     // The loudest frames: a show often opens on silence, crowd or a fade, where the leak
     // above 20 kHz is only noise.
@@ -197,50 +200,64 @@ fn align(mdct: &mut Mdct, mid: &[f64], side: &[f64]) -> usize {
     let mut loudest: Vec<(f64, usize)> = (1..blocks).map(|f| (energy(&mid[f * N..(f + 1) * N]), f)).collect();
     loudest.sort_by(|a, b| b.0.total_cmp(&a.0));
     let probe: Vec<usize> = loudest.iter().take(PROBE).map(|&(_, f)| f).collect();
-    let mut out = vec![0f64; N];
-    let mut leaks = Vec::with_capacity(N);
-    let mut codewords = Vec::with_capacity(N);
-    for offset in 0..N {
-        let (mut leak, mut words) = (0.0, 0usize);
-        for x in [mid, side].into_iter().filter(|x| !x.is_empty()) {
-            let mut ratios = Vec::with_capacity(PROBE);
-            for &f in &probe {
-                let start = offset + N / 2 + f * N;
-                if start + 2 * N > x.len() {
-                    continue;
+    // Every position on its own (in parallel), in order.
+    let measured: Vec<(f64, usize)> = (0..N)
+        .into_par_iter()
+        .map_init(
+            || (Mdct::new(), vec![0f64; N]),
+            |(mdct, out), offset| {
+                let (mut leak, mut words) = (0.0, 0usize);
+                for x in [mid, side].into_iter().filter(|x| !x.is_empty()) {
+                    let mut ratios = Vec::with_capacity(PROBE);
+                    for &f in &probe {
+                        let start = offset + N / 2 + f * N;
+                        if start + 2 * N > x.len() {
+                            continue;
+                        }
+                        mdct.forward(&x[start..start + 2 * N], out);
+                        let total = energy(out);
+                        if total > 0.0 {
+                            ratios.push(energy(&out[800..]) / total);
+                        }
+                        // Bands 8 to 14 (16 to 32 lines): seldom codewords by chance.
+                        words += BANDS[8..16].windows(2).filter(|b| band_ok(&out[b[0]..b[1]])).count();
+                    }
+                    leak += crate::dsp::median(&ratios).unwrap_or(1.0);
                 }
-                mdct.forward(&x[start..start + 2 * N], &mut out);
-                let total = energy(&out);
-                if total > 0.0 {
-                    ratios.push(energy(&out[800..]) / total);
-                }
-                // Bands 8 to 14 (16 to 32 lines): seldom codewords by chance.
-                words += BANDS[8..16].windows(2).filter(|b| band_ok(&out[b[0]..b[1]])).count();
-            }
-            leak += crate::dsp::median(&ratios).unwrap_or(1.0);
-        }
-        leaks.push((leak, offset));
-        codewords.push((words, offset));
-    }
+                (leak, words)
+            },
+        )
+        .collect();
+    let mut leaks: Vec<(f64, usize)> = measured.iter().enumerate().map(|(offset, m)| (m.0, offset)).collect();
+    let mut codewords: Vec<(usize, usize)> = measured.iter().enumerate().map(|(offset, m)| (m.1, offset)).collect();
     leaks.sort_by(|a, b| a.0.total_cmp(&b.0));
     codewords.sort_by_key(|c| std::cmp::Reverse(c.0));
     // The best few of each, by their clean frames over the first frames.
     let mut best = (0, leaks[0].1);
-    let candidates = leaks.iter().take(6).map(|l| l.1).chain(codewords.iter().take(6).map(|c| c.1));
-    for offset in candidates {
-        let mut clean = 0;
-        for x in [mid, side].into_iter().filter(|x| !x.is_empty()) {
-            for f in 1..=300 {
-                let start = offset + N / 2 + f * N;
-                if start + 2 * N > x.len() {
-                    break;
+    let candidates: Vec<usize> = leaks.iter().take(6).map(|l| l.1).chain(codewords.iter().take(6).map(|c| c.1)).collect();
+    let cleans: Vec<usize> = candidates
+        .par_iter()
+        .map_init(
+            || (Mdct::new(), vec![0f64; N]),
+            |(mdct, out), &offset| {
+                let mut clean = 0;
+                for x in [mid, side].into_iter().filter(|x| !x.is_empty()) {
+                    for f in 1..=300 {
+                        let start = offset + N / 2 + f * N;
+                        if start + 2 * N > x.len() {
+                            break;
+                        }
+                        mdct.forward(&x[start..start + 2 * N], out);
+                        if clean_bands(out) >= CLEAN_BANDS {
+                            clean += 1;
+                        }
+                    }
                 }
-                mdct.forward(&x[start..start + 2 * N], &mut out);
-                if clean_bands(&out) >= CLEAN_BANDS {
-                    clean += 1;
-                }
-            }
-        }
+                clean
+            },
+        )
+        .collect();
+    for (&offset, &clean) in candidates.iter().zip(&cleans) {
         if clean > best.0 {
             best = (clean, offset);
         }
@@ -419,21 +436,23 @@ fn resample_to_48k(x: &[f64], rate: u32) -> Vec<f64> {
         })
         .collect();
     let out_len = x.len() * up / down;
-    let mut y = Vec::with_capacity(out_len);
-    for j in 0..out_len {
-        let pos = j * down;
-        let (i, p) = (pos / up, pos % up);
-        let h = &taps[p];
-        let mut acc = 0.0;
-        for (tap, coef) in h.iter().enumerate() {
-            let idx = i as isize + tap as isize - (HALF as isize - 1);
-            if idx >= 0 && (idx as usize) < x.len() {
-                acc += x[idx as usize] * coef;
+    // Every output sample on its own (in parallel).
+    (0..out_len)
+        .into_par_iter()
+        .map(|j| {
+            let pos = j * down;
+            let (i, p) = (pos / up, pos % up);
+            let h = &taps[p];
+            let mut acc = 0.0;
+            for (tap, coef) in h.iter().enumerate() {
+                let idx = i as isize + tap as isize - (HALF as isize - 1);
+                if idx >= 0 && (idx as usize) < x.len() {
+                    acc += x[idx as usize] * coef;
+                }
             }
-        }
-        y.push(acc);
-    }
-    y
+            acc
+        })
+        .collect()
 }
 
 #[cfg(test)]

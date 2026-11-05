@@ -3453,7 +3453,11 @@ impl App {
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label("Files processed in parallel");
-                    ui.add(egui::DragValue::new(&mut draft.jobs).range(1..=64));
+                    ui.add(egui::DragValue::new(&mut draft.jobs).range(1..=64)).on_hover_text(
+                        "Also the most processor threads used: when fewer files are left, the free threads help \
+                         with the ones still running. The work runs at a low priority, so the computer stays \
+                         responsive.",
+                    );
                 });
                 ui.checkbox(&mut draft.auto_details, "Read file details automatically when adding files");
                 ui.checkbox(&mut draft.aac_check, "Lossless?: look for AAC and Opus coding traces in every file (slower)")

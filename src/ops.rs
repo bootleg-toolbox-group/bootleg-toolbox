@@ -197,7 +197,8 @@ impl Default for Options {
             create_sfv: false,
             overwrite: false,
             crlf: cfg!(windows),
-            jobs: cpus.clamp(1, 8),
+            // The physical cores but one (half the threads of most processors), at least 2.
+            jobs: (cpus / 2).saturating_sub(1).max(2).min(cpus),
             auto_details: true,
             aac_check: false,
             announce_dime: Tracker::Dime.default_announce().into(),
@@ -385,7 +386,10 @@ pub fn spawn(op: Op, shows: Vec<Show>, files: Vec<PathBuf>, opt: Options, tx: Se
         } else {
             (shows, files)
         };
-        let pool = rayon::ThreadPoolBuilder::new().num_threads(ctx.opt.jobs.max(1)).build();
+        // `jobs` threads at most, at a lower priority: as many files at a time, and when fewer
+        // are left, the free threads help inside them.
+        crate::dsp::THREADS.store(ctx.opt.jobs.max(1), Ordering::SeqCst);
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(ctx.opt.jobs.max(1)).start_handler(|_| crate::dsp::lower_priority()).build();
         let summary = match pool {
             Ok(pool) => catch_panic(|| Ok(pool.install(|| match &op {
                 Op::Details { verbose } => op_details(&ctx, &shows, &files, *verbose),
@@ -432,36 +436,51 @@ pub fn catch_panic<R>(f: impl FnOnce() -> Result<R, String>) -> Result<R, String
     })
 }
 
-/// Runs `f` on every item in parallel; errors are reported against `path_of(item)`.
+/// Runs `f` on every item in parallel, `jobs` items at a time, the largest files first (a
+/// long show started last would run alone at the end); errors are reported against
+/// `path_of(item)`. The results keep the order of `items`.
 fn par_map<T: Sync, R: Send>(
     ctx: &Ctx,
     items: &[T],
     path_of: impl Fn(&T) -> PathBuf + Sync,
     f: impl Fn(&T) -> Result<R, String> + Sync,
 ) -> Vec<Option<R>> {
-    items
-        .par_iter()
-        .map(|item| {
-            if ctx.cancelled() {
-                return None;
-            }
-            // A decoder that panics on a malformed file (found by fuzzing, in symphonia's
-            // AAC reader) fails that file only.
-            let result = catch_panic(|| f(item));
-            ctx.tick();
-            match result {
-                Ok(value) => Some(value),
-                Err(e) => {
-                    if !ctx.cancelled() {
-                        let path = path_of(item);
-                        ctx.status(&path, format!("Error: {e}"), Level::Error, "");
-                        ctx.log(format!("{}: {e}", file_name(&path)), Level::Error);
-                    }
-                    None
+    let mut order: Vec<(u64, usize)> = items.iter().enumerate().map(|(i, item)| (std::fs::metadata(path_of(item)).map(|m| m.len()).unwrap_or(0), i)).collect();
+    order.sort_by_key(|&(size, i)| (std::cmp::Reverse(size), i));
+    let results: Vec<std::sync::Mutex<Option<R>>> = items.iter().map(|_| std::sync::Mutex::new(None)).collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let run = |item: &T| -> Option<R> {
+        if ctx.cancelled() {
+            return None;
+        }
+        // A decoder that panics on a malformed file (found by fuzzing, in symphonia's
+        // AAC reader) fails that file only.
+        let result = catch_panic(|| f(item));
+        ctx.tick();
+        match result {
+            Ok(value) => Some(value),
+            Err(e) => {
+                if !ctx.cancelled() {
+                    let path = path_of(item);
+                    ctx.status(&path, format!("Error: {e}"), Level::Error, "");
+                    ctx.log(format!("{}: {e}", file_name(&path)), Level::Error);
                 }
+                None
             }
-        })
-        .collect()
+        }
+    };
+    rayon::scope(|scope| {
+        for _ in 0..ctx.opt.jobs.max(1).min(items.len()) {
+            scope.spawn(|_| loop {
+                let k = next.fetch_add(1, Ordering::Relaxed);
+                let Some(&(_, i)) = order.get(k) else { break };
+                let _busy = crate::dsp::Busy::take();
+                let value = run(&items[i]);
+                *results[i].lock().unwrap_or_else(|e| e.into_inner()) = value;
+            });
+        }
+    });
+    results.into_iter().map(|r| r.into_inner().unwrap_or_else(|e| e.into_inner())).collect()
 }
 
 pub fn plural(count: usize, singular: &str, many: &str) -> String {

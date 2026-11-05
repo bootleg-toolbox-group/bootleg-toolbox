@@ -2,9 +2,69 @@
 //! FFT, Hann window, conversion of PCM bytes to samples, statistics.
 
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::audio::{self, AudioInfo, Format};
+
+/// The processor threads the current operation may keep busy ("Files processed in parallel"),
+/// and how many it does: the files being processed, and their decoding threads. A file is
+/// decoded in a thread of its own only when one is free (single files, the end of a batch).
+pub static THREADS: AtomicUsize = AtomicUsize::new(0);
+pub static BUSY: AtomicUsize = AtomicUsize::new(0);
+
+/// One thread counted in `BUSY` while it lives.
+pub struct Busy(());
+
+impl Busy {
+    /// Always counted (a file being processed).
+    pub fn take() -> Busy {
+        BUSY.fetch_add(1, Ordering::SeqCst);
+        Busy(())
+    }
+
+    /// Counted only if the budget has room for one more thread.
+    fn spare() -> Option<Busy> {
+        let busy = Busy::take();
+        (BUSY.load(Ordering::SeqCst) <= THREADS.load(Ordering::SeqCst)).then_some(busy)
+    }
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        BUSY.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Lowers the calling thread's priority: the analysis then uses the processor time other
+/// programs leave, and the computer stays responsive.
+#[cfg(windows)]
+pub fn lower_priority() {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentThread() -> isize;
+        fn SetThreadPriority(thread: isize, priority: i32) -> i32;
+    }
+    const THREAD_PRIORITY_BELOW_NORMAL: i32 = -1;
+    unsafe {
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    }
+}
+
+/// Lowers the calling thread's priority (nice 10: on Linux, for this thread only).
+#[cfg(target_os = "linux")]
+pub fn lower_priority() {
+    extern "C" {
+        fn gettid() -> i32;
+        fn setpriority(which: i32, who: u32, prio: i32) -> i32;
+    }
+    const PRIO_PROCESS: i32 = 0;
+    unsafe {
+        setpriority(PRIO_PROCESS, gettid() as u32, 10);
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+pub fn lower_priority() {}
 
 /// In-place radix-2 complex FFT.
 pub struct Fft {
@@ -130,7 +190,7 @@ pub fn for_each_frame(
     let to_f64 = sample_reader(info.float, width, full_scale);
     let mut pending: Vec<u8> = Vec::new();
     let mut values = vec![0f64; channels];
-    audio::read_pcm(path, cancel, |chunk| {
+    let mut hand_out = |chunk: &[u8]| {
         pending.extend_from_slice(chunk);
         let whole = pending.len() / frame_bytes * frame_bytes;
         for bytes in pending[..whole].chunks_exact(frame_bytes) {
@@ -140,6 +200,25 @@ pub fn for_each_frame(
             frame(&values, bytes);
         }
         pending.drain(..whole);
+    };
+    let Some(_thread) = Busy::spare() else {
+        audio::read_pcm(path, cancel, hand_out)?;
+        return Ok(());
+    };
+    // A thread is free: the file is decoded in it while the frames are handed out here.
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(8);
+    std::thread::scope(|scope| {
+        let decoder = scope.spawn(move || {
+            lower_priority();
+            audio::read_pcm(path, cancel, |chunk| {
+                // The receiver only stops early on a panic, which is passed on below.
+                let _ = tx.send(chunk.to_vec());
+            })
+        });
+        for chunk in rx {
+            hand_out(&chunk);
+        }
+        decoder.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic))
     })?;
     Ok(())
 }

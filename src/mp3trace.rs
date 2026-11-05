@@ -9,6 +9,8 @@
 //! loudest windows, 8 scale factors, the long, start, stop and short blocks and the L, R,
 //! M, S channels are tried; the share of bands with a too small error is the likelihood.
 
+use rayon::prelude::*;
+
 /// Above this share of bands, the file may hold traces of MP3 coding (detector's setting)...
 pub const THRESHOLD: f64 = 0.025;
 /// ...when the best position also stands out from the others. Measured with 16 windows:
@@ -44,6 +46,7 @@ impl Trace {
 /// Collects, while the file is read, the loudest windows of 2 codec frames (with the frames
 /// after them that the analysis needs), on the mid channel. MP3: frames of 576 samples
 /// (granules), 4 kept per window; AAC: frames of 1024, 3 kept.
+#[derive(Clone)]
 pub struct Collector {
     pub(crate) channels: usize,
     frame: usize,
@@ -58,6 +61,8 @@ pub struct Collector {
     count: usize,
     /// (energy, samples collected so far)
     kept: Vec<(f64, Vec<[f32; 2]>)>,
+    /// The kept windows still being filled.
+    filling: Vec<usize>,
 }
 
 impl Collector {
@@ -67,7 +72,7 @@ impl Collector {
     }
 
     pub(crate) fn with(channels: usize, frame: usize, frames: usize) -> Self {
-        Collector { channels: channels.min(2), frame, frames, ring: vec![[0.0; 2]; 2 * frame], head: 0, energy: [0.0; 2], frame_len: 0, count: 0, kept: Vec::new() }
+        Collector { channels: channels.min(2), frame, frames, ring: vec![[0.0; 2]; 2 * frame], head: 0, energy: [0.0; 2], frame_len: 0, count: 0, kept: Vec::new(), filling: Vec::new() }
     }
 
     /// One sample frame (one value per channel, -1.0..1.0).
@@ -76,8 +81,12 @@ impl Collector {
         let frame = [l as f32, r as f32];
         let mid = if self.channels == 2 { (l + r) / 2.0 } else { l };
         let full = self.frames * self.frame;
-        for (_, seg) in self.kept.iter_mut().filter(|(_, s)| s.len() < full) {
-            seg.push(frame);
+        if !self.filling.is_empty() {
+            for &i in &self.filling {
+                self.kept[i].1.push(frame);
+            }
+            let kept = &self.kept;
+            self.filling.retain(|&i| kept[i].1.len() < full);
         }
         self.ring[self.head] = frame;
         self.head = (self.head + 1) % (2 * self.frame);
@@ -95,10 +104,17 @@ impl Collector {
                     seg
                 };
                 let weakest = self.kept.iter().enumerate().min_by(|a, b| a.1 .0.total_cmp(&b.1 .0)).map(|(i, k)| (i, k.0));
-                if self.kept.len() < WINDOWS {
+                let replaced = if self.kept.len() < WINDOWS {
                     self.kept.push((e, snapshot()));
+                    Some(self.kept.len() - 1)
                 } else if let Some((i, _)) = weakest.filter(|(_, low)| e > *low) {
                     self.kept[i] = (e, snapshot());
+                    Some(i)
+                } else {
+                    None
+                };
+                if let Some(i) = replaced.filter(|i| !self.filling.contains(i)) {
+                    self.filling.push(i);
                 }
             }
             self.energy = [self.energy[1], 0.0];
@@ -121,27 +137,40 @@ impl Collector {
             return None;
         }
         let tables = Tables::new(&bands);
+        let modes: &[Mode] = if channels == 2 {
+            &[(false, |f| f[0] as f64), (false, |f| f[1] as f64), (true, |f| (f[0] as f64 + f[1] as f64) / 2.0), (true, |f| (f[0] as f64 - f[1] as f64) / 2.0)]
+        } else {
+            &[(false, |f| f[0] as f64)]
+        };
+        // Every position on its own (in parallel), then taken in order as before.
+        let likelihoods: Vec<Vec<f64>> = (0..GRANULE)
+            .into_par_iter()
+            .map_init(
+                || vec![0f64; 4 * GRANULE],
+                |buf, offset| {
+                    modes
+                        .iter()
+                        .map(|&(_, take)| {
+                            let (mut hits, mut total) = (0usize, 0usize);
+                            for seg in &segments {
+                                // granule1 starts at `offset` in the segment (granules 1 to 3 then follow).
+                                for (i, f) in seg[offset..offset + 3 * GRANULE].iter().enumerate() {
+                                    buf[i] = take(*f);
+                                }
+                                let (h, t) = tables.window(&buf[..3 * GRANULE]);
+                                hits += h;
+                                total += t;
+                            }
+                            if total > 0 { hits as f64 / total as f64 } else { 0.0 }
+                        })
+                        .collect()
+                },
+            )
+            .collect();
         let mut best = Trace { likelihood: 0.0, offset: 0, mid_side: false, contrast: 0.0 };
         let mut per_offset = vec![0f64; GRANULE];
-        let mut buf = vec![0f64; 4 * GRANULE];
-        for offset in 0..GRANULE {
-            let modes: &[Mode] = if channels == 2 {
-                &[(false, |f| f[0] as f64), (false, |f| f[1] as f64), (true, |f| (f[0] as f64 + f[1] as f64) / 2.0), (true, |f| (f[0] as f64 - f[1] as f64) / 2.0)]
-            } else {
-                &[(false, |f| f[0] as f64)]
-            };
-            for &(mid_side, take) in modes {
-                let (mut hits, mut total) = (0usize, 0usize);
-                for seg in &segments {
-                    // granule1 starts at `offset` in the segment (granules 1 to 3 then follow).
-                    for (i, f) in seg[offset..offset + 3 * GRANULE].iter().enumerate() {
-                        buf[i] = take(*f);
-                    }
-                    let (h, t) = tables.window(&buf[..3 * GRANULE]);
-                    hits += h;
-                    total += t;
-                }
-                let likelihood = if total > 0 { hits as f64 / total as f64 } else { 0.0 };
+        for (offset, row) in likelihoods.iter().enumerate() {
+            for (&(mid_side, _), &likelihood) in modes.iter().zip(row) {
                 per_offset[offset] = per_offset[offset].max(likelihood);
                 if likelihood > best.likelihood {
                     best = Trace { likelihood, offset, mid_side, contrast: 0.0 };

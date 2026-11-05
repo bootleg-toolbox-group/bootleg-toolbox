@@ -72,11 +72,12 @@ pub fn analyse(path: &Path, info: &AudioInfo, aac: bool, cancel: &AtomicBool) ->
     if info.codec.is_some_and(|c| !c.decoded()) {
         return Ok(by_format(path, info));
     }
-    let mut verdict = analyse_signal(path, info, aac, cancel)?;
-    // The AAC search is slow, so an option; a doubt is worth it anyway: the file is analysed
+    let measured = measure(path, info, cancel)?;
+    let mut verdict = conclude(path, info, &measured, aac)?;
+    // The AAC search is slow, so an option; a doubt is worth it anyway: the verdict is drawn
     // again with it, and an AAC converted straight back turns the doubt into a certainty.
     if !aac && verdict.doubt && !cancel.load(std::sync::atomic::Ordering::Relaxed) {
-        verdict = analyse_signal(path, info, true, cancel)?;
+        verdict = conclude(path, info, &measured, true)?;
     }
     if info.lossy() {
         let name = info.name();
@@ -136,7 +137,114 @@ fn doubtful(label: &str) -> bool {
     label.starts_with("Lossy?") || label.starts_with("Unsure") || label == "15 kHz lowpass"
 }
 
-fn analyse_signal(path: &Path, info: &AudioInfo, aac_check: bool, cancel: &AtomicBool) -> Result<Verdict, String> {
+/// What the spectra of the blocks are measured with.
+struct Shape {
+    fft: Fft,
+    window: Vec<f64>,
+    bins: usize,
+    /// ~100 Hz bands, in bins; the kept ones (7 to 22 kHz).
+    band: usize,
+    kept_lo: usize,
+    kept_hi: usize,
+    bin_hz: f64,
+    intensity_check: bool,
+}
+
+/// One block's power spectrum, and when kept: its 7-22 kHz bands, intensity stereo and width.
+type BlockMeasures = (Vec<f64>, Vec<f32>, Option<(f64, bool, f64)>, Option<f64>);
+
+/// The spectra added up over the track, and the measures of the kept blocks.
+struct Spectra {
+    power: Vec<f64>,
+    /// Per kept block, the power of the bands between 7 and 22 kHz.
+    kept: Vec<f32>,
+    /// Intensity stereo (energy, treble locked, mid coherence), per kept block.
+    intensity: Vec<(f64, bool, f64)>,
+    /// Stereo width: the difference channel against the sum, 5-10 kHz, in dB.
+    side_vs_mid: Vec<f64>,
+}
+
+impl Spectra {
+    /// Blocks (mono, side when kept, kept), in the order read: each one's spectrum is
+    /// computed in parallel, then added in that order, as one after the other.
+    fn add(&mut self, blocks: Vec<(Vec<f64>, Option<Vec<f64>>, bool)>, s: &Shape) {
+        use rayon::prelude::*;
+        let width_band = |f: f64| (5000.0..10000.0).contains(&f);
+        let measured: Vec<BlockMeasures> = blocks
+            .into_par_iter()
+            .map_init(
+                || (Vec::new(), Vec::new()),
+                |(re, im), (mut block, side, keep)| {
+                    for (x, w) in block.iter_mut().zip(&s.window) {
+                        *x *= w;
+                    }
+                    let mut frame_power = vec![0f64; s.bins];
+                    s.fft.power(&block, re, im, &mut frame_power);
+                    let mut kept = Vec::new();
+                    let (mut intensity, mut width) = (None, None);
+                    if keep {
+                        for b in s.kept_lo..s.kept_hi {
+                            kept.push((frame_power[b * s.band..(b + 1) * s.band].iter().sum::<f64>() / s.band as f64) as f32);
+                        }
+                        if let Some(mut side_block) = side {
+                            for (x, w) in side_block.iter_mut().zip(&s.window) {
+                                *x *= w;
+                            }
+                            // The mid spectrum is still in re/im: keep it for the coherence.
+                            let (mid_re, mid_im) = if s.intensity_check { (re.clone(), im.clone()) } else { (Vec::new(), Vec::new()) };
+                            let mut side_power = vec![0f64; s.bins];
+                            s.fft.power(&side_block, re, im, &mut side_power);
+                            if s.intensity_check {
+                                intensity = Some(coherence(&mid_re, &mid_im, re, im, s.bin_hz, frame_power.iter().sum()));
+                            }
+                            let sum = |p: &[f64]| (0..s.bins).filter(|&k| width_band(k as f64 * s.bin_hz)).map(|k| p[k]).sum::<f64>();
+                            let (sd, m) = (sum(&side_power), sum(&frame_power));
+                            if m > 0.0 {
+                                width = Some(10.0 * ((sd + 1e-30) / m).log10());
+                            }
+                        }
+                    }
+                    (frame_power, kept, intensity, width)
+                },
+            )
+            .collect();
+        for (frame_power, kept, intensity, width) in measured {
+            for (p, f) in self.power.iter_mut().zip(&frame_power) {
+                *p += f;
+            }
+            self.kept.extend(kept);
+            self.intensity.extend(intensity);
+            self.side_vs_mid.extend(width);
+        }
+    }
+}
+
+/// What one reading of the file measured (the AAC and Opus windows are collected in any
+/// case: a doubtful verdict is then drawn again with them, without reading the file again).
+struct Measured {
+    rate: f64,
+    bins: usize,
+    band: usize,
+    bin_hz: f64,
+    kept_lo: usize,
+    kept_hi: usize,
+    window: Vec<f64>,
+    frames: usize,
+    power: Vec<f64>,
+    kept: Vec<f32>,
+    intensity: Vec<(f64, bool, f64)>,
+    side_vs_mid: Vec<f64>,
+    check_low: bool,
+    low_bits: bool,
+    wasted: [u32; 33],
+    comb_check: bool,
+    histogram: Vec<u32>,
+    mp3_trace: Option<crate::mp3trace::Trace>,
+    aac: Option<crate::mp3trace::Collector>,
+    opus: Option<crate::opustrace::Collector>,
+}
+
+fn measure(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<Measured, String> {
     let rate = info.rate as f64;
     if rate <= 0.0 {
         return Err("invalid sample rate".into());
@@ -147,12 +255,9 @@ fn analyse_signal(path: &Path, info: &AudioInfo, aac_check: bool, cancel: &Atomi
     let fft = Fft::new(nfft);
     let window = dsp::hann_symmetric(nfft);
     let bins = nfft / 2 + 1;
-    let mut power = vec![0f64; bins];
     let mut frames = 0usize;
     let mut block = Vec::with_capacity(nfft);
     let mut silent = true;
-    let (mut re, mut im) = (Vec::new(), Vec::new());
-    let mut frame_power = vec![0f64; bins];
     // A 24-bit file whose lowest 8 bits are always zero holds 16-bit audio.
     let check_low = info.bits == 24 && !info.float;
     let width = info.bits.div_ceil(8) as usize;
@@ -167,17 +272,16 @@ fn analyse_signal(path: &Path, info: &AudioInfo, aac_check: bool, cancel: &Atomi
     let kept_lo = (0..bins / band).find(|&b| band_freq(b) >= 7000.0).unwrap_or(bins / band);
     let kept_hi = (0..bins / band).find(|&b| band_freq(b) >= 22000.0).unwrap_or(bins / band).max(kept_lo);
     let stride = (info.samples / nfft as u64).div_ceil(MAX_KEPT).max(1) as usize;
-    let mut kept: Vec<f32> = Vec::new();
     // Stereo width: the difference channel (L-R) against the sum, 5-10 kHz, on the kept frames.
     let mut side_block = Vec::with_capacity(nfft);
-    let mut side_power = vec![0f64; bins];
-    let mut side_vs_mid: Vec<f64> = Vec::new();
-    let width_band = |f: f64| (5000.0..10000.0).contains(&f);
     // Intensity stereo, on the kept frames: how alike left and right are per 1 kHz band
     // (energy, treble 14-19.5 kHz all locked, mean coherence 3-8 kHz).
     let intensity_check = channels == 2 && rate >= 44100.0;
-    let mut intensity: Vec<(f64, bool, f64)> = Vec::new();
-    let (mut mid_re, mut mid_im) = (Vec::new(), Vec::new());
+    // The spectra of blocks of frames are computed in parallel, then added in order.
+    const BATCH: usize = 64;
+    let shape = Shape { fft, window, bins, band, kept_lo, kept_hi, bin_hz, intensity_check };
+    let mut spectra = Spectra { power: vec![0f64; bins], kept: Vec::new(), intensity: Vec::new(), side_vs_mid: Vec::new() };
+    let mut pending: Vec<(Vec<f64>, Option<Vec<f64>>, bool)> = Vec::with_capacity(BATCH);
     // lossyWAV zeroes the lowest bits of whole blocks: the common trailing zero bits of
     // every block of 128 sample frames (silent blocks left out).
     let integer = !info.float;
@@ -190,9 +294,9 @@ fn analyse_signal(path: &Path, info: &AudioInfo, aac_check: bool, cancel: &Atomi
     // MP3 traces in the encoder's own filter bank (MP3 sample rates only).
     let codec_rates = matches!(info.rate, 32000 | 44100 | 48000) && channels <= 2 && !info.lossy();
     let mut mp3 = codec_rates.then(|| crate::mp3trace::Collector::new(channels));
-    let mut aac = (codec_rates && aac_check).then(|| crate::aactrace::collector(channels));
+    let mut aac = codec_rates.then(|| crate::aactrace::collector(channels));
     // Opus traces, with the AAC search (Opus is 48 kHz; 44.1 to 96 kHz are resampled to it).
-    let mut opus = (aac_check && channels <= 2 && !info.lossy()).then(|| crate::opustrace::Collector::new(channels, info.rate)).flatten();
+    let mut opus = (channels <= 2 && !info.lossy()).then(|| crate::opustrace::Collector::new(channels, info.rate)).flatten();
     const SPAN: i32 = 1 << 16;
     let mut histogram = if comb_check { vec![0u32; 2 * SPAN as usize] } else { Vec::new() };
 
@@ -236,59 +340,65 @@ fn analyse_signal(path: &Path, info: &AudioInfo, aac_check: bool, cancel: &Atomi
         if block.len() == nfft {
             // Blocks of digital silence are skipped.
             if !silent {
-                for (x, w) in block.iter_mut().zip(&window) {
-                    *x *= w;
-                }
-                fft.power(&block, &mut re, &mut im, &mut frame_power);
-                for (p, f) in power.iter_mut().zip(&frame_power) {
-                    *p += f;
-                }
-                if frames.is_multiple_of(stride) {
-                    for b in kept_lo..kept_hi {
-                        kept.push((frame_power[b * band..(b + 1) * band].iter().sum::<f64>() / band as f64) as f32);
-                    }
-                    if channels == 2 {
-                        for (x, w) in side_block.iter_mut().zip(&window) {
-                            *x *= w;
-                        }
-                        // The mid spectrum is still in re/im: keep it for the coherence.
-                        if intensity_check {
-                            mid_re.clone_from(&re);
-                            mid_im.clone_from(&im);
-                        }
-                        fft.power(&side_block, &mut re, &mut im, &mut side_power);
-                        if intensity_check {
-                            intensity.push(coherence(&mid_re, &mid_im, &re, &im, bin_hz, frame_power.iter().sum()));
-                        }
-                        let sum = |p: &[f64]| (0..bins).filter(|&k| width_band(k as f64 * bin_hz)).map(|k| p[k]).sum::<f64>();
-                        let (s, m) = (sum(&side_power), sum(&frame_power));
-                        if m > 0.0 {
-                            side_vs_mid.push(10.0 * ((s + 1e-30) / m).log10());
-                        }
-                    }
-                }
+                let keep = frames.is_multiple_of(stride);
+                let side = (keep && channels == 2).then(|| std::mem::replace(&mut side_block, Vec::with_capacity(nfft)));
+                pending.push((std::mem::replace(&mut block, Vec::with_capacity(nfft)), side, keep));
                 frames += 1;
+                if pending.len() == BATCH {
+                    spectra.add(std::mem::take(&mut pending), &shape);
+                }
             }
             side_block.clear();
             block.clear();
             silent = true;
         }
     })?;
-
-    let mut details = Vec::new();
+    spectra.add(pending, &shape);
+    let Spectra { power, kept, intensity, side_vs_mid } = spectra;
     let mp3_trace = mp3.and_then(|m| m.detect(info.rate));
+    Ok(Measured {
+        rate,
+        bins,
+        band,
+        bin_hz,
+        kept_lo,
+        kept_hi,
+        window: shape.window,
+        frames,
+        power,
+        kept,
+        intensity,
+        side_vs_mid,
+        check_low,
+        low_bits,
+        wasted,
+        comb_check,
+        histogram,
+        mp3_trace,
+        aac,
+        opus,
+    })
+}
+
+/// The verdict from the measures; `aac_check`: with the AAC and Opus searches.
+fn conclude(path: &Path, info: &AudioInfo, m: &Measured, aac_check: bool) -> Result<Verdict, String> {
+    let Measured { rate, bins, band, bin_hz, kept_lo, kept_hi, frames, check_low, low_bits, comb_check, mp3_trace, .. } = *m;
+    let (window, kept, intensity, side_vs_mid, wasted, histogram) = (&m.window, &m.kept, &m.intensity, &m.side_vs_mid, &m.wasted, &m.histogram);
+    let band_freq = |b: usize| (b * band) as f64 * bin_hz + (band - 1) as f64 * bin_hz / 2.0;
+    let mut power = m.power.clone();
+    let mut details = Vec::new();
     // AAC only when no MP3 was found (the slower search).
-    let aac_trace = if mp3_trace.is_some_and(|t| t.found()) { None } else { aac.and_then(|a| crate::aactrace::detect(a, info.rate)) };
+    let aac_trace = if !aac_check || mp3_trace.is_some_and(|t| t.found()) { None } else { m.aac.clone().and_then(|a| crate::aactrace::detect(a, info.rate)) };
     let aac_found = aac_trace.filter(crate::aactrace::found);
-    let opus_trace = if mp3_trace.is_some_and(|t| t.found()) || aac_found.is_some() { None } else { opus.and_then(|o| o.detect()) };
+    let opus_trace = if !aac_check || mp3_trace.is_some_and(|t| t.found()) || aac_found.is_some() { None } else { m.opus.clone().and_then(|o| o.detect()) };
     let opus_found = opus_trace.filter(|t| t.found());
     if let Some(t) = mp3_trace.filter(|t| t.found()) {
         details.push(format!("MP3 coding traces found ({:.1} % of the bands, {:.0} standard deviations above chance)", t.likelihood * 100.0, t.contrast));
     }
     let zero_low = check_low && !low_bits;
-    let waste = wasted_bits(&wasted);
+    let waste = wasted_bits(wasted);
     let lossywav = waste.as_ref().is_some_and(|w| w.blocks >= 200 && w.share >= 0.3 && w.varying >= 0.2);
-    let comb = if comb_check && !zero_low { comb_bits(&histogram, info.bits) } else { None };
+    let comb = if comb_check && !zero_low { comb_bits(histogram, info.bits) } else { None };
     // 16-bit audio in a 24-bit file: the lowest 8 bits always zero, or a comb of values
     // (16-bit audio whose level was changed in a 24-bit editor).
     let padded: Option<String> = if zero_low {
@@ -520,7 +630,7 @@ fn analyse_signal(path: &Path, info: &AudioInfo, aac_check: bool, cancel: &Atomi
         let corr = cov / (var(&above, ma) * var(&music, mm)).sqrt().max(1e-12);
         Some((quiet, loud, corr))
     });
-    let masked = masked_cutoff(&kept, kept_bands, &|b| band_freq(kept_lo + b), &|f| (18900.0..19100.0).contains(&f) || in_tone(f), lsb);
+    let masked = masked_cutoff(kept, kept_bands, &|b| band_freq(kept_lo + b), &|f| (18900.0..19100.0).contains(&f) || in_tone(f), lsb);
     if let Some(m) = masked.filter(|m| m.dithered()) {
         details.push(format!(
             "The music stops at {:.1} kHz; above it only steady noise ({:+.0} dB over digital silence{}), as the noise-shaped dither of a conversion to 16-bit leaves",
@@ -785,7 +895,7 @@ fn analyse_signal(path: &Path, info: &AudioInfo, aac_check: bool, cancel: &Atomi
         doubtful.report = std::mem::take(&mut verdict.report);
         verdict = doubtful;
     }
-    if let Some(share) = intensity_share(&intensity).filter(|_| verdict.level != Level::Error) {
+    if let Some(share) = intensity_share(intensity).filter(|_| verdict.level != Level::Error) {
         verdict.details.push(format!("Treble locked between the channels (intensity stereo) in {:.0} % of the loud frames", share * 100.0));
         let mut doubtful = Verdict::new(
             "Lossy? (Opus)",
@@ -874,7 +984,7 @@ fn analyse_signal(path: &Path, info: &AudioInfo, aac_check: bool, cancel: &Atomi
         speed,
         line_whistle,
         silent_above,
-        stereo: dsp::median(&side_vs_mid),
+        stereo: dsp::median(side_vs_mid),
         upsampled,
         padded,
         comb: comb.map(|c| (c.used, c.bits)),

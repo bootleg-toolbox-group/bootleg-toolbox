@@ -5,6 +5,8 @@
 //! (1024 lines, or 8 x 128 for short blocks, sine windows) at every position, and the
 //! bands whose rounding error is improbably small are counted.
 
+use rayon::prelude::*;
+
 use crate::dsp::Fft;
 use crate::mp3trace::{erf, erfinv, Collector, Trace};
 
@@ -56,22 +58,34 @@ pub fn detect(collector: Collector, rate: u32) -> Option<Trace> {
     } else {
         vec![(false, left)]
     };
-    let mut work = Work::new();
+    // Every position on its own (in parallel), then taken in order as before.
+    let likelihoods: Vec<Vec<f64>> = (0..FRAME)
+        .into_par_iter()
+        .map_init(
+            || (Work::new(), vec![0f64; 2 * FRAME]),
+            |(work, buf), offset| {
+                modes
+                    .iter()
+                    .map(|&(_, take)| {
+                        let (mut hits, mut total) = (0usize, 0usize);
+                        for seg in &segments {
+                            for (i, f) in seg[offset..offset + 2 * FRAME].iter().enumerate() {
+                                buf[i] = take(*f);
+                            }
+                            let (h, t) = tables.window(buf, work);
+                            hits += h;
+                            total += t;
+                        }
+                        if total > 0 { hits as f64 / total as f64 } else { 0.0 }
+                    })
+                    .collect()
+            },
+        )
+        .collect();
     let mut per_offset = vec![0f64; FRAME];
     let mut best = Trace { likelihood: 0.0, offset: 0, mid_side: false, contrast: 0.0 };
-    let mut buf = vec![0f64; 2 * FRAME];
-    for offset in 0..FRAME {
-        for &(mid_side, take) in &modes {
-            let (mut hits, mut total) = (0usize, 0usize);
-            for seg in &segments {
-                for (i, f) in seg[offset..offset + 2 * FRAME].iter().enumerate() {
-                    buf[i] = take(*f);
-                }
-                let (h, t) = tables.window(&buf, &mut work);
-                hits += h;
-                total += t;
-            }
-            let likelihood = if total > 0 { hits as f64 / total as f64 } else { 0.0 };
+    for (offset, row) in likelihoods.iter().enumerate() {
+        for (&(mid_side, _), &likelihood) in modes.iter().zip(row) {
             per_offset[offset] = per_offset[offset].max(likelihood);
             if likelihood > best.likelihood {
                 best = Trace { likelihood, offset, mid_side, contrast: 0.0 };
