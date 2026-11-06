@@ -47,7 +47,7 @@ pub enum Msg {
     Progress { done: usize, total: usize },
     Image { path: PathBuf, image: crate::spectrogram::Image },
     /// A file's outline (`dsp::take_wave`), for its mini waveform.
-    Wave { path: PathBuf, peaks: Vec<f32> },
+    Wave { path: PathBuf, levels: Vec<f32> },
     /// Lossless check verdict, for the Source column, with the full analysis.
     Source { path: PathBuf, text: String, level: Level, tooltip: String, report: Arc<crate::lossless::Report> },
     /// Speed check verdict, for the Speed column, with the full analysis.
@@ -398,8 +398,8 @@ impl Ctx {
     }
     /// The outline of a file an analysis just read whole, for its mini waveform.
     fn wave(&self, path: &Path) {
-        if let Some(peaks) = crate::dsp::take_wave(path) {
-            let _ = self.tx.send(Msg::Wave { path: path.to_path_buf(), peaks });
+        if let Some(levels) = crate::dsp::take_wave(path) {
+            let _ = self.tx.send(Msg::Wave { path: path.to_path_buf(), levels });
         }
     }
     fn info(&self, path: &Path, info: &AudioInfo) {

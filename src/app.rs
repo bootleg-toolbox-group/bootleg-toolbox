@@ -803,18 +803,18 @@ fn paint_ring(painter: &egui::Painter, centre: egui::Pos2, radius: f32, fraction
     }
 }
 
-/// A file's outline in the Wave column: its peaks, mirrored around the middle, scaled to the
+/// A file's outline in the Wave column: its loudness, mirrored around the middle, scaled to the
 /// loudest.
-fn paint_wave(ui: &mut egui::Ui, peaks: &[f32]) -> egui::Response {
+fn paint_wave(ui: &mut egui::Ui, levels: &[f32]) -> egui::Response {
     let height = (ui.available_height() - 6.0).clamp(8.0, 20.0);
     let width = ui.available_width().clamp(30.0, 160.0);
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
-    let loudest = peaks.iter().copied().fold(0f32, f32::max).max(1e-6);
-    let step = rect.width() / peaks.len() as f32;
+    let loudest = levels.iter().copied().fold(0f32, f32::max).max(1e-6);
+    let step = rect.width() / levels.len() as f32;
     let stroke = egui::Stroke::new((step * 0.7).clamp(0.6, 1.6), Palette::now().weak.gamma_multiply(0.75));
-    for (i, peak) in peaks.iter().enumerate() {
+    for (i, level) in levels.iter().enumerate() {
         let x = rect.left() + (i as f32 + 0.5) * step;
-        let half = (peak / loudest * rect.height() / 2.0).max(0.4);
+        let half = (level / loudest * rect.height() / 2.0).max(0.4);
         ui.painter().line_segment([egui::pos2(x, rect.center().y - half), egui::pos2(x, rect.center().y + half)], stroke);
     }
     response
@@ -1195,7 +1195,7 @@ impl Col {
             Col::Name => "File or show name",
             Col::Format => "Audio format",
             Col::Length => "Length (minutes:seconds.frames for CD audio)",
-            Col::Wave => "Outline of the sound (its peaks), once Lossless?, Speed? or a spectrogram has read the file: fades, silences, level jumps",
+            Col::Wave => "Outline of the sound (its loudness), once Lossless?, Speed? or a spectrogram has read the file: fades, silences, level jumps",
             Col::Rate => "Sample rate",
             Col::Bits => "Bit depth",
             Col::Ch => "Channels",
@@ -2091,8 +2091,8 @@ impl App {
                     Msg::Info { path, info } => {
                         self.info.insert(path, info);
                     }
-                    Msg::Wave { path, peaks } => {
-                        self.waves.insert(path, peaks);
+                    Msg::Wave { path, levels } => {
+                        self.waves.insert(path, levels);
                     }
                     Msg::Source { path, text, level, tooltip, report } => {
                         // Reading the files again (Details) must not replace a measured verdict.
@@ -4267,8 +4267,8 @@ impl App {
                 }
                 Col::Length => responses.push(row.col(|ui| { ui.label(info.map(|i| i.length()).unwrap_or_default()); }).1),
                 Col::Wave => responses.push(row.col(|ui| {
-                    if let Some(peaks) = self.waves.get(path) {
-                        paint_wave(ui, peaks).on_hover_text("Outline of the sound (its peaks, scaled to the loudest), from the last analysis that read the file");
+                    if let Some(levels) = self.waves.get(path) {
+                        paint_wave(ui, levels).on_hover_text("Outline of the sound (its loudness, scaled to the loudest part), from the last analysis that read the file");
                     }
                 }).1),
                 Col::Rate => responses.push(row.col(|ui| { ui.label(info.map(|i| i.rate_label()).unwrap_or_default()); }).1),
@@ -5158,8 +5158,8 @@ impl App {
                 }
                 Some(PlotState::Pending(rx)) => {
                     let Ok((plot, wave)) = rx.try_recv() else { continue };
-                    if let Some(peaks) = wave {
-                        self.waves.insert(path.clone(), peaks);
+                    if let Some(levels) = wave {
+                        self.waves.insert(path.clone(), levels);
                     }
                     let state = match plot {
                         Ok(plot) => {

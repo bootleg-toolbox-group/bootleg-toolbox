@@ -313,7 +313,7 @@ The interface is one compact window, close in spirit to TLH: a list of shows and
 - **Collapsed view** shows one row per show, its tracks folded: handy with a long list. A show still unfolds with its arrow.
 - **Discs:** a show on several discs (CD1, CD2... folders) has a row before each disc, with its number of tracks and length; clicking it selects the disc.
 - **Recording source:** a badge (SBD, AUD, MTX, FM, Pre-FM, DAT) before the show name, from the folder name or the Source/Lineage lines of the info file.
-- **Wave:** a small outline of each track (fades, silences, level jumps), drawn once Lossless?, Speed? or a spectrogram has read the file; nothing is decoded just for it.
+- **Wave:** a small outline of the loudness of each track (fades, silences, level jumps), drawn once Lossless?, Speed? or a spectrogram has read the file; nothing is decoded just for it.
 - The toolbar sums up the list: shows, files, length and size.
 - **Colours carry meaning:** green for OK, orange for a warning, red for an error. Every result has a tooltip with the details.
 
