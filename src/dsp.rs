@@ -82,7 +82,7 @@ impl Fft {
         let twiddles: Vec<(f64, f64)> = (0..n / 2)
             .map(|k| {
                 let angle = -2.0 * std::f64::consts::PI * k as f64 / n as f64;
-                (angle.cos(), angle.sin())
+                (libm::cos(angle), libm::sin(angle))
             })
             .collect();
         let stages = (1..=bits)
@@ -158,12 +158,12 @@ impl Fft {
 
 /// Periodic Hann window (spectrogram).
 pub fn hann(n: usize) -> Vec<f64> {
-    (0..n).map(|i| 0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / n as f64).cos()).collect()
+    (0..n).map(|i| 0.5 - 0.5 * libm::cos(2.0 * std::f64::consts::PI * i as f64 / n as f64)).collect()
 }
 
 /// Symmetric Hann window, as numpy.hanning (lossless check).
 pub fn hann_symmetric(n: usize) -> Vec<f64> {
-    (0..n).map(|i| 0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / (n - 1) as f64).cos()).collect()
+    (0..n).map(|i| 0.5 - 0.5 * libm::cos(2.0 * std::f64::consts::PI * i as f64 / (n - 1) as f64)).collect()
 }
 
 /// Converts the little-endian bytes of one sample to -1.0..1.0.
@@ -356,8 +356,8 @@ pub(crate) mod tests {
             let (mut sr, mut si) = (0.0f64, 0.0f64);
             for (t, x) in input.iter().enumerate() {
                 let a = -2.0 * std::f64::consts::PI * (k * t) as f64 / n as f64;
-                sr += x * a.cos();
-                si += x * a.sin();
+                sr += x * libm::cos(a);
+                si += x * libm::sin(a);
             }
             assert!((re[k] - sr).abs() < 1e-9 && (im[k] - si).abs() < 1e-9, "bin {k}");
         }

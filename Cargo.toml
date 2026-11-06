@@ -46,6 +46,7 @@ wavicle = "0.1.0"
 mp3lame-encoder = "0.2.5"
 ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "platform-verifier"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+libm = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Same zbus as rfd, to read the desktop's light/dark preference (XDG portal).

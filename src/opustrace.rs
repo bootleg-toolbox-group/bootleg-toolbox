@@ -297,14 +297,17 @@ struct Mdct {
     re: Vec<f64>,
     im: Vec<f64>,
     folded: Vec<f64>,
+    /// The DCT-IV's twiddles, before and after the DFT.
+    pre: Vec<(f64, f64)>,
+    post: Vec<(f64, f64)>,
 }
 
 impl Mdct {
     fn new() -> Mdct {
         let rise: Vec<f64> = (0..OVERLAP)
             .map(|i| {
-                let s = (0.5 * std::f64::consts::PI * (i as f64 + 0.5) / OVERLAP as f64).sin();
-                (0.5 * std::f64::consts::PI * s * s).sin()
+                let s = libm::sin(0.5 * std::f64::consts::PI * (i as f64 + 0.5) / OVERLAP as f64);
+                libm::sin(0.5 * std::f64::consts::PI * s * s)
             })
             .collect();
         let zeros = (N - OVERLAP) / 2;
@@ -313,7 +316,11 @@ impl Mdct {
         window.extend(std::iter::repeat_n(1.0, N - OVERLAP));
         window.extend(rise.iter().rev());
         window.extend(std::iter::repeat_n(0.0, zeros));
-        Mdct { window, dft: Bluestein::new(N / 2), re: vec![0.0; N / 2], im: vec![0.0; N / 2], folded: vec![0.0; N] }
+        let pi = std::f64::consts::PI;
+        let cis = |t: f64| (libm::cos(t), libm::sin(t));
+        let pre = (0..N / 2).map(|m| cis(-pi * (4 * m + 1) as f64 / (4 * N) as f64)).collect();
+        let post = (0..N / 2).map(|k| cis(-pi * k as f64 / N as f64)).collect();
+        Mdct { window, dft: Bluestein::new(N / 2), re: vec![0.0; N / 2], im: vec![0.0; N / 2], folded: vec![0.0; N], pre, post }
     }
 
     fn forward(&mut self, input: &[f64], out: &mut [f64]) {
@@ -338,29 +345,26 @@ impl Mdct {
             self.folded[n] = -w(3 * h - 1 - n) - w(3 * h + n);
             self.folded[h + n] = w(n) - w(N - 1 - n);
         }
-        dct4(&self.folded, out, &mut self.dft, &mut self.re, &mut self.im);
+        dct4(&self.folded, out, &mut self.dft, &mut self.re, &mut self.im, &self.pre, &self.post);
     }
 }
 
 /// DCT-IV of N points, X[k] = sum u[n] cos(pi/N (n + 1/2)(k + 1/2)), with an N/2-point complex DFT.
 #[inline(always)]
-fn dct4(u: &[f64], out: &mut [f64], dft: &mut Bluestein, re: &mut [f64], im: &mut [f64]) {
+fn dct4(u: &[f64], out: &mut [f64], dft: &mut Bluestein, re: &mut [f64], im: &mut [f64], pre: &[(f64, f64)], post: &[(f64, f64)]) {
     let n = u.len();
     let h = n / 2;
-    let pi = std::f64::consts::PI;
     // z[m] = (u[2m] + i u[n-1-2m]) * exp(-i pi (4m + 1) / (4n))
     for m in 0..h {
         let (a, b) = (u[2 * m], u[n - 1 - 2 * m]);
-        let t = -pi * (4 * m + 1) as f64 / (4 * n) as f64;
-        let (c, s) = (t.cos(), t.sin());
+        let (c, s) = pre[m];
         re[m] = a * c - b * s;
         im[m] = a * s + b * c;
     }
     dft.run(re, im);
     // Z[k] * exp(-i pi k / n): real part -> X[2k], minus imaginary -> X[n-1-2k].
     for k in 0..h {
-        let t = -pi * k as f64 / n as f64;
-        let (c, s) = (t.cos(), t.sin());
+        let (c, s) = post[k];
         let (zr, zi) = (re[k], im[k]);
         let yr = zr * c - zi * s;
         let yi = zr * s + zi * c;
@@ -389,7 +393,7 @@ impl Bluestein {
         let chirp: Vec<(f64, f64)> = (0..n)
             .map(|k| {
                 let a = -pi * ((k * k) % (2 * n)) as f64 / n as f64;
-                (a.cos(), a.sin())
+                (libm::cos(a), libm::sin(a))
             })
             .collect();
         let (mut kernel_re, mut kernel_im) = (vec![0.0; m], vec![0.0; m]);
@@ -466,7 +470,7 @@ fn resample_to_48k(x: &[f64], rate: u32) -> Vec<f64> {
             (0..2 * HALF)
                 .map(|j| {
                     let t = j as f64 - (HALF as f64 - 1.0) - frac;
-                    let sinc = if t.abs() < 1e-12 { 2.0 * cutoff } else { (2.0 * std::f64::consts::PI * cutoff * t).sin() / (std::f64::consts::PI * t) };
+                    let sinc = if t.abs() < 1e-12 { 2.0 * cutoff } else { libm::sin(2.0 * std::f64::consts::PI * cutoff * t) / (std::f64::consts::PI * t) };
                     let r = t / HALF as f64;
                     let window = if r.abs() >= 1.0 { 0.0 } else { bessel(beta * (1.0 - r * r).sqrt()) / norm };
                     sinc * window
@@ -521,7 +525,7 @@ mod tests {
         let pi = std::f64::consts::PI;
         (0..N)
             .map(|k| {
-                (0..2 * N).map(|n| input[n] * window[n] * (pi / N as f64 * (n as f64 + 0.5 + N as f64 / 2.0) * (k as f64 + 0.5)).cos()).sum()
+                (0..2 * N).map(|n| input[n] * window[n] * libm::cos(pi / N as f64 * (n as f64 + 0.5 + N as f64 / 2.0) * (k as f64 + 0.5))).sum()
             })
             .collect()
     }
@@ -549,9 +553,9 @@ mod tests {
     #[test]
     fn resampling_keeps_a_tone() {
         // A 1 kHz tone at 44.1 kHz comes out as the same tone at 48 kHz.
-        let x: Vec<f64> = (0..44100).map(|i| (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / 44100.0).sin()).collect();
+        let x: Vec<f64> = (0..44100).map(|i| libm::sin(2.0 * std::f64::consts::PI * 1000.0 * i as f64 / 44100.0)).collect();
         let y = resample_to_48k(&x, 44100);
-        let worst = (2000..46000).map(|i| (y[i] - (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / 48000.0).sin()).abs()).fold(0.0, f64::max);
+        let worst = (2000..46000).map(|i| (y[i] - libm::sin(2.0 * std::f64::consts::PI * 1000.0 * i as f64 / 48000.0)).abs()).fold(0.0, f64::max);
         assert!(worst < 1e-4, "{worst}");
     }
 }

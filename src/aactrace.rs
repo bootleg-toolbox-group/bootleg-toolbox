@@ -123,7 +123,7 @@ struct Mdct {
 impl Mdct {
     fn new(n: usize) -> Mdct {
         let pi = std::f64::consts::PI;
-        let cis = |a: f64| (a.cos(), a.sin());
+        let cis = |a: f64| (libm::cos(a), libm::sin(a));
         let pre = (0..n / 2).map(|i| cis(-pi * (i as f64 + 0.25) / n as f64)).collect();
         let post = (0..n / 2).map(|i| cis(-pi * i as f64 / n as f64)).collect();
         Mdct { n, fft: Fft::new(n / 2), pre, post }
@@ -237,7 +237,7 @@ impl Tables {
         };
         let tau_long = long_bands.iter().map(|(a, b)| tau(b - a)).collect();
         let tau_short = short_bands.iter().map(|(a, b)| tau((b - a) * 8)).collect();
-        let sine = |i: usize, n2: usize| (std::f64::consts::PI * (2 * i + 1) as f64 / n2 as f64 / 2.0).sin();
+        let sine = |i: usize, n2: usize| libm::sin(std::f64::consts::PI * (2 * i + 1) as f64 / n2 as f64 / 2.0);
         // The detector only knew sine windows (iTunes); other encoders (FDK, ffmpeg) use the
         // Kaiser-Bessel-derived ones the standard also allows.
         let shapes = [
@@ -337,10 +337,10 @@ impl Tables {
         if max <= 0.0 || band.is_empty() {
             return 0;
         }
-        let sf_max = 4.0 * max.log2() + 16.0 / 3.0 + 60.0;
+        let sf_max = 4.0 * libm::log2(max) + 16.0 / 3.0 + 60.0;
         powered.clear();
         powered.extend(band.iter().map(|x| { let r = x.abs().sqrt(); r * r.sqrt() }));
-        let gains = self.scale.map(|sf| 2f64.powf(-3.0 / 16.0 * (sf * sf_max - 60.0)));
+        let gains = self.scale.map(|sf| libm::exp2(-3.0 / 16.0 * (sf * sf_max - 60.0)));
         crate::mp3trace::grid_errors(powered, &gains).iter().filter(|&&e| e < tau).count()
     }
 }
@@ -384,7 +384,7 @@ mod tests {
         m.run(&x, &mut fold, &mut re, &mut im, &mut out);
         for (f, o) in out.iter().enumerate() {
             let direct: f64 = (0..2 * n)
-                .map(|t| x[t] * (std::f64::consts::PI / n as f64 * (t as f64 + 0.5 + n as f64 / 2.0) * (f as f64 + 0.5)).cos())
+                .map(|t| x[t] * libm::cos(std::f64::consts::PI / n as f64 * (t as f64 + 0.5 + n as f64 / 2.0) * (f as f64 + 0.5)))
                 .sum();
             assert!((o - direct).abs() < 1e-9, "{f}: {o} {direct}");
         }

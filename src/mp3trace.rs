@@ -283,10 +283,10 @@ impl Tables {
         let mut modulation = vec![0f64; 32 * 64];
         for i in 0..32 {
             for k in 0..64 {
-                modulation[k * 32 + i] = ((2 * i + 1) as f64 * (k as f64 - 16.0) * std::f64::consts::PI / 64.0).cos();
+                modulation[k * 32 + i] = libm::cos((2 * i + 1) as f64 * (k as f64 - 16.0) * std::f64::consts::PI / 64.0);
             }
         }
-        let sine = |n: usize, len: usize| ((n as f64 + 0.5) * std::f64::consts::PI / len as f64).sin();
+        let sine = |n: usize, len: usize| libm::sin((n as f64 + 0.5) * std::f64::consts::PI / len as f64);
         let mut win_long = [0f64; 36];
         let mut win_start = [0f64; 36];
         let mut win_stop = [0f64; 36];
@@ -315,7 +315,7 @@ impl Tables {
             for f in 0..n_out {
                 for t in 0..n2 {
                     let phase = std::f64::consts::PI / n_out as f64 * (t as f64 + 0.5 + n_out as f64 / 2.0) * (f as f64 + 0.5);
-                    k[t * n_out + f] = phase.cos();
+                    k[t * n_out + f] = libm::cos(phase);
                 }
             }
             k
@@ -484,9 +484,9 @@ impl Tables {
         if max <= 0.0 || band.is_empty() {
             return 0;
         }
-        let sf_max = 4.0 * max.log2() + 16.0 / 3.0 + 80.0;
+        let sf_max = 4.0 * libm::log2(max) + 16.0 / 3.0 + 80.0;
         let powered: Vec<f64> = band.iter().map(|x| { let r = x.abs().sqrt(); r * r.sqrt() }).collect();
-        let gains = self.scale.map(|sf| 2f64.powf(-3.0 / 16.0 * (sf * sf_max - 80.0)));
+        let gains = self.scale.map(|sf| libm::exp2(-3.0 / 16.0 * (sf * sf_max - 80.0)));
         grid_errors(&powered, &gains).iter().filter(|&&e| e < tau).count()
     }
 }
@@ -532,7 +532,7 @@ pub(crate) fn erf(x: f64) -> f64 {
     let t = 1.0 / (1.0 + 0.5 * z);
     let poly = -z * z - 1.26551223
         + t * (1.00002368 + t * (0.37409196 + t * (0.09678418 + t * (-0.18628806 + t * (0.27886807 + t * (-1.13520398 + t * (1.48851587 + t * (-0.82215223 + t * 0.17087277))))))));
-    let erfc = t * poly.exp();
+    let erfc = t * libm::exp(poly);
     if x >= 0.0 { 1.0 - erfc } else { erfc - 1.0 }
 }
 
@@ -540,12 +540,12 @@ pub(crate) fn erf(x: f64) -> f64 {
 pub(crate) fn erfinv(y: f64) -> f64 {
     let y = y.clamp(-0.999_999_999, 0.999_999_999);
     let a = 0.147;
-    let ln = (1.0 - y * y).ln();
+    let ln = libm::log(1.0 - y * y);
     let first = 2.0 / (std::f64::consts::PI * a) + ln / 2.0;
     let mut x = y.signum() * ((first * first - ln / a).sqrt() - first).sqrt();
     for _ in 0..4 {
         let err = erf(x) - y;
-        x -= err / (2.0 / std::f64::consts::PI.sqrt() * (-x * x).exp());
+        x -= err / (2.0 / std::f64::consts::PI.sqrt() * libm::exp(-x * x));
     }
     x
 }

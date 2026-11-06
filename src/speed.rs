@@ -40,11 +40,11 @@ pub struct SpeedFacts {
 }
 
 pub fn cents_to_percent(cents: f64) -> f64 {
-    (2f64.powf(cents / 1200.0) - 1.0) * 100.0
+    (libm::pow(2.0, cents / 1200.0) - 1.0) * 100.0
 }
 
 fn percent_to_cents(percent: f64) -> f64 {
-    1200.0 * (1.0 + percent / 100.0).log2()
+    1200.0 * libm::log2(1.0 + percent / 100.0)
 }
 
 /// "1.1 % slow", "2.0 % fast".
@@ -80,7 +80,7 @@ pub fn analyse(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<Spe
         return Err("invalid sample rate".into());
     }
     let channels = info.channels.max(1) as f64;
-    let pow2 = |seconds: f64| (rate * seconds).log2().round().clamp(10.0, 22.0) as u32;
+    let pow2 = |seconds: f64| libm::log2(rate * seconds).round().clamp(10.0, 22.0) as u32;
     // Pilot: an average spectrum of ~5 Hz bins.
     let n_pilot = 1usize << pow2(0.186);
     // Tuning: ~2.7 Hz bins, one window every ~0.75 s.
@@ -133,18 +133,18 @@ pub fn analyse(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<Spe
             }
             fft_tune.power(&scratch[..n_tune], &mut re, &mut im, &mut bins[..n_tune / 2 + 1]);
             // Spectral peaks within 30 dB of the loudest, refined by parabolic interpolation.
-            let db: Vec<f64> = bins[..n_tune / 2 + 1].iter().map(|p| 10.0 * (p + 1e-24).log10()).collect();
+            let db: Vec<f64> = bins[..n_tune / 2 + 1].iter().map(|p| 10.0 * libm::log10(p + 1e-24)).collect();
             let top = db[tune_lo..=tune_hi].iter().cloned().fold(f64::NEG_INFINITY, f64::max);
             for k in tune_lo.max(1)..=tune_hi {
                 let (a, b, c) = (db[k - 1], db[k], db[k + 1]);
                 if b > a && b > c && b > top - 30.0 {
                     let d = 0.5 * (a - c) / (a - 2.0 * b + c);
                     let freq = (k as f64 + d) * rate / n_tune as f64;
-                    let cents = 1200.0 * (freq / 440.0).log2();
+                    let cents = 1200.0 * libm::log2(freq / 440.0);
                     let angle = cents / 100.0 * std::f64::consts::TAU;
-                    let weight = 10f64.powf(b / 20.0);
-                    zr += weight * angle.cos();
-                    zi += weight * angle.sin();
+                    let weight = libm::pow(10.0, b / 20.0);
+                    zr += weight * libm::cos(angle);
+                    zi += weight * libm::sin(angle);
                     zw += weight;
                 }
             }
@@ -157,14 +157,14 @@ pub fn analyse(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<Spe
 
     let mut facts = SpeedFacts::default();
     if zw > 0.0 {
-        let cents = zi.atan2(zr) / std::f64::consts::TAU * 100.0;
+        let cents = libm::atan2(zi, zr) / std::f64::consts::TAU * 100.0;
         facts.tuning = Some((cents, (zr * zr + zi * zi).sqrt() / zw));
     }
 
     // FM pilot, as in the Lossless? check: at 19 000 Hz, or shifted by the tape speed.
     if pilot_blocks > 0 && rate >= 41000.0 {
         let hz = rate / n_pilot as f64;
-        let raw: Vec<f64> = pilot_power.iter().map(|p| 10.0 * (p / pilot_blocks as f64 + 1e-30).log10()).collect();
+        let raw: Vec<f64> = pilot_power.iter().map(|p| 10.0 * libm::log10(p / pilot_blocks as f64 + 1e-30)).collect();
         let around = |k: usize| {
             let (span, skip) = ((1000.0 / hz) as usize, (150.0 / hz).ceil() as usize);
             let v: Vec<f64> = (k.saturating_sub(span)..(k + span + 1).min(raw.len())).filter(|&j| j + skip < k || j > k + skip).map(|j| raw[j]).collect();
@@ -186,7 +186,7 @@ pub fn analyse(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<Spe
     // its own +-2 Hz surroundings (the slope of the bass would otherwise favour the range edges).
     if hum_blocks > 0 {
         let hz = rate / n_hum as f64;
-        let raw: Vec<f64> = hum_power.iter().map(|p| 10.0 * (p / hum_blocks as f64 + 1e-30).log10()).collect();
+        let raw: Vec<f64> = hum_power.iter().map(|p| 10.0 * libm::log10(p / hum_blocks as f64 + 1e-30)).collect();
         let (span, skip) = ((2.0 / hz) as usize, (0.3 / hz).ceil() as usize);
         let prominence_at = |k: usize| {
             let around: Vec<f64> = (k.saturating_sub(span)..=(k + span)).filter(|&j| j + skip < k || j > k + skip).map(|j| raw[j]).collect();

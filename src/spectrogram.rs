@@ -133,7 +133,7 @@ fn analyse(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<Vec<f32
         }
         for k in 0..ROWS {
             let p = power[src * ROWS + k] / counts[src] as f64 / reference;
-            levels[col * ROWS + k] = if p > 0.0 { (10.0 * p.log10()) as f32 } else { FLOOR_DB };
+            levels[col * ROWS + k] = if p > 0.0 { (10.0 * libm::log10(p)) as f32 } else { FLOOR_DB };
         }
     }
     Ok(levels)
@@ -144,9 +144,9 @@ fn analyse(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<Vec<f32
 /// 0.0 (floor) .. 1.0 (0 dBFS): black, purple, red, orange, yellow, white.
 fn palette(level: f32) -> [u8; 3] {
     let l = level.clamp(0.0, 1.0);
-    let r = if l < 0.13 { 0.0 } else if l < 0.73 { ((l - 0.13) / 0.60 * PI / 2.0).sin() } else { 1.0 };
-    let g = if l < 0.60 { 0.0 } else if l < 0.91 { ((l - 0.60) / 0.31 * PI / 2.0).sin() } else { 1.0 };
-    let b = if l < 0.60 { 0.5 * (l / 0.60 * PI).sin() } else if l < 0.78 { 0.0 } else { (l - 0.78) / 0.22 };
+    let r = if l < 0.13 { 0.0 } else if l < 0.73 { libm::sinf((l - 0.13) / 0.60 * PI / 2.0) } else { 1.0 };
+    let g = if l < 0.60 { 0.0 } else if l < 0.91 { libm::sinf((l - 0.60) / 0.31 * PI / 2.0) } else { 1.0 };
+    let b = if l < 0.60 { 0.5 * libm::sinf(l / 0.60 * PI) } else if l < 0.78 { 0.0 } else { (l - 0.78) / 0.22 };
     [(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8]
 }
 
@@ -346,10 +346,10 @@ mod tests {
         let bin = 64;
         let window = dsp::hann(FFT_SIZE);
         let signal: Vec<f64> =
-            (0..FFT_SIZE).map(|i| (2.0 * std::f64::consts::PI * (bin * i) as f64 / FFT_SIZE as f64).sin() * window[i]).collect();
+            (0..FFT_SIZE).map(|i| libm::sin(2.0 * std::f64::consts::PI * (bin * i) as f64 / FFT_SIZE as f64) * window[i]).collect();
         let mut bins = vec![0.0; FFT_SIZE / 2 + 1];
         Fft::new(FFT_SIZE).power(&signal, &mut Vec::new(), &mut Vec::new(), &mut bins);
         let power = bins[bin] / (FFT_SIZE as f64 / 4.0).powi(2);
-        assert!((10.0 * power.log10()).abs() < 0.01);
+        assert!((10.0 * libm::log10(power)).abs() < 0.01);
     }
 }

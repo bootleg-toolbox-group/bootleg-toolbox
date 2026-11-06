@@ -200,7 +200,7 @@ impl Spectra {
                             let sum = |p: &[f64]| (0..s.bins).filter(|&k| width_band(k as f64 * s.bin_hz)).map(|k| p[k]).sum::<f64>();
                             let (sd, m) = (sum(&side_power), sum(&frame_power));
                             if m > 0.0 {
-                                width = Some(10.0 * ((sd + 1e-30) / m).log10());
+                                width = Some(10.0 * libm::log10((sd + 1e-30) / m));
                             }
                         }
                     }
@@ -251,7 +251,7 @@ fn measure(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<Measure
     }
     let channels = info.channels.max(1) as usize;
     // About 11 Hz per bin.
-    let nfft = 1usize << ((rate / 11.0).log2().round_ties_even() as u32).max(12);
+    let nfft = 1usize << (libm::log2(rate / 11.0).round_ties_even() as u32).max(12);
     let fft = Fft::new(nfft);
     let window = dsp::hann_symmetric(nfft);
     let bins = nfft / 2 + 1;
@@ -427,7 +427,7 @@ fn conclude(path: &Path, info: &AudioInfo, m: &Measured, aac_check: bool) -> Res
         *p /= frames as f64;
     }
     let freq = |k: usize| k as f64 * bin_hz;
-    let raw: Vec<f64> = power.iter().map(|p| 10.0 * (p + 1e-30).log10()).collect();
+    let raw: Vec<f64> = power.iter().map(|p| 10.0 * libm::log10(p + 1e-30)).collect();
     let median = |s: &[f64]| dsp::median(s).unwrap_or(f64::NEG_INFINITY);
 
     // Narrow tones: how far bin k stands above the median of +-1 kHz around it.
@@ -467,7 +467,7 @@ fn conclude(path: &Path, info: &AudioInfo, m: &Measured, aac_check: bool) -> Res
 
     let nb = bins / band;
     let mut level: Vec<f64> =
-        (0..nb).map(|b| 10.0 * (power[b * band..(b + 1) * band].iter().sum::<f64>() / band as f64 + 1e-30).log10()).collect();
+        (0..nb).map(|b| 10.0 * libm::log10(power[b * band..(b + 1) * band].iter().sum::<f64>() / band as f64 + 1e-30)).collect();
     let fb: Vec<f64> = (0..nb).map(|b| (b * band..(b + 1) * band).map(freq).sum::<f64>() / band as f64).collect();
     // Tones would fake a cutoff right above them: their bands take the level of the bands
     // just below them (not above: a tone may sit right under a real cutoff).
@@ -522,7 +522,7 @@ fn conclude(path: &Path, info: &AudioInfo, m: &Measured, aac_check: bool) -> Res
         let mut steady = level.clone();
         for b in kept_lo..kept_hi.min(nb) {
             let mean = calm.iter().map(|frame| frame[b - kept_lo] as f64).sum::<f64>() / calm.len().max(1) as f64;
-            steady[b] = 10.0 * (mean + 1e-30).log10();
+            steady[b] = 10.0 * libm::log10(mean + 1e-30);
         }
         for &b in &toned {
             let around: Vec<f64> = (b.saturating_sub(12)..b).filter(|&j| !in_tone(fb[j])).map(|j| steady[j]).collect();
@@ -552,10 +552,10 @@ fn conclude(path: &Path, info: &AudioInfo, m: &Measured, aac_check: bool) -> Res
             let start = bi - gap - width_bands;
             let a = (start..nb).find(|&j| level[j] < below - 3.0);
             let b = a.and_then(|a| (a..nb).find(|&j| level[j] < below - 20.0));
-            a.zip(b).map(|(a, b)| 17.0 / (fb[b] / fb[a].max(1.0)).log2().max(1.0 / 192.0))
+            a.zip(b).map(|(a, b)| 17.0 / libm::log2(fb[b] / fb[a].max(1.0)).max(1.0 / 192.0))
         }
         _ => match (median_between(9500.0, 10500.0), median_between(15000.0, 16500.0)) {
-            (Some(lo), Some(hi)) if nyquist > 17000.0 => Some((lo - hi) / (15750.0f64 / 10000.0).log2()),
+            (Some(lo), Some(hi)) if nyquist > 17000.0 => Some((lo - hi) / libm::log2(15750.0f64 / 10000.0)),
             _ => None,
         },
     };
@@ -588,13 +588,13 @@ fn conclude(path: &Path, info: &AudioInfo, m: &Measured, aac_check: bool) -> Res
             return Vec::new();
         }
         kept.chunks_exact(kept_bands)
-            .map(|frame| 10.0 * (sel.iter().map(|&i| frame[i] as f64).sum::<f64>() / sel.len() as f64 + 1e-30).log10())
+            .map(|frame| 10.0 * libm::log10(sel.iter().map(|&i| frame[i] as f64).sum::<f64>() / sel.len() as f64 + 1e-30))
             .collect()
     };
     // "Digital silence": the rounding noise of 16-bit audio, per bin. Hiss from an analog
     // source stays well above it; a decoded MP3/AAC falls to it (or below, in 24-bit).
     let quant_bits = 16;
-    let lsb = 10.0 * ((2f64.powi(1 - quant_bits)).powi(2) / 12.0 * window.iter().map(|w| w * w).sum::<f64>()).log10();
+    let lsb = 10.0 * libm::log10((2f64.powi(1 - quant_bits)).powi(2) / 12.0 * window.iter().map(|w| w * w).sum::<f64>());
     let traces = cutoff.map(|c| {
         let reference_band = series(c - 3000.0, c - 1500.0);
         let below: Vec<f64> = series(c - 800.0, c - 200.0).iter().zip(&reference_band).map(|(b, r)| b - r).collect();
@@ -668,7 +668,7 @@ fn conclude(path: &Path, info: &AudioInfo, m: &Measured, aac_check: bool) -> Res
 
     let speed = shifted_pilot.map(|f| {
         let percent = (f / 19000.0 - 1.0) * 100.0;
-        let semitones = 12.0 * (f / 19000.0).log2();
+        let semitones = 12.0 * libm::log2(f / 19000.0);
         format!(
             "playback {:.1} % too {} (pitch {:.2} semitone {})",
             percent.abs(),
@@ -1076,7 +1076,7 @@ fn masked_cutoff(kept: &[f32], kept_bands: usize, freq: &dyn Fn(usize) -> f64, s
         return None;
     }
     let frames = kept.len() / kept_bands;
-    let db = |p: f64| 10.0 * (p + 1e-30).log10();
+    let db = |p: f64| 10.0 * libm::log10(p + 1e-30);
     // (frequency, mean over floor, floor over digital silence)
     let bands: Vec<(f64, f64, f64)> = (0..kept_bands)
         .filter(|&b| !skip(freq(b)))
@@ -1209,7 +1209,7 @@ fn comb_bits(histogram: &[u32], bits: u32) -> Option<Comb> {
                     return None;
                 }
             }
-            return Some(Comb { used, bits: bits as f64 - (1.0 / used).log2() });
+            return Some(Comb { used, bits: bits as f64 - libm::log2(1.0 / used) });
         }
         r /= 2;
     }
@@ -1625,7 +1625,7 @@ mod tests {
                     // A little frame to frame variation; music comes and goes 20 dB above.
                     let wobble = 1.0 + 0.2 * ((i * 7 + b * 3) % 5) as f64 / 4.0;
                     let music = if f < 16000.0 && i % 2 == 0 { 100.0 } else { 0.0 };
-                    kept.push((10f64.powf(floor_db / 10.0) * wobble + 10f64.powf((floor_db + 20.0) / 10.0) * music / 100.0) as f32);
+                    kept.push((libm::pow(10.0, floor_db / 10.0) * wobble + libm::pow(10.0, (floor_db + 20.0) / 10.0) * music / 100.0) as f32);
                 }
             }
             kept

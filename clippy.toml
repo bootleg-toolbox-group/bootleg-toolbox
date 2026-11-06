@@ -1,0 +1,25 @@
+# The platform's maths library rounds differently on Linux (glibc) and Windows (MinGW):
+# libm (the same code everywhere) keeps the analyses identical on both.
+disallowed-methods = [
+    { path = "f64::ln", reason = "use libm::log" },
+    { path = "f64::log10", reason = "use libm::log10" },
+    { path = "f64::log2", reason = "use libm::log2" },
+    { path = "f64::log", reason = "use libm" },
+    { path = "f64::exp", reason = "use libm::exp" },
+    { path = "f64::exp2", reason = "use libm::exp2" },
+    { path = "f64::powf", reason = "use libm::pow" },
+    { path = "f64::sin", reason = "use libm::sin" },
+    { path = "f64::cos", reason = "use libm::cos" },
+    { path = "f64::tan", reason = "use libm::tan" },
+    { path = "f64::sin_cos", reason = "use libm::sincos" },
+    { path = "f64::atan", reason = "use libm::atan" },
+    { path = "f64::atan2", reason = "use libm::atan2" },
+    { path = "f32::ln", reason = "use libm::logf" },
+    { path = "f32::log10", reason = "use libm::log10f" },
+    { path = "f32::log2", reason = "use libm::log2f" },
+    { path = "f32::exp", reason = "use libm::expf" },
+    { path = "f32::powf", reason = "use libm::powf" },
+    { path = "f32::sin", reason = "use libm::sinf" },
+    { path = "f32::cos", reason = "use libm::cosf" },
+    { path = "f32::atan2", reason = "use libm::atan2f" },
+]

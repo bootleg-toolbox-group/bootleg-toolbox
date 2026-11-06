@@ -318,7 +318,7 @@ pub fn float_to_flac(source: &Path, out: &Path, level: u8, tags: &[(String, Stri
         Ok(())
     })?;
     let exact = scan.exact_bits.is_some() && clipped == 0 && max_diff == 0.0;
-    Ok(FloatConverted { bits, exact, clipped, max_diff_db: (max_diff > 0.0).then(|| 20.0 * max_diff.log10()) })
+    Ok(FloatConverted { bits, exact, clipped, max_diff_db: (max_diff > 0.0).then(|| 20.0 * libm::log10(max_diff)) })
 }
 
 /// Decodes `source` to a WAV file `out` (through a ".part" file), then checks it.
@@ -623,7 +623,7 @@ mod tests {
         let mut data = Vec::new();
         for i in 0..frames {
             let t = i as f64 / 44100.0;
-            let l = (8000.0 * (2.0 * std::f64::consts::PI * (200.0 + 2000.0 * t) * t).sin()) as i16;
+            let l = (8000.0 * libm::sin(2.0 * std::f64::consts::PI * (200.0 + 2000.0 * t) * t)) as i16;
             let r = (l as i32 / 2 + (i % 7)) as i16;
             data.extend_from_slice(&l.to_le_bytes());
             data.extend_from_slice(&r.to_le_bytes());

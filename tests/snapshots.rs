@@ -40,8 +40,9 @@ fn normalise(text: &str, dir: &Path) -> String {
     let mut lines = Vec::new();
     for line in text.lines() {
         let line = line.replace(&dir, "<dir>").replace(env!("CARGO_PKG_VERSION"), "<version>");
-        // Paths shown with the system's separator: the same snapshots on Windows.
-        let line = if cfg!(windows) { line.replace('\\', "/") } else { line };
+        // Paths shown with "/" on every system (Windows shows its own "\\", and checksum files
+        // may hold either): the same snapshots everywhere.
+        let line = line.replace('\\', "/");
         if let Some((head, checks)) = verify_marks(&line) {
             match finals.iter_mut().find(|(h, _)| *h == head) {
                 Some((_, c)) if checks.len() > c.len() => *c = checks,
@@ -169,10 +170,10 @@ fn signal(frames: usize, rate: u32, seed: u64, hiss: bool) -> Vec<[f64; 2]> {
             let t = n as f64 / rate as f64;
             let mut s = [0.0; 2];
             for (k, (f, a)) in tones.iter().enumerate() {
-                let level = a * (0.5 + 0.5 * (t * 0.7 + k as f64).sin()) / 24.0;
-                let v = level * (std::f64::consts::TAU * f * t).sin();
+                let level = a * (0.5 + 0.5 * libm::sin(t * 0.7 + k as f64)) / 24.0;
+                let v = level * libm::sin(std::f64::consts::TAU * f * t);
                 s[0] += v;
-                s[1] += v * (0.6 + 0.4 * (k as f64).cos());
+                s[1] += v * (0.6 + 0.4 * libm::cos(k as f64));
             }
             if hiss {
                 s[0] += 0.01 * noise.next();
@@ -290,11 +291,8 @@ fn synthetic_shows() {
     snap("details_mp3", cli(dir, "details", &[&format!("{MUFFLED} [MP3 V0]")], &[]));
     snap("spectrogram", cli(dir, "spectrogram", &[&format!("{HIRES}/01 - Hires.flac")], &[]));
     snap("files", file_sums(dir));
-    // The spectrogram's image, exactly: not on Windows, whose C library rounds the last digit
-    // of log and pow otherwise than glibc (a few pixels one unit apart).
-    if !cfg!(windows) {
-        snap("images", png_sums(dir));
-    }
+    // The spectrogram's image, exactly (the same on Windows: libm, not the system's maths).
+    snap("images", png_sums(dir));
 }
 
 /// Tag and rename (tags, new names, .md5 and .sfv updated), then undo-tagging: every file
@@ -367,9 +365,7 @@ fn testdata_shows() {
         snap("real_to_flac", cli(dir, "to-flac", &["ape"], &[]));
         snap("real_mp3_v0", cli(dir, "mp3-v0", &["shn"], &[]));
         snap("real_files", file_sums(dir));
-        if !cfg!(windows) {
-            snap("real_images", png_sums(dir));
-        }
+        snap("real_images", png_sums(dir));
     });
 }
 

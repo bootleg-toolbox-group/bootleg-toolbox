@@ -559,7 +559,7 @@ fn rounded_outline(rect: egui::Rect, radius: f32) -> Vec<egui::Pos2> {
     for (centre, start) in corners {
         for step in 0..=8 {
             let a = (start + step as f32 * 90.0 / 8.0).to_radians();
-            points.push(centre + egui::vec2(a.cos(), a.sin()) * r);
+            points.push(centre + egui::vec2(libm::cosf(a), libm::sinf(a)) * r);
         }
     }
     points.push(points[0]);
@@ -1330,7 +1330,7 @@ impl App {
                     Level::Warn,
                 ));
                 for (path, scan) in real.iter().take(8) {
-                    ui.label(format!("    {}   (peak {:.2} dBFS)", file_name(path), 20.0 * scan.peak.max(1e-12).log10()));
+                    ui.label(format!("    {}   (peak {:.2} dBFS)", file_name(path), 20.0 * libm::log10(scan.peak.max(1e-12))));
                 }
                 if real.len() > 8 {
                     ui.label("    ...");
