@@ -106,8 +106,30 @@ jobs:
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
 
+      # Every snapshot is compared (not only up to the first difference) and each one that
+      # differs is kept as a .snap.new file, downloadable from the run.
       - name: Tests
         run: cargo test --release --target x86_64-pc-windows-gnu
+        env:
+          INSTA_UPDATE: new
+          INSTA_FORCE_PASS: "1"
+
+      - name: Snapshots
+        shell: bash
+        run: |
+          shopt -s nullglob
+          new=(tests/snapshots/*.snap.new)
+          if [ ${#new[@]} -gt 0 ]; then
+            for f in "${new[@]}"; do echo "== $f"; diff "${f%.new}" "$f" || true; done
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: windows-snapshots-${{ github.sha }}
+          path: tests/snapshots/*.snap.new
+          retention-days: 14
 
   release:
     needs: [build, windows]

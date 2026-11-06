@@ -1,3 +1,6 @@
+// Modified for Bootleg Toolbox: entropy state chosen by version (older value coding of
+// versions 3950 to 3989), and damaged seek tables no longer overflow (see CHANGELOG.md).
+
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::bitreader::BitReader;

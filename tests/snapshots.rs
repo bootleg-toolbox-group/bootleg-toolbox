@@ -269,6 +269,9 @@ fn synthetic_shows() {
     let all = [SHOW, HIRES, MUFFLED, WAVS];
     let snap = |name: &str, text: String| insta::assert_snapshot!(name, text);
 
+    // The generated input itself: a difference here is in the test, not in the program.
+    snap("inputs", file_sums(dir));
+
     snap("details_wav", cli(dir, "details", &all, &[]));
     snap("to_flac", cli(dir, "to-flac", &[SHOW, HIRES, MUFFLED], &[]));
     for show in [SHOW, HIRES, MUFFLED] {

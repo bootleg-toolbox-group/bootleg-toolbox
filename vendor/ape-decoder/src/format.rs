@@ -1,3 +1,5 @@
+// Modified for Bootleg Toolbox: a damaged seek table no longer overflows (see CHANGELOG.md).
+
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::error::{ApeError, ApeResult};

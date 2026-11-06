@@ -1,5 +1,8 @@
 /// Neural Network Filter for the Monkey's Audio decoder.
 ///
+/// Modified for Bootleg Toolbox: the i16 dot product wraps on overflow, as the reference
+/// decoder does (see CHANGELOG.md).
+///
 /// Two concrete types instead of generics, matching the C++ template
 /// instantiations:
 ///
