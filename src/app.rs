@@ -797,6 +797,50 @@ struct Running {
     quiet: bool,
     /// The task writes files next to the shows.
     makes_files: bool,
+    /// The work of each file (its samples, or bytes when unknown) and its length in seconds:
+    /// progress and time left go by the work done, not by the number of files (the biggest
+    /// files go first).
+    started: Instant,
+    work: HashMap<PathBuf, (f64, f64)>,
+    /// Time left as shown, smoothed, and when it was last updated.
+    eta: Option<(Instant, f64)>,
+}
+
+impl Running {
+    /// Share of the work done, audio seconds done and in all, time left (raw) once it can be told.
+    fn progress(&self) -> (f32, f64, f64, Option<f64>) {
+        let (mut all, mut done, mut secs, mut secs_done) = (0.0, 0.0, 0.0, 0.0);
+        for (path, (w, s)) in &self.work {
+            all += w;
+            secs += s;
+            if self.done_files.contains(path) {
+                done += w;
+                secs_done += s;
+            }
+        }
+        // Tasks that answer by show (torrents, tagging): by the count they give.
+        let fraction = if done > 0.0 && all > 0.0 {
+            done / all
+        } else if self.total > 0 {
+            self.done as f64 / self.total as f64
+        } else {
+            0.0
+        };
+        let elapsed = self.started.elapsed().as_secs_f64();
+        // Nothing in the first 15 s nor before 5 %: the first (biggest) files are still running.
+        let left = (elapsed >= 15.0 && (0.05..1.0).contains(&fraction)).then(|| elapsed * (1.0 - fraction) / fraction);
+        (fraction as f32, secs_done, secs, left)
+    }
+}
+
+/// "about 4 min left", "about 1 h 20 min left", "less than a minute left".
+fn time_left(seconds: f64) -> String {
+    let minutes = libm::round(seconds / 60.0) as u64;
+    match minutes {
+        0 => "less than a minute left".to_string(),
+        1..=89 => format!("about {minutes} min left"),
+        _ => format!("about {} h {:02} min left", minutes / 60, minutes % 60),
+    }
 }
 
 pub struct App {
@@ -1486,6 +1530,19 @@ impl App {
         let open_after = if matches!(op, Op::Torrent(_)) && self.opt.open_after_torrent { shows.iter().map(|s| s.root.clone()).collect() } else { Vec::new() };
         let makes_files = matches!(op, Op::Create | Op::Torrent(_) | Op::Convert { .. } | Op::Mp3(_) | Op::FixSbe | Op::CleanWav | Op::ExtractAudio(_) | Op::Setlist);
         let task_files = files.iter().cloned().collect();
+        let sizes: Vec<(f64, f64)> = files
+            .iter()
+            .map(|f| match self.info.get(f) {
+                Some(i) if i.samples > 0 => ((i.samples * i.channels.max(1) as u64) as f64, i.seconds()),
+                // Unknown yet: bytes, about two per sample.
+                _ => (std::fs::metadata(f).map(|m| m.len() as f64 / 2.0).unwrap_or(1.0), 0.0),
+            })
+            .collect();
+        // A file costs its samples plus a fixed part (the trace searches look at its first minute
+        // whatever its length): as much as an average file. Measured against real runs, the time
+        // left then stays within a fraction of a minute on the test sets.
+        let mean = (sizes.iter().map(|s| s.0).sum::<f64>() / sizes.len().max(1) as f64).max(1.0);
+        let work = files.iter().cloned().zip(sizes.into_iter().map(|(w, secs)| (w / mean + 1.0, secs))).collect();
         let roots = shows.iter().map(|s| s.root.clone()).collect();
         ops::spawn(op, shows, files, self.opt.clone(), tx, cancel.clone());
         self.running = Some(Running {
@@ -1503,6 +1560,9 @@ impl App {
             tally: [0; 3],
             quiet,
             makes_files,
+            started: Instant::now(),
+            work,
+            eta: None,
         });
     }
 
@@ -3024,13 +3084,33 @@ impl App {
                     });
                     ui.add_space(6.0);
                 }
-                if let Some(r) = &self.running {
-                    let fraction = if r.total > 0 { r.done as f32 / r.total as f32 } else { 0.0 };
+                if let Some(r) = &mut self.running {
+                    let (fraction, secs_done, secs, left) = r.progress();
+                    // The time left moves smoothly: updated once a second, half-way to the new estimate.
+                    if let Some(raw) = left {
+                        let now = Instant::now();
+                        r.eta = Some(match r.eta {
+                            Some((when, shown)) if when.elapsed() < Duration::from_secs(1) => (when, shown),
+                            Some((when, shown)) => (now, 0.5 * (shown - when.elapsed().as_secs_f64()).max(0.0) + 0.5 * raw),
+                            None => (now, raw),
+                        });
+                    }
+                    let audio = |seconds: f64| format!("{} h {:02} min", (seconds / 3600.0) as u64, ((seconds % 3600.0) / 60.0) as u64);
                     ui.add(egui::ProgressBar::new(fraction).desired_width(220.0).text(format!("{}/{}", r.done, r.total)));
                     // A vivid colour, so that a running operation cannot be missed.
                     let busy = if DARK_THEME.load(Ordering::Relaxed) { Color32::from_rgb(196, 128, 255) } else { Color32::from_rgb(128, 36, 204) };
                     ui.add(egui::Spinner::new().color(busy));
                     ui.label(RichText::new(format!("{}...", r.label)).color(busy).strong());
+                    // How much music is done, when the lengths are known.
+                    if secs > 0.0 {
+                        ui.label(RichText::new(format!("{} of {} of audio", audio(secs_done), audio(secs))).color(busy));
+                    }
+                    // Time left: said to be coming until it can be told (15 s, 5 % of the work).
+                    let eta = match (r.eta, left.is_some()) {
+                        (Some((_, shown)), true) => time_left(shown),
+                        _ => "estimating time left...".to_string(),
+                    };
+                    ui.label(RichText::new(eta).color(busy));
                 } else if let Some((text, when)) = &self.flash {
                     if when.elapsed() < Duration::from_secs(15) {
                         // At most half the bar, wrapped, so that the selection stays readable too.
