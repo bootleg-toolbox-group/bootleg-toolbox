@@ -1341,6 +1341,10 @@ impl App {
         cc.egui_ctx.all_styles_mut(|style| {
             style.spacing.button_padding = egui::vec2(10.0, 5.0);
             style.spacing.interact_size.y = style.spacing.interact_size.y.max(28.0);
+            // A new menu is first laid out within this size: at egui's 400 points, the long
+            // menus (Tools, View, right-click) scrolled even on a tall screen. They stay
+            // within the window (`fit_below`, `fit_window`).
+            style.spacing.default_area_size.y = 4000.0;
         });
         // egui's light theme writes text in mid grey (80/255, and fainter for weak text):
         // darker, for reading on white.
@@ -3225,7 +3229,7 @@ impl App {
                         ui.close_menu();
                         actions.push(Action::ShareCard(None));
                     }
-                    if ui.add_enabled(!busy, egui::Button::new("↶ Undo tagging...")).on_hover_text(UNDO_TIP).clicked() {
+                    if ui.add_enabled(!busy, egui::Button::new("↩ Undo tagging...")).on_hover_text(UNDO_TIP).clicked() {
                         ui.close_menu();
                         self.open_undo_dialog();
                     }
@@ -3708,7 +3712,7 @@ impl App {
                     ui.add(egui::Label::new(RichText::new(&b.detail).size(12.0).color(ink.gamma_multiply(0.85))).truncate());
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    close = ui.add(egui::Button::new(RichText::new("✕").color(ink)).frame(false)).on_hover_text("Close").clicked();
+                    close = ui.add(egui::Button::new(RichText::new("×").size(18.0).color(ink)).frame(false)).on_hover_text("Close").clicked();
                     share = ui.add_enabled(self.running.is_none(), egui::Button::new("🖼 Share card...")).on_hover_text(SHARE_TIP).clicked();
                     if let Some((level, n)) = b.filter {
                         if ui.button(format!("Show the {n}")).clicked() {
@@ -3788,7 +3792,7 @@ impl App {
                                         }
                                     });
                                 });
-                                if ui.add(egui::Button::new(RichText::new("✕").color(p.weak)).frame(false)).on_hover_text("Close").clicked() {
+                                if ui.add(egui::Button::new(RichText::new("×").size(18.0).color(p.weak)).frame(false)).on_hover_text("Close").clicked() {
                                     closed.push(i);
                                 }
                             });
@@ -5493,7 +5497,7 @@ fn clean_wav_button(ui: &mut egui::Ui, disabled: bool, actions: &mut Vec<Action>
     let tip = "Rewrite WAV files with only their format and their sound, in the canonical layout: extra chunks (LIST, id3, bext...), \
                non-standard headers and stray bytes are left out. Copies go to a WAV-cleaned folder and are checked to hold the same \
                sound; the originals are not touched. Some burning and SBE tools stumble on WAVs that are not canonical.";
-    if ui.add_enabled(!disabled, egui::Button::new("🧹 Clean WAV headers")).on_hover_text(tip).clicked() {
+    if ui.add_enabled(!disabled, egui::Button::new("✨ Clean WAV headers")).on_hover_text(tip).clicked() {
         ui.close_menu();
         actions.push(Action::Run(Op::CleanWav));
     }
@@ -5527,7 +5531,7 @@ fn setlist_button(ui: &mut egui::Ui, disabled: bool, actions: &mut Vec<Action>) 
 fn torrent_check_button(ui: &mut egui::Ui, disabled: bool, actions: &mut Vec<Action>) {
     let tip = "Check the show against a .torrent file: every piece is hashed again, and damaged, missing or resized files are named. \
                The torrent's folder is found by its name in the list or next to the .torrent. You can also drop .torrent files on the window.";
-    if ui.add_enabled(!disabled, egui::Button::new("🧲 Check against torrent...")).on_hover_text(tip).clicked() {
+    if ui.add_enabled(!disabled, egui::Button::new("🔗 Check against torrent...")).on_hover_text(tip).clicked() {
         ui.close_menu();
         actions.push(Action::TorrentCheck);
     }

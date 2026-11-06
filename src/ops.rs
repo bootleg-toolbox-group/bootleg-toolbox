@@ -667,7 +667,7 @@ pub fn describe_details(info: &AudioInfo, last_of_disc: bool) -> (String, String
     for (state, full) in &checks {
         let mark = match state {
             Some(true) => '✔',
-            Some(false) => '✘',
+            Some(false) => '✖',
             None => '–',
         };
         tooltip.push_str(&format!("{mark} {full}\n"));
