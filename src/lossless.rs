@@ -1365,7 +1365,8 @@ fn build_report(title: String, verdict: &Verdict, f: &Facts) -> Report {
         add(
             "Opus coding traces",
             if t.found() {
-                format!("found: {} of {} frames are Opus codewords (frames at sample {} of 48 kHz)", t.clean, t.frames, t.offset)
+                let between = if t.phase > 0 { format!(" + {}/{}", t.phase, t.phases) } else { String::new() };
+                format!("found: {} of {} frames are Opus codewords (frames at sample {}{between} of 48 kHz)", t.clean, t.frames, t.offset)
             } else {
                 format!("none ({} of {} frames)", t.clean, t.frames)
             },

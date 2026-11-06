@@ -36,8 +36,11 @@ pub struct Trace {
     /// Frames whose bands are Opus codewords (in the better of mid and side).
     pub clean: usize,
     pub frames: usize,
-    /// Position of the Opus frames at 48 kHz (0-959).
+    /// Position of the Opus frames at 48 kHz (0-959), and between two samples: `phase` of
+    /// `phases` (a 44.1 kHz file cut out of a longer conversion).
     pub offset: usize,
+    pub phase: usize,
+    pub phases: usize,
 }
 
 impl Trace {
@@ -78,21 +81,36 @@ impl Collector {
 
     /// Runs the detector: None when there is too little audio.
     pub fn detect(self) -> Option<Trace> {
-        let to48 = |x: &[f32]| -> Vec<f64> {
-            let x: Vec<f64> = x.iter().map(|&v| v as f64).collect();
-            let mut y = if self.rate == 48000 { x } else { resample_to_48k(&x, self.rate) };
-            // Undo the de-emphasis: y[n] - c y[n-1], from the end.
-            for i in (1..y.len()).rev() {
-                y[i] -= PREEMPHASIS * y[i - 1];
+        let resampler = (self.rate != 48000).then(|| Resampler::new(self.rate));
+        let to64 = |x: &[f32]| -> Vec<f64> { x.iter().map(|&v| v as f64).collect() };
+        let inputs = [to64(&self.mid), if self.channels == 2 { to64(&self.side) } else { Vec::new() }];
+        let to48 = |x: &[f64], phase: usize| -> Vec<f64> {
+            if x.is_empty() {
+                return Vec::new();
             }
+            let mut y = match &resampler {
+                Some(r) => r.run(x, phase),
+                None => x.to_vec(),
+            };
+            deemphasis(&mut y);
             y
         };
-        let mid = to48(&self.mid);
-        let side = if self.channels == 2 { to48(&self.side) } else { Vec::new() };
+        let mut mid = to48(&inputs[0], 0);
+        let mut side = to48(&inputs[1], 0);
         if mid.len() < 40 * N {
             return None;
         }
-        let offset = align(&mid, &side);
+        let phases = resampler.as_ref().map_or(1, |r| r.down);
+        let (mut offset, clean, near) = align(&mid, &side, phases > 1);
+        let mut phase = 0;
+        // A cut-out file: the Opus frames may lie between two samples of the 48 kHz grid.
+        if let Some(r) = resampler.as_ref().filter(|r| r.down > 1 && !near.is_empty()) {
+            if let Some((p, o)) = align_phases(r, &inputs, &mid, clean, &near) {
+                (phase, offset) = (p, o);
+                mid = to48(&inputs[0], phase);
+                side = to48(&inputs[1], phase);
+            }
+        }
         // Every frame on its own (in parallel): (loud enough, clean).
         let count = |x: &[f64]| -> (usize, usize) {
             if x.is_empty() {
@@ -118,7 +136,7 @@ impl Collector {
         let (mc, mf) = count(&mid);
         let (sc, sf) = count(&side);
         let (clean, frames) = if sc > mc { (sc, sf) } else { (mc, mf) };
-        Some(Trace { clean, frames, offset })
+        Some(Trace { clean, frames, offset, phase, phases })
     }
 }
 
@@ -214,24 +232,20 @@ fn codeword_error_plain(piece: &[f64]) -> f64 {
 /// The frame position: where the band above 20 kHz, which CELT leaves empty, is emptiest, or
 /// where the middle bands of the loudest frames are most often codewords (a 16-bit file's
 /// rounding noise can fill the empty band as much as a misaligned clean stream leaks); the best
-/// candidates of both are then compared by their clean frames.
-fn align(mid: &[f64], side: &[f64]) -> usize {
-    const PROBE: usize = 16;
-    // The loudest frames: a show often opens on silence, crowd or a fade, where the leak
-    // above 20 kHz is only noise.
-    let blocks = (mid.len() / N).saturating_sub(3);
-    let mut loudest: Vec<(f64, usize)> = (1..blocks).map(|f| (energy(&mid[f * N..(f + 1) * N]), f)).collect();
-    loudest.sort_by(|a, b| b.0.total_cmp(&a.0));
-    let probe: Vec<usize> = loudest.iter().take(PROBE).map(|&(_, f)| f).collect();
+/// candidates of both are then compared by their clean frames. Returns the offset, its clean
+/// frames and, when `near` is set, the offsets whose low bands come closest to codewords.
+fn align(mid: &[f64], side: &[f64], near: bool) -> (usize, usize, Vec<usize>) {
+    let probe = loudest(mid, PROBE);
+    let near_probe = if near { loudest(mid, NEAR_PROBE) } else { Vec::new() };
     // Every position on its own (in parallel), in order.
-    let measured: Vec<(f64, usize)> = (0..N)
+    let measured: Vec<(f64, usize, usize)> = (0..N)
         .into_par_iter()
         .map_init(
             || (Mdct::new(), vec![0f64; N]),
             |(mdct, out), offset| {
-                let (mut leak, mut words) = (0.0, 0usize);
+                let (mut leak, mut words, mut close) = (0.0, 0usize, 0usize);
                 for x in [mid, side].into_iter().filter(|x| !x.is_empty()) {
-                    let mut ratios = Vec::with_capacity(PROBE);
+                    let mut ratios = Vec::with_capacity(probe.len());
                     for &f in &probe {
                         let start = offset + N / 2 + f * N;
                         if start + 2 * N > x.len() {
@@ -242,12 +256,16 @@ fn align(mid: &[f64], side: &[f64]) -> usize {
                         if total > 0.0 {
                             ratios.push(energy(&out[800..]) / total);
                         }
-                        // Bands 8 to 14 (16 to 32 lines): seldom codewords by chance.
-                        words += BANDS[8..16].windows(2).filter(|b| band_ok(&out[b[0]..b[1]])).count();
+                        words += middle_words(out);
                     }
                     leak += crate::dsp::median(&ratios).unwrap_or(1.0);
+                    for &f in &near_probe {
+                        let start = offset + N / 2 + f * N;
+                        mdct.forward(&x[start..start + 2 * N], out);
+                        close += BANDS[..9].windows(2).filter(|b| near_word(&out[b[0]..b[1]])).count();
+                    }
                 }
-                (leak, words)
+                (leak, words, close)
             },
         )
         .collect();
@@ -260,29 +278,132 @@ fn align(mid: &[f64], side: &[f64]) -> usize {
     let candidates: Vec<usize> = leaks.iter().take(6).map(|l| l.1).chain(codewords.iter().take(6).map(|c| c.1)).collect();
     let cleans: Vec<usize> = candidates
         .par_iter()
-        .map_init(
-            || (Mdct::new(), vec![0f64; N]),
-            |(mdct, out), &offset| {
-                let mut clean = 0;
-                for x in [mid, side].into_iter().filter(|x| !x.is_empty()) {
-                    for f in 1..=300 {
-                        let start = offset + N / 2 + f * N;
-                        if start + 2 * N > x.len() {
-                            break;
-                        }
-                        mdct.forward(&x[start..start + 2 * N], out);
-                        if clean_bands(out) >= CLEAN_BANDS {
-                            clean += 1;
-                        }
-                    }
-                }
-                clean
-            },
-        )
+        .map_init(|| (Mdct::new(), vec![0f64; N]), |(mdct, out), &offset| [mid, side].iter().map(|x| first_clean(mdct, out, x, offset)).sum())
         .collect();
     for (&offset, &clean) in candidates.iter().zip(&cleans) {
         if clean > best.0 {
             best = (clean, offset);
+        }
+    }
+    let mut close: Vec<(usize, usize)> = measured.iter().enumerate().map(|(offset, m)| (m.2, offset)).collect();
+    close.sort_by_key(|c| std::cmp::Reverse(c.0));
+    // Only an offset that stands out: genuine audio stays within a few bands of the tenth best.
+    let stands_out = near && close[0].0 >= close[9].0 + NEAR_MARGIN;
+    let near = if stands_out { close.iter().take(NEAR_OFFSETS).map(|c| c.1).collect() } else { Vec::new() };
+    (best.1, best.0, near)
+}
+
+/// Frames probed: by the alignment, and for the low bands that point to the phase search.
+const PROBE: usize = 16;
+const NEAR_PROBE: usize = 48;
+/// Offsets tried at every phase (and their neighbours): the best by their low bands, when the
+/// first has this many more bands than the tenth.
+const NEAR_OFFSETS: usize = 2;
+const NEAR_MARGIN: usize = 8;
+
+/// Close to a codeword (whole piece, K up to 32, a looser tolerance): a low band stays so when
+/// the frames lie a fraction of a sample away from the 48 kHz grid, where `band_ok` fails.
+fn near_word(piece: &[f64]) -> bool {
+    let norm = energy(piece).sqrt();
+    if norm < 1e-12 {
+        return false;
+    }
+    let l1: f64 = piece.iter().map(|v| v.abs()).sum::<f64>() / norm;
+    (1..=32).any(|k| {
+        let scale = k as f64 / l1;
+        let (mut dot, mut yy) = (0.0, 0.0);
+        for &v in piece {
+            let y = libm::round(v / norm * scale);
+            dot += y * v / norm;
+            yy += y * y;
+        }
+        yy > 0.0 && (2.0 - 2.0 * dot / yy.sqrt()).max(0.0).sqrt() < 0.02
+    })
+}
+
+/// Frames probed by the alignment: the loudest (a show often opens on silence, crowd or a
+/// fade, where the leak above 20 kHz is only noise).
+fn loudest(mid: &[f64], count: usize) -> Vec<usize> {
+    let blocks = (mid.len() / N).saturating_sub(3);
+    let mut loudest: Vec<(f64, usize)> = (1..blocks).map(|f| (energy(&mid[f * N..(f + 1) * N]), f)).collect();
+    loudest.sort_by(|a, b| b.0.total_cmp(&a.0));
+    loudest.iter().take(count).map(|&(_, f)| f).collect()
+}
+
+/// Bands 8 to 14 (16 to 32 lines) that are codewords: seldom by chance.
+fn middle_words(out: &[f64]) -> usize {
+    BANDS[8..16].windows(2).filter(|b| band_ok(&out[b[0]..b[1]])).count()
+}
+
+/// Clean frames among the first 300 at `offset` (`x` from its first 48 kHz sample).
+fn first_clean(mdct: &mut Mdct, out: &mut [f64], x: &[f64], offset: usize) -> usize {
+    let mut clean = 0;
+    for f in 1..=300 {
+        let start = offset + N / 2 + f * N;
+        if start + 2 * N > x.len() {
+            break;
+        }
+        mdct.forward(&x[start..start + 2 * N], out);
+        if clean_bands(out) >= CLEAN_BANDS {
+            clean += 1;
+        }
+    }
+    clean
+}
+
+/// The other phases of the 48 kHz grid (a file cut out of a longer 44.1 kHz conversion starts
+/// between two of the original samples): the `near` offsets and their neighbours, at every
+/// phase, scored by bands 0 to 14 of the loudest frames, the best few then compared by their
+/// clean frames. Some((phase, offset)) when one has more clean frames than `clean`, the best of
+/// phase 0.
+fn align_phases(r: &Resampler, inputs: &[Vec<f64>; 2], mid0: &[f64], clean: usize, near: &[usize]) -> Option<(usize, usize)> {
+    const CANDIDATES: usize = 6;
+    let probe = loudest(mid0, PROBE);
+    let inputs: Vec<&[f64]> = inputs.iter().map(|x| x.as_slice()).filter(|x| !x.is_empty()).collect();
+    let mut offsets: Vec<usize> = near.iter().flat_map(|&o| [(o + N - 1) % N, o, (o + 1) % N]).collect();
+    offsets.sort();
+    offsets.dedup();
+    // Each phase on its own (in parallel), its offsets in order: (words, phase, offset).
+    let mut scored: Vec<(usize, usize, usize)> = (1..r.down)
+        .into_par_iter()
+        .map_init(
+            || (Mdct::new(), vec![0f64; N]),
+            |(mdct, out), phase| {
+                let mut words = vec![0usize; offsets.len()];
+                for x in &inputs {
+                    for &f in &probe {
+                        let seg = r.range(x, phase, f * N + N / 2, f * N + N / 2 + 3 * N);
+                        if seg.len() < 3 * N {
+                            continue;
+                        }
+                        for (&offset, w) in offsets.iter().zip(words.iter_mut()) {
+                            mdct.forward(&seg[offset..offset + 2 * N], out);
+                            *w += BANDS[..16].windows(2).filter(|b| band_ok(&out[b[0]..b[1]])).count();
+                        }
+                    }
+                }
+                offsets.iter().zip(words).map(|(&offset, w)| (w, phase, offset)).collect::<Vec<_>>()
+            },
+        )
+        .flatten()
+        .collect();
+    scored.sort_by_key(|&(w, phase, offset)| (std::cmp::Reverse(w), phase, offset));
+    scored.truncate(CANDIDATES);
+    let cleans: Vec<usize> = scored
+        .par_iter()
+        .map_init(
+            || (Mdct::new(), vec![0f64; N]),
+            |(mdct, out), &(_, phase, offset)| {
+                // The first 300 frames, from 48 kHz sample 0 (`first_clean` counts from there).
+                let end = offset + N / 2 + 302 * N;
+                inputs.iter().map(|x| first_clean(mdct, out, &r.range(x, phase, 0, end), offset)).sum()
+            },
+        )
+        .collect();
+    let mut best = (clean, None);
+    for (&(_, phase, offset), &c) in scored.iter().zip(&cleans) {
+        if c > best.0 {
+            best = (c, Some((phase, offset)));
         }
     }
     best.1
@@ -439,63 +560,96 @@ impl Bluestein {
     }
 }
 
-/// Resamples to 48 kHz with a windowed-sinc polyphase filter (Kaiser, flat to 20 kHz).
-fn resample_to_48k(x: &[f64], rate: u32) -> Vec<f64> {
-    let gcd = |mut a: usize, mut b: usize| {
-        while b != 0 {
-            (a, b) = (b, a % b);
-        }
-        a
-    };
-    let g = gcd(48000, rate as usize);
-    let (up, down) = (48000 / g, rate as usize / g);
-    // Cut-off at the lower of the two Nyquist rates, a little below it, in input samples.
-    let cutoff = 0.5 * (48000.0f64 / rate as f64).min(1.0) * 0.955;
-    const HALF: usize = 96;
-    let beta = 10.0;
-    let bessel = |v: f64| {
-        let (mut sum, mut term, mut k) = (1.0, 1.0, 1.0);
-        while term > 1e-16 * sum {
-            term *= (v / (2.0 * k)).powi(2);
-            sum += term;
-            k += 1.0;
-        }
-        sum
-    };
-    let norm = bessel(beta);
-    // Taps of each phase p (output time = input time + p/up), from -HALF+1 to HALF.
-    let taps: Vec<Vec<f64>> = (0..up)
-        .map(|p| {
-            let frac = p as f64 / up as f64;
-            (0..2 * HALF)
-                .map(|j| {
-                    let t = j as f64 - (HALF as f64 - 1.0) - frac;
-                    let sinc = if t.abs() < 1e-12 { 2.0 * cutoff } else { libm::sin(2.0 * std::f64::consts::PI * cutoff * t) / (std::f64::consts::PI * t) };
-                    let r = t / HALF as f64;
-                    let window = if r.abs() >= 1.0 { 0.0 } else { bessel(beta * (1.0 - r * r).sqrt()) / norm };
-                    sinc * window
-                })
-                .collect()
-        })
-        .collect();
-    let out_len = x.len() * up / down;
-    // Every output sample on its own (in parallel).
-    (0..out_len)
-        .into_par_iter()
-        .map(|j| {
-            let pos = j * down;
-            let (i, p) = (pos / up, pos % up);
-            let h = &taps[p];
-            let mut acc = 0.0;
-            for (tap, coef) in h.iter().enumerate() {
-                let idx = i as isize + tap as isize - (HALF as isize - 1);
-                if idx >= 0 && (idx as usize) < x.len() {
-                    acc += x[idx as usize] * coef;
-                }
+/// Undoes CELT's de-emphasis: y[n] - c y[n-1], from the end.
+fn deemphasis(y: &mut [f64]) {
+    for i in (1..y.len()).rev() {
+        y[i] -= PREEMPHASIS * y[i - 1];
+    }
+}
+
+/// Resampling to 48 kHz with a windowed-sinc polyphase filter (Kaiser, flat to 20 kHz). Output
+/// sample j is taken at input time (j * down + phase) / up: a phase (0 to down - 1) moves the
+/// 48 kHz grid by phase/down of a sample.
+struct Resampler {
+    up: usize,
+    down: usize,
+    /// Taps of each sub-sample position p (output time = input time + p/up), from -HALF+1 to HALF.
+    taps: Vec<Vec<f64>>,
+}
+
+const HALF: usize = 96;
+
+impl Resampler {
+    fn new(rate: u32) -> Resampler {
+        let gcd = |mut a: usize, mut b: usize| {
+            while b != 0 {
+                (a, b) = (b, a % b);
             }
-            acc
-        })
-        .collect()
+            a
+        };
+        let g = gcd(48000, rate as usize);
+        let (up, down) = (48000 / g, rate as usize / g);
+        // Cut-off at the lower of the two Nyquist rates, a little below it, in input samples.
+        let cutoff = 0.5 * (48000.0f64 / rate as f64).min(1.0) * 0.955;
+        let beta = 10.0;
+        let bessel = |v: f64| {
+            let (mut sum, mut term, mut k) = (1.0, 1.0, 1.0);
+            while term > 1e-16 * sum {
+                term *= (v / (2.0 * k)).powi(2);
+                sum += term;
+                k += 1.0;
+            }
+            sum
+        };
+        let norm = bessel(beta);
+        let taps = (0..up)
+            .map(|p| {
+                let frac = p as f64 / up as f64;
+                (0..2 * HALF)
+                    .map(|j| {
+                        let t = j as f64 - (HALF as f64 - 1.0) - frac;
+                        let sinc = if t.abs() < 1e-12 { 2.0 * cutoff } else { libm::sin(2.0 * std::f64::consts::PI * cutoff * t) / (std::f64::consts::PI * t) };
+                        let r = t / HALF as f64;
+                        let window = if r.abs() >= 1.0 { 0.0 } else { bessel(beta * (1.0 - r * r).sqrt()) / norm };
+                        sinc * window
+                    })
+                    .collect()
+            })
+            .collect();
+        Resampler { up, down, taps }
+    }
+
+    /// Output length for `n` input samples.
+    fn len(&self, n: usize, phase: usize) -> usize {
+        (n * self.up).saturating_sub(phase) / self.down
+    }
+
+    fn sample(&self, x: &[f64], j: usize, phase: usize) -> f64 {
+        let pos = j * self.down + phase;
+        let (i, p) = (pos / self.up, pos % self.up);
+        let mut acc = 0.0;
+        for (tap, coef) in self.taps[p].iter().enumerate() {
+            let idx = i as isize + tap as isize - (HALF as isize - 1);
+            if idx >= 0 && (idx as usize) < x.len() {
+                acc += x[idx as usize] * coef;
+            }
+        }
+        acc
+    }
+
+    /// The whole signal (every output sample on its own, in parallel).
+    fn run(&self, x: &[f64], phase: usize) -> Vec<f64> {
+        (0..self.len(x.len(), phase)).into_par_iter().map(|j| self.sample(x, j, phase)).collect()
+    }
+
+    /// Output samples `from..to` (fewer at the end of the signal), de-emphasis undone as in the
+    /// whole signal.
+    fn range(&self, x: &[f64], phase: usize, from: usize, to: usize) -> Vec<f64> {
+        let first = from.saturating_sub(1);
+        let mut y: Vec<f64> = (first..to.min(self.len(x.len(), phase))).map(|j| self.sample(x, j, phase)).collect();
+        deemphasis(&mut y);
+        y.split_off((from - first).min(y.len()))
+    }
 }
 
 #[cfg(test)]
@@ -551,10 +705,23 @@ mod tests {
     }
 
     #[test]
+    fn a_range_is_the_whole_signal_cut() {
+        // The same samples, de-emphasis included, at every phase.
+        let x = noise(4000, 5);
+        let r = Resampler::new(44100);
+        for phase in [0, 1, 85, 146] {
+            let mut whole = r.run(&x, phase);
+            deemphasis(&mut whole);
+            same_bits(&r.range(&x, phase, 0, 1000), &whole[..1000]);
+            same_bits(&r.range(&x, phase, 1234, 2345), &whole[1234..2345]);
+        }
+    }
+
+    #[test]
     fn resampling_keeps_a_tone() {
         // A 1 kHz tone at 44.1 kHz comes out as the same tone at 48 kHz.
         let x: Vec<f64> = (0..44100).map(|i| libm::sin(2.0 * std::f64::consts::PI * 1000.0 * i as f64 / 44100.0)).collect();
-        let y = resample_to_48k(&x, 44100);
+        let y = Resampler::new(44100).run(&x, 0);
         let worst = (2000..46000).map(|i| (y[i] - libm::sin(2.0 * std::f64::consts::PI * 1000.0 * i as f64 / 48000.0)).abs()).fold(0.0, f64::max);
         assert!(worst < 1e-4, "{worst}");
     }
