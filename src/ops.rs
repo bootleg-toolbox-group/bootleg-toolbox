@@ -172,6 +172,8 @@ pub struct Options {
     pub legacy_cleaned: bool,
     /// Compact view: fewer columns (Format then gives bits and rate), tighter rows.
     pub compact: bool,
+    /// Collapsed view: one row per show, the tracks folded (each show can still be unfolded).
+    pub collapsed_view: bool,
     /// Table columns the user chose to hide (by title).
     pub hidden_columns: Vec<String>,
     /// After a torrent is made: open the show's .ffp and info file, to copy them into the
@@ -220,6 +222,7 @@ impl Default for Options {
             tag_rename: true,
             log_open: false,
             compact: false,
+            collapsed_view: false,
             always_on_top: false,
             shell_integration: false,
             legacy_cleaned: false,
@@ -310,6 +313,33 @@ impl Op {
             Op::ExtractAudio(_) => "Extracting audio",
             Op::Rollback { .. } => "Rolling back tagging",
             Op::AfterFlac { .. } => "Tidying up after the conversion",
+        }
+    }
+
+    /// The task's short name, as in the menus (the status bar's "Results of").
+    pub fn name(&self) -> &'static str {
+        match self {
+            Op::Details { .. } => "Details",
+            Op::Verify => "Verify checksums",
+            Op::Create => "Create checksums",
+            Op::Test => "Decode test",
+            Op::Torrent(_) => "Torrent",
+            Op::Spectrogram => "Spectrogram",
+            Op::Lossless => "Lossless?",
+            Op::Speed => "Speed?",
+            Op::Convert { target: Target::Flac, .. } => "To FLAC",
+            Op::Convert { target: Target::Wav, .. } => "To WAV",
+            Op::ScanFloat => "Float WAVs",
+            Op::Mp3(_) => "MP3",
+            Op::FixSbe => "Fix SBE",
+            Op::CleanWav => "Clean WAV",
+            Op::TorrentCheck(_) => "Check against torrent",
+            Op::MediaInfo(_) => "Media info",
+            Op::Tag(_) => "Tag and rename",
+            Op::Setlist => "Setlist",
+            Op::ExtractAudio(_) => "Extract audio",
+            Op::Rollback { .. } => "Undo tagging",
+            Op::AfterFlac { .. } => "After FLAC",
         }
     }
 }

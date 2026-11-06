@@ -303,6 +303,7 @@ The interface is one compact window, close in spirit to TLH: a list of shows and
 - Columns: Name, Format, Bits, Rate, Length, Ch, SBE, Source, Speed, Result. Any of them can be hidden (View menu or right-click on the header), and widths are remembered.
 - Columns fit their content after each operation; double-click a separator to fit one by hand.
 - **Compact view** hides Bits, Rate and Ch (Format then reads "FLAC 16/44.1") and tightens the rows.
+- **Collapsed view** shows one row per show, its tracks folded: handy with a long list. A show still unfolds with its arrow.
 - **Colours carry meaning:** green for OK, orange for a warning, red for an error. Every result has a tooltip with the details.
 
 ### Feedback while it works

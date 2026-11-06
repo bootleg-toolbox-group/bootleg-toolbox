@@ -459,6 +459,27 @@ fn badge(ui: &mut egui::Ui, text: impl Into<String>, level: Level) -> egui::Resp
     response
 }
 
+/// A group of buttons on one pale track (the status bar's filter and density).
+fn segmented(ui: &mut egui::Ui, p: Palette, add: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::none()
+        .fill(p.chrome.lerp_to_gamma(p.border, 0.45))
+        .stroke(egui::Stroke::new(1.0f32, p.button_border))
+        .rounding(9.0)
+        .inner_margin(2.0)
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.horizontal(add);
+        });
+}
+
+/// One button of a `segmented` group: white and raised when on. An empty text leaves room
+/// for a drawn icon.
+fn segment(ui: &mut egui::Ui, p: Palette, text: egui::text::LayoutJob, on: bool) -> egui::Response {
+    let button = if text.is_empty() { egui::Button::new("").min_size(egui::vec2(28.0, 22.0)) } else { egui::Button::new(text).min_size(egui::vec2(0.0, 22.0)) };
+    let fill = if on { p.button } else { Color32::TRANSPARENT };
+    ui.add(button.fill(fill).stroke(if on { egui::Stroke::new(1.0f32, p.button_border) } else { egui::Stroke::NONE }).rounding(7.0))
+}
+
 /// The symbol of a verdict in its badge.
 fn mark(level: Level) -> &'static str {
     match level {
@@ -621,6 +642,103 @@ fn colored(text: impl Into<String>, level: Level) -> RichText {
     }
 }
 
+/// A level's colour for a dot, a ring or a mark, which no text has to be read on: the vivid
+/// yellow for a doubt, blue for what is only information.
+fn vivid(level: Level) -> Color32 {
+    let dark = DARK_THEME.load(Ordering::Relaxed);
+    match level {
+        Level::Warn if !dark => Color32::from_rgb(232, 176, 0),
+        Level::Info if dark => Color32::from_rgb(110, 160, 240),
+        Level::Info => Color32::from_rgb(52, 120, 220),
+        level => color(level).unwrap_or(Color32::GRAY),
+    }
+}
+
+/// A level's mark in a disc: a tick, a cross, an exclamation mark, a dot.
+fn paint_mark(painter: &egui::Painter, centre: egui::Pos2, radius: f32, level: Level, fill: Color32, ink: Color32) {
+    painter.circle_filled(centre, radius, fill);
+    let s = radius * 0.45;
+    let stroke = egui::Stroke::new((radius * 0.2).max(1.4), ink);
+    let p = |x: f32, y: f32| centre + egui::vec2(x * s, y * s);
+    match level {
+        Level::Ok => {
+            painter.add(egui::Shape::line(vec![p(-0.95, 0.05), p(-0.3, 0.7), p(1.0, -0.65)], stroke));
+        }
+        Level::Error => {
+            painter.line_segment([p(-0.75, -0.75), p(0.75, 0.75)], stroke);
+            painter.line_segment([p(0.75, -0.75), p(-0.75, 0.75)], stroke);
+        }
+        Level::Warn => {
+            painter.line_segment([p(0.0, -1.05), p(0.0, 0.3)], stroke);
+            painter.circle_filled(p(0.0, 0.95), stroke.width * 0.65, ink);
+        }
+        Level::Info => {
+            painter.circle_filled(centre, stroke.width, ink);
+        }
+    }
+}
+
+/// A progress ring: the part done in the accent colour over a pale track, clockwise from the top.
+fn paint_ring(painter: &egui::Painter, centre: egui::Pos2, radius: f32, fraction: f32, p: Palette) {
+    let width = (radius * 0.32).max(1.8);
+    let fraction = fraction.clamp(0.0, 1.0);
+    if fraction == 0.0 {
+        // Not started: a pale dotted circle (a plain one reads as the letter O).
+        let points: Vec<egui::Pos2> =
+            (0..=40).map(|i| centre + radius * egui::vec2(libm::cosf(std::f32::consts::TAU * i as f32 / 40.0), libm::sinf(std::f32::consts::TAU * i as f32 / 40.0))).collect();
+        let dash = std::f32::consts::TAU * radius / 12.0;
+        painter.extend(egui::Shape::dashed_line(&points, egui::Stroke::new(width * 0.8, p.weak.gamma_multiply(0.55)), dash * 0.55, dash * 0.45));
+        return;
+    }
+    painter.circle_stroke(centre, radius, egui::Stroke::new(width, p.tint_strong));
+    if fraction > 0.0 {
+        let steps = (libm::ceilf(48.0 * fraction) as usize).max(2);
+        let points: Vec<egui::Pos2> = (0..=steps)
+            .map(|i| {
+                let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::TAU * fraction * i as f32 / steps as f32;
+                centre + radius * egui::vec2(libm::cosf(a), libm::sinf(a))
+            })
+            .collect();
+        painter.add(egui::Shape::line(points, egui::Stroke::new(width, p.accent)));
+    }
+}
+
+/// Where a show stands on its row: the share of its files done by the running task, or the
+/// worst result of its files.
+#[derive(Clone, Copy)]
+enum Ring {
+    Running(f32),
+    Done(Level),
+}
+
+/// A message at the bottom right of the window when a task ends.
+struct Toast {
+    id: u64,
+    title: String,
+    /// "Done", "2 to check"..., in the colour of `level`.
+    outcome: String,
+    detail: String,
+    level: Level,
+    /// How long it has been shown (not counting the time under the pointer), and when last drawn.
+    age: Duration,
+    seen: Instant,
+    /// The task made files: "Open folder" shows the first show's folder.
+    folder: Option<PathBuf>,
+    /// Files to check or with an error: a link sets the list filter to them.
+    filter: Option<(Level, usize)>,
+}
+
+impl Toast {
+    /// How long it stays: errors until closed.
+    fn life(&self) -> Option<Duration> {
+        match self.level {
+            Level::Error => None,
+            Level::Warn => Some(Duration::from_secs(10)),
+            _ => Some(Duration::from_secs(6)),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Row {
     Show(usize),
@@ -649,6 +767,7 @@ enum Action {
     DragOver(usize),
     FlacLevel(u8),
     Compact(bool),
+    CollapsedView(bool),
     AlwaysOnTop(bool),
     LogOpen(bool),
     Theme(ThemeChoice),
@@ -663,6 +782,21 @@ struct Running {
     total: usize,
     /// Torrents being made with "open the .ffp and info file" on: the show folders.
     open_after: Vec<PathBuf>,
+    /// The files of the task, those with a result already (progress rings), and the show
+    /// folders.
+    files: HashSet<PathBuf>,
+    done_files: HashSet<PathBuf>,
+    roots: Vec<PathBuf>,
+    /// The task's short name, and the files and folders whose Result it has given already
+    /// (the others show their former result faded).
+    name: &'static str,
+    updated: HashSet<PathBuf>,
+    /// Results so far: OK, to check, with an error.
+    tally: [usize; 3],
+    /// Started without a word in the log (details read by themselves): no notification either.
+    quiet: bool,
+    /// The task writes files next to the shows.
+    makes_files: bool,
 }
 
 pub struct App {
@@ -729,6 +863,14 @@ pub struct App {
     update_check: Option<mpsc::Receiver<UpdateCheck>>,
     /// A newer version found on GitHub.
     newer_version: Option<String>,
+    /// Only the files with this result in the list (the status bar's buttons).
+    filter: Option<Level>,
+    toasts: Vec<Toast>,
+    toasts_made: u64,
+    /// The task that gave the Result column (the status bar says so).
+    results_of: Option<&'static str>,
+    /// Top of the status bar and log: the notifications sit just above.
+    bottom_top: f32,
 }
 
 /// An open spectrogram window.
@@ -897,6 +1039,11 @@ impl App {
             clipboard: None,
             update_check: None,
             newer_version: None,
+            filter: None,
+            toasts: Vec::new(),
+            toasts_made: 0,
+            results_of: None,
+            bottom_top: f32::INFINITY,
         };
         // The look: warm neutral panels, amber accent, rounded white buttons.
         cc.egui_ctx.set_fonts(crate::fonts::definitions());
@@ -1169,10 +1316,16 @@ impl App {
 
     fn rebuild(&mut self) {
         self.fit_columns = true;
+        let before: HashSet<PathBuf> = self.shows.iter().map(|s| s.root.clone()).collect();
         self.shows = scan_paths(&self.roots, &self.excluded);
         let existing: HashSet<&PathBuf> = self.shows.iter().flat_map(|s| s.files.iter().chain(std::iter::once(&s.root))).collect();
         self.selected.retain(|p| existing.contains(p));
-        // Shows always arrive unfolded, track titles visible; only the user folds them.
+        // Shows arrive unfolded, track titles visible, unless the collapsed view is on; only
+        // the user folds or unfolds them after that.
+        if self.opt.collapsed_view {
+            let new: Vec<PathBuf> = self.shows.iter().map(|s| s.root.clone()).filter(|r| !before.contains(r)).collect();
+            self.collapsed.extend(new);
+        }
     }
 
     fn auto_details(&mut self) {
@@ -1190,15 +1343,78 @@ impl App {
         self.start(Op::Details { verbose: false }, self.shows.clone(), pending, true);
     }
 
+    /// The rows in view: every show and its files, or with a filter only the files with that
+    /// result (and their shows).
     fn rows(&self) -> Vec<Row> {
+        let keep = |p: &PathBuf| self.passes_filter(p);
         let mut rows = Vec::new();
         for (si, show) in self.shows.iter().enumerate() {
+            let files: Vec<usize> = (0..show.files.len()).filter(|&fi| keep(&show.files[fi])).collect();
+            if self.filter.is_some() && files.is_empty() && !keep(&show.root) {
+                continue;
+            }
             rows.push(Row::Show(si));
             if !self.collapsed.contains(&show.root) {
-                rows.extend((0..show.files.len()).map(|fi| Row::File(si, fi)));
+                rows.extend(files.into_iter().map(|fi| Row::File(si, fi)));
             }
         }
         rows
+    }
+
+    /// The file (or show folder) has the result the list is filtered on, or there is no filter.
+    /// While a task runs, the filter keeps only the results it has given.
+    fn passes_filter(&self, path: &Path) -> bool {
+        let Some(level) = self.filter else { return true };
+        let fresh = self.running.as_ref().is_none_or(|r| r.updated.contains(path));
+        fresh && self.status.get(path).map(|s| s.1) == Some(level)
+    }
+
+    /// A former result, from before the running task, of a file or show it works on: faded.
+    fn stale(&self, path: &Path) -> bool {
+        self.running.as_ref().is_some_and(|r| (r.files.contains(path) || r.roots.iter().any(|root| root == path)) && !r.updated.contains(path))
+    }
+
+    /// Where a show stands (the ring on its row): the share of its files done by the running
+    /// task, or the worst result of its files and folder.
+    fn ring(&self, show: &Show) -> Option<Ring> {
+        if let Some(r) = &self.running {
+            let mine: Vec<&PathBuf> = show.files.iter().filter(|f| r.files.contains(*f)).collect();
+            if !mine.is_empty() {
+                if r.done_files.contains(&show.root) {
+                    return Some(Ring::Running(1.0));
+                }
+                let done = mine.iter().filter(|f| r.done_files.contains(**f)).count();
+                return Some(Ring::Running(done as f32 / mine.len() as f32));
+            }
+        }
+        let rank = |l: &Level| match l {
+            Level::Error => 3,
+            Level::Warn => 2,
+            _ => 1,
+        };
+        show.files
+            .iter()
+            .chain(std::iter::once(&show.root))
+            .filter_map(|f| self.status.get(f).map(|s| s.1))
+            .filter(|l| *l != Level::Info)
+            .max_by_key(rank)
+            .map(Ring::Done)
+    }
+
+    /// Files with each result of the last task (while one runs: of that task so far): OK, to
+    /// check, with an error.
+    fn tally(&self) -> [usize; 3] {
+        let mut tally = [0usize; 3];
+        let running = self.running.as_ref();
+        for f in self.shows.iter().flat_map(|s| &s.files).filter(|f| running.is_none_or(|r| r.updated.contains(*f))) {
+            match self.status.get(f).map(|s| s.1) {
+                Some(Level::Ok) => tally[0] += 1,
+                Some(Level::Warn) => tally[1] += 1,
+                Some(Level::Error) => tally[2] += 1,
+                _ => {}
+            }
+        }
+        tally
     }
 
     fn row_path(&self, row: Row) -> &Path {
@@ -1208,16 +1424,19 @@ impl App {
         }
     }
 
+    /// What an action works on: the selected shows and files, or without a selection the whole
+    /// list. With a filter, only the files it shows (a selected show gives its files shown).
     fn selection(&self) -> (Vec<Show>, Vec<PathBuf>) {
-        if self.selected.is_empty() {
+        if self.selected.is_empty() && self.filter.is_none() {
             let files = self.shows.iter().flat_map(|s| s.files.clone()).collect();
             return (self.shows.clone(), files);
         }
         let mut shows = Vec::new();
         let mut files = Vec::new();
         for show in &self.shows {
-            let whole = self.selected.contains(&show.root);
-            let picked: Vec<PathBuf> = show.files.iter().filter(|f| whole || self.selected.contains(*f)).cloned().collect();
+            let whole = self.selected.is_empty() || self.selected.contains(&show.root);
+            let picked: Vec<PathBuf> =
+                show.files.iter().filter(|f| (whole || self.selected.contains(*f)) && self.passes_filter(f)).cloned().collect();
             if !picked.is_empty() {
                 shows.push(show.clone());
                 files.extend(picked);
@@ -1263,9 +1482,28 @@ impl App {
             self.log(format!("--- {} ---", op.label()), Level::Info);
         }
         let label = op.label().to_string();
+        let name = op.name();
         let open_after = if matches!(op, Op::Torrent(_)) && self.opt.open_after_torrent { shows.iter().map(|s| s.root.clone()).collect() } else { Vec::new() };
+        let makes_files = matches!(op, Op::Create | Op::Torrent(_) | Op::Convert { .. } | Op::Mp3(_) | Op::FixSbe | Op::CleanWav | Op::ExtractAudio(_) | Op::Setlist);
+        let task_files = files.iter().cloned().collect();
+        let roots = shows.iter().map(|s| s.root.clone()).collect();
         ops::spawn(op, shows, files, self.opt.clone(), tx, cancel.clone());
-        self.running = Some(Running { rx, cancel, label, done: 0, total: 0, open_after });
+        self.running = Some(Running {
+            rx,
+            cancel,
+            label,
+            name,
+            done: 0,
+            total: 0,
+            open_after,
+            files: task_files,
+            done_files: HashSet::new(),
+            updated: HashSet::new(),
+            roots,
+            tally: [0; 3],
+            quiet,
+            makes_files,
+        });
     }
 
     fn run_on_selection(&mut self, op: Op) {
@@ -1388,6 +1626,14 @@ impl App {
                         self.log.push((text, level));
                     }
                     Msg::Status { path, text, level, tooltip } => {
+                        match level {
+                            Level::Ok => running.tally[0] += 1,
+                            Level::Warn => running.tally[1] += 1,
+                            Level::Error => running.tally[2] += 1,
+                            Level::Info => {}
+                        }
+                        running.done_files.insert(path.clone());
+                        running.updated.insert(path.clone());
                         self.status.insert(path, (text, level, tooltip));
                     }
                     Msg::Info { path, info } => {
@@ -1399,10 +1645,12 @@ impl App {
                             continue;
                         }
                         self.reports.insert((ReportKind::Lossless, path.clone()), report);
+                        running.done_files.insert(path.clone());
                         self.source.insert(path, (text, level, tooltip));
                     }
                     Msg::Speed { path, text, level, tooltip, report } => {
                         self.reports.insert((ReportKind::Speed, path.clone()), report);
+                        running.done_files.insert(path.clone());
                         self.speed.insert(path, (text, level, tooltip));
                     }
                     Msg::Image { path, image } => {
@@ -1440,8 +1688,12 @@ impl App {
             }
         }
         if let Some((summary, rescan)) = finished {
-            if let Some(running) = self.running.take() {
+            let ended = self.running.take();
+            if let Some(running) = &ended {
                 self.open_for_upload(&running.open_after);
+                if !running.updated.is_empty() {
+                    self.results_of = Some(running.name);
+                }
             }
             if self.float_pending.is_some() {
                 self.flash(summary.clone());
@@ -1472,7 +1724,10 @@ impl App {
                     });
                 }
             }
-            self.flash(summary);
+            match ended.filter(|r| !r.quiet) {
+                Some(running) => self.notify(&running, &summary),
+                None => self.flash(summary),
+            }
             if rescan {
                 self.rebuild();
                 // With the after-FLAC window open, read the details once it is closed.
@@ -1498,6 +1753,39 @@ impl App {
 
     fn flash(&mut self, text: impl Into<String>) {
         self.flash = Some((text.into(), Instant::now()));
+    }
+
+    /// The notification of a task that ended.
+    fn notify(&mut self, running: &Running, summary: &str) {
+        let [_, warn, error] = running.tally;
+        let stopped = summary == "Stopped.";
+        let (level, outcome, filter) = if stopped {
+            (Level::Info, "Stopped".to_string(), None)
+        } else if error > 0 {
+            (Level::Error, format!("{error} with an error"), Some((Level::Error, error)))
+        } else if warn > 0 {
+            (Level::Warn, format!("{warn} to check"), Some((Level::Warn, warn)))
+        } else {
+            (Level::Ok, "Done".to_string(), None)
+        };
+        let folder = (running.makes_files && !stopped).then(|| running.roots.first().cloned()).flatten();
+        // A few at a time: the oldest that would close by itself goes first.
+        if self.toasts.len() >= 3 {
+            let index = self.toasts.iter().position(|t| t.life().is_some()).unwrap_or(0);
+            self.toasts.remove(index);
+        }
+        self.toasts_made += 1;
+        self.toasts.push(Toast {
+            id: self.toasts_made,
+            title: running.label.clone(),
+            outcome,
+            detail: summary.to_string(),
+            level,
+            age: Duration::ZERO,
+            seen: Instant::now(),
+            folder,
+            filter,
+        });
     }
 
     /// Opens the .ffp and the info file of each show that got its torrent, in the system's
@@ -2397,7 +2685,11 @@ impl App {
     fn menu_and_toolbar(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         let busy = self.running.is_some();
         let has = !self.shows.is_empty();
-        let scope = if self.selected.is_empty() { "the whole list (nothing selected)" } else { "the selection" };
+        let scope = match (self.selected.is_empty(), self.filter.is_some()) {
+            (true, true) => "the files shown (nothing selected)",
+            (true, false) => "the whole list (nothing selected)",
+            _ => "the selection",
+        };
         let mut menu_open = false;
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
@@ -2461,6 +2753,10 @@ impl App {
                     let mut compact = self.opt.compact;
                     if ui.checkbox(&mut compact, "Compact view").on_hover_text("Fewer columns (Format then gives bits and rate) and tighter rows").clicked() {
                         actions.push(Action::Compact(compact));
+                    }
+                    let mut collapsed = self.opt.collapsed_view;
+                    if ui.checkbox(&mut collapsed, "Collapsed view").on_hover_text("One row per show, the tracks folded: handy with many shows (a show still unfolds with its arrow)").clicked() {
+                        actions.push(Action::CollapsedView(collapsed));
                     }
                     let mut log_open = self.opt.log_open;
                     if ui.checkbox(&mut log_open, "Show the log").clicked() {
@@ -2674,9 +2970,60 @@ impl App {
         self.menu_open |= menu_open;
     }
 
-    fn bottom(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::bottom("statusbar").show(ctx, |ui| {
+    fn bottom(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        let p = Palette::now();
+        // The filter buttons: all files, or only those with one result of the last task.
+        let tally = self.tally();
+        if let Some(level) = self.filter {
+            let n = match level {
+                Level::Ok => tally[0],
+                Level::Warn => tally[1],
+                _ => tally[2],
+            };
+            if n == 0 {
+                self.filter = None;
+            }
+        }
+        let mut pick = None;
+        let status_bar = egui::TopBottomPanel::bottom("statusbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
+                if tally.iter().sum::<usize>() > 0 {
+                    let all: usize = self.shows.iter().map(|s| s.files.len()).sum();
+                    // Which task the results come from: the running one (so far), or the last.
+                    let (task, tip) = match (&self.running, self.results_of) {
+                        (Some(r), _) => (r.name, format!("Results of {} so far; the former results of its files are faded until it gives theirs", r.name)),
+                        (None, Some(name)) => (name, format!("Results of the last task: {name}")),
+                        (None, None) => ("", String::new()),
+                    };
+                    if !task.is_empty() {
+                        ui.label(RichText::new(format!("{task}:")).color(p.weak)).on_hover_text(tip);
+                    }
+                    let segments = [(None, "All", all), (Some(Level::Ok), "OK", tally[0]), (Some(Level::Warn), "To check", tally[1]), (Some(Level::Error), "Errors", tally[2])];
+                    segmented(ui, p, |ui| {
+                        for (level, name, n) in segments {
+                            if level.is_some() && n == 0 {
+                                continue;
+                            }
+                            let on = self.filter == level;
+                            let mut job = egui::text::LayoutJob::default();
+                            let font = egui::FontId::proportional(12.5);
+                            let dot = level.map(vivid).unwrap_or(p.weak);
+                            job.append("● ", 0.0, egui::TextFormat::simple(egui::FontId::proportional(10.0), dot));
+                            job.append(&format!("{name} "), 0.0, egui::TextFormat::simple(font.clone(), ui.visuals().text_color()));
+                            job.append(&n.to_string(), 0.0, egui::TextFormat::simple(egui::FontId::new(12.5, crate::fonts::bold()), ui.visuals().strong_text_color()));
+                            let tip = match level {
+                                None => "Show every file",
+                                Some(Level::Ok) => "Show only the files that came out OK in the last task",
+                                Some(Level::Warn) => "Show only the files to check",
+                                _ => "Show only the files with an error",
+                            };
+                            if segment(ui, p, job, on).on_hover_text(tip).clicked() {
+                                pick = Some(if on { None } else { level });
+                            }
+                        }
+                    });
+                    ui.add_space(6.0);
+                }
                 if let Some(r) = &self.running {
                     let fraction = if r.total > 0 { r.done as f32 / r.total as f32 } else { 0.0 };
                     ui.add(egui::ProgressBar::new(fraction).desired_width(220.0).text(format!("{}/{}", r.done, r.total)));
@@ -2696,32 +3043,63 @@ impl App {
                 }
                 if !self.shows.is_empty() {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Row density: compact (more rows, fewer columns) or comfortable.
+                        segmented(ui, p, |ui| {
+                            for (compact, tip) in [(true, "Compact view: tighter rows, fewer columns (also in View)"), (false, "Comfortable rows")] {
+                                let on = self.opt.compact == compact;
+                                let response = segment(ui, p, egui::text::LayoutJob::default(), on).on_hover_text(tip);
+                                let r = response.rect;
+                                let lines = if compact { 4 } else { 3 };
+                                let ink = ui.visuals().text_color();
+                                for i in 0..lines {
+                                    let y = r.top() + r.height() * (i as f32 + 1.0) / (lines as f32 + 1.0);
+                                    ui.painter().line_segment([egui::pos2(r.center().x - 6.0, y), egui::pos2(r.center().x + 6.0, y)], egui::Stroke::new(1.5f32, ink));
+                                }
+                                if response.clicked() && !on {
+                                    actions.push(Action::Compact(compact));
+                                }
+                            }
+                        });
+                        // Collapsed view: one row per show.
+                        ui.add_space(4.0);
+                        segmented(ui, p, |ui| {
+                            let on = self.opt.collapsed_view;
+                            let response = segment(ui, p, egui::text::LayoutJob::default(), on)
+                                .on_hover_text("Collapsed view: one row per show, the tracks folded (also in View)");
+                            let r = response.rect;
+                            let ink = ui.visuals().text_color();
+                            for i in 0..3 {
+                                let y = r.top() + r.height() * (i as f32 + 1.0) / 4.0;
+                                let x = r.center().x - 7.0;
+                                ui.painter().add(egui::Shape::convex_polygon(
+                                    vec![egui::pos2(x, y - 2.5), egui::pos2(x + 3.0, y), egui::pos2(x, y + 2.5)],
+                                    ink,
+                                    egui::Stroke::NONE,
+                                ));
+                                ui.painter().line_segment([egui::pos2(x + 5.5, y), egui::pos2(r.center().x + 7.0, y)], egui::Stroke::new(1.5f32, ink));
+                            }
+                            if response.clicked() {
+                                actions.push(Action::CollapsedView(!on));
+                            }
+                        });
+                        ui.add_space(8.0);
                         let (shows, files) = self.selection();
                         let counts = format!("{}, {}", crate::ops::plural(shows.len(), "show", "shows"), crate::ops::plural(files.len(), "file", "files"));
-                        let text = if self.selected.is_empty() {
+                        let text = if self.selected.is_empty() && self.filter.is_some() {
+                            colored(format!("No selection: actions apply to the files shown ({counts})"), Level::Warn)
+                        } else if self.selected.is_empty() {
                             colored(format!("No selection: actions apply to the whole list ({counts})"), Level::Warn)
                         } else {
                             RichText::new(format!("Selected: {counts}"))
                         };
                         ui.add(egui::Label::new(text).wrap());
-                        // The results of the last task, file by file, at a glance.
-                        let mut tally = [0usize; 3];
-                        for f in self.shows.iter().flat_map(|s| &s.files) {
-                            match self.status.get(f).map(|s| s.1) {
-                                Some(Level::Ok) => tally[0] += 1,
-                                Some(Level::Warn) => tally[1] += 1,
-                                Some(Level::Error) => tally[2] += 1,
-                                _ => {}
-                            }
-                        }
-                        ui.add_space(8.0);
-                        for (n, level, what) in [(tally[2], Level::Error, "with an error"), (tally[1], Level::Warn, "to check"), (tally[0], Level::Ok, "OK")].into_iter().filter(|t| t.0 > 0) {
-                            badge(ui, format!("{}{n} {what}", mark(level)), level);
-                        }
                     });
                 }
             });
         });
+        if let Some(filter) = pick {
+            self.filter = filter;
+        }
         // The log folds to one line (its last message); it unfolds by itself on an error.
         let open = self.opt.log_open;
         let panel = if open {
@@ -2729,7 +3107,7 @@ impl App {
         } else {
             egui::TopBottomPanel::bottom("log folded").resizable(false)
         };
-        panel.show(ctx, |ui| {
+        let log_panel = panel.show(ctx, |ui| {
             let (mut clear, mut save, mut toggle) = (false, false, false);
             ui.horizontal(|ui| {
                 let arrow = if open { "⏷" } else { "⏵" };
@@ -2782,6 +3160,94 @@ impl App {
                 }
             });
         });
+        self.bottom_top = status_bar.response.rect.top().min(log_panel.response.rect.top());
+    }
+
+    /// The notifications of the tasks that ended, at the bottom right, newest at the bottom.
+    fn toasts(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        if self.toasts.is_empty() {
+            return;
+        }
+        let p = Palette::now();
+        let now = Instant::now();
+        let screen = ctx.screen_rect();
+        let mut bottom = self.bottom_top.min(screen.bottom()) - 12.0;
+        let mut closed = Vec::new();
+        let mut filter = None;
+        for (i, t) in self.toasts.iter_mut().enumerate().rev() {
+            let area = egui::Area::new(egui::Id::new(("toast", t.id)))
+                .order(egui::Order::Foreground)
+                .pivot(egui::Align2::RIGHT_BOTTOM)
+                .fixed_pos(egui::pos2(screen.right() - 16.0, bottom))
+                .show(ctx, |ui| {
+                    egui::Frame::none()
+                        .fill(p.ground)
+                        .stroke(egui::Stroke::new(1.0f32, p.border))
+                        .rounding(12.0)
+                        .shadow(egui::epaint::Shadow { offset: egui::vec2(0.0, 8.0), blur: 24.0, spread: 0.0, color: Color32::from_black_alpha(40) })
+                        .inner_margin(egui::Margin { left: 14.0, right: 8.0, top: 12.0, bottom: 14.0 })
+                        .show(ui, |ui| {
+                            ui.set_width(330.0);
+                            ui.horizontal_top(|ui| {
+                                let (rect, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::hover());
+                                let (fill, ink) = p.badge(t.level);
+                                paint_mark(ui.painter(), rect.center(), 11.0, t.level, fill, ink);
+                                ui.vertical(|ui| {
+                                    ui.set_width(262.0);
+                                    ui.spacing_mut().item_spacing.y = 3.0;
+                                    ui.label(RichText::new(&t.title).family(crate::fonts::bold()));
+                                    ui.label(colored(&t.outcome, t.level));
+                                    ui.add(egui::Label::new(RichText::new(&t.detail).size(12.0).color(p.weak)).wrap());
+                                    ui.add_space(3.0);
+                                    ui.horizontal(|ui| {
+                                        if let Some(folder) = &t.folder {
+                                            if ui.link("Open folder").clicked() {
+                                                actions.push(Action::OpenFolder(folder.clone()));
+                                            }
+                                        }
+                                        if let Some((level, n)) = t.filter {
+                                            if ui.link(format!("Show the {n}")).clicked() {
+                                                filter = Some(level);
+                                            }
+                                        }
+                                        if ui.link("Show in log").clicked() {
+                                            actions.push(Action::LogOpen(true));
+                                        }
+                                    });
+                                });
+                                if ui.add(egui::Button::new(RichText::new("✕").color(p.weak)).frame(false)).on_hover_text("Close").clicked() {
+                                    closed.push(i);
+                                }
+                            });
+                        });
+                });
+            let rect = area.response.rect;
+            // Time left, as a thin bar along the bottom; it stops under the pointer.
+            if let Some(life) = t.life() {
+                if !ctx.pointer_hover_pos().is_some_and(|pos| rect.contains(pos)) {
+                    t.age += now.saturating_duration_since(t.seen);
+                }
+                let left = 1.0 - t.age.as_secs_f32() / life.as_secs_f32();
+                if left <= 0.0 {
+                    closed.push(i);
+                }
+                let bar = egui::Rect::from_min_size(egui::pos2(rect.left() + 14.0, rect.bottom() - 6.0), egui::vec2((rect.width() - 28.0) * left.max(0.0), 2.5));
+                ctx.layer_painter(area.response.layer_id).rect_filled(bar, 1.25, vivid(t.level));
+            }
+            t.seen = now;
+            bottom = rect.top() - 10.0;
+        }
+        closed.sort_unstable();
+        closed.dedup();
+        for i in closed.into_iter().rev() {
+            self.toasts.remove(i);
+        }
+        if let Some(level) = filter {
+            self.filter = Some(level);
+        }
+        if self.toasts.iter().any(|t| t.life().is_some()) {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
     }
 
     fn table(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
@@ -3003,7 +3469,9 @@ impl App {
                 // column of its own (a wrapped label would come back under the dot).
                 let left = ui.cursor().left();
                 ui.add_space(DOT_WIDTH);
-                let label = egui::Label::new(text.as_str());
+                let stale = self.stale(path);
+                let faded = ui.visuals().weak_text_color().gamma_multiply(0.8);
+                let label = egui::Label::new(if stale { RichText::new(text).color(faded) } else { RichText::new(text) });
                 let one_line = wrap > DOT_WIDTH && text_width(ui, text, egui::TextStyle::Body.resolve(ui.style()).size) <= wrap - DOT_WIDTH;
                 let response = if one_line || wrap <= DOT_WIDTH {
                     // On one line: centred in the row like the other cells.
@@ -3015,19 +3483,10 @@ impl App {
                     })
                     .inner
                 };
-                // A dot needs no contrast with text: the vivid yellow for a doubt, blue for
-                // what is only information.
-                let dark = DARK_THEME.load(Ordering::Relaxed);
-                let dot = match *level {
-                    Level::Warn if !dark => Some(Color32::from_rgb(232, 176, 0)),
-                    Level::Info if dark => Some(Color32::from_rgb(110, 160, 240)),
-                    Level::Info => Some(Color32::from_rgb(52, 120, 220)),
-                    level => color(level),
-                };
-                if let Some(c) = dot {
-                    let line = ui.text_style_height(&egui::TextStyle::Body);
-                    ui.painter().circle_filled(egui::pos2(left + 4.0, response.rect.top() + line / 2.0), 4.0, c);
-                }
+                let line = ui.text_style_height(&egui::TextStyle::Body);
+                let dot = if stale { faded.gamma_multiply(0.5) } else { vivid(*level) };
+                ui.painter().circle_filled(egui::pos2(left + 4.0, response.rect.top() + line / 2.0), 4.0, dot);
+                let tip = if stale { format!("Before {}: {tip}", self.running.as_ref().map(|r| r.name).unwrap_or("")) } else { tip.to_string() };
                 response.on_hover_text(tip)
             }
             None => ui.label(""),
@@ -3087,6 +3546,28 @@ impl App {
                     if ui.add(egui::Label::new(arrow).sense(egui::Sense::click())).clicked() {
                         actions.push(Action::Toggle(show.root.clone()));
                     }
+                    if let Some(ring) = self.ring(show) {
+                        let size = if self.opt.compact { 13.0 } else { 16.0 };
+                        let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+                        let tip = match ring {
+                            Ring::Running(fraction) => {
+                                paint_ring(ui.painter(), rect.center(), size / 2.0 - 2.0, fraction, Palette::now());
+                                format!("{}: {:.0} % of this show done", self.running.as_ref().map(|r| r.label.as_str()).unwrap_or(""), fraction * 100.0)
+                            }
+                            Ring::Done(level) => {
+                                // Dark ink on the yellow, white on the others.
+                                let ink = if level == Level::Warn { Color32::from_rgb(70, 50, 0) } else { Color32::WHITE };
+                                paint_mark(ui.painter(), rect.center(), size / 2.0, level, vivid(level), ink);
+                                let count = |l: Level| show.files.iter().filter(|f| self.status.get(*f).is_some_and(|s| s.1 == l)).count();
+                                match level {
+                                    Level::Error => format!("{} with an error", crate::ops::plural(count(Level::Error), "file", "files")),
+                                    Level::Warn => format!("{} to check", crate::ops::plural(count(Level::Warn), "file", "files")),
+                                    _ => "No problem in the last task".to_string(),
+                                }
+                            }
+                        };
+                        response.on_hover_text(tip);
+                    }
                     let parent_is_show = show.root.parent().is_some_and(|p| self.shows.iter().any(|s| s.root == p))
                         && !crate::files::is_output_dir(&file_name(&show.root));
                     let label = if parent_is_show {
@@ -3135,7 +3616,13 @@ impl App {
         for &col in cols {
             match col {
                 Col::Name => responses.push(row.col(|ui| {
+                    // A file the running task has not reached yet: a small empty ring.
+                    let left = ui.cursor().left();
                     ui.add_space(22.0);
+                    if self.running.as_ref().is_some_and(|r| r.files.contains(path) && !r.done_files.contains(path)) {
+                        let centre = egui::pos2(left + 13.0, ui.max_rect().center().y);
+                        ui.painter().circle_stroke(centre, 3.5, egui::Stroke::new(1.5f32, Palette::now().weak.gamma_multiply(0.6)));
+                    }
                     ui.label(rel_posix(path, &show.root)).on_hover_text(path.display().to_string());
                 }).1),
                 Col::Format => {
@@ -3264,6 +3751,10 @@ impl App {
                     self.opt.compact = on;
                     self.fit_columns = true;
                 }
+                Action::CollapsedView(on) => {
+                    self.opt.collapsed_view = on;
+                    self.collapsed = if on { self.shows.iter().map(|s| s.root.clone()).collect() } else { HashSet::new() };
+                }
                 Action::LogOpen(open) => self.opt.log_open = open,
                 Action::AlwaysOnTop(on) => {
                     self.opt.always_on_top = on;
@@ -3283,7 +3774,8 @@ impl App {
                     }
                 }
                 Action::SelectAll => {
-                    self.selected = self.shows.iter().flat_map(|s| s.files.iter().chain(std::iter::once(&s.root))).cloned().collect();
+                    // The rows in view: with a filter, not the files it hides.
+                    self.selected = self.rows().into_iter().map(|r| self.row_path(r).to_path_buf()).collect();
                     self.anchor = None;
                 }
                 Action::Deselect => {
@@ -3677,6 +4169,172 @@ impl App {
     }
 }
 
+/// A white card with a thin border, on the pale ground of a window.
+fn card<R>(ui: &mut egui::Ui, p: Palette, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    egui::Frame::none()
+        .fill(p.ground)
+        .stroke(egui::Stroke::new(1.0f32, p.border))
+        .rounding(12.0)
+        .inner_margin(egui::Margin::symmetric(16.0, 12.0))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            add(ui)
+        })
+        .inner
+}
+
+/// The section of a lossless report a measurement belongs to, by its name.
+fn report_section(name: &str) -> &'static str {
+    let name = name.to_lowercase();
+    if name.contains("coding traces") || name.contains("lossywav") {
+        "Coding traces"
+    } else if ["frequenc", "15 khz", "cutoff", "lowpass", "hi-res", "holes"].iter().any(|k| name.contains(k)) {
+        "Frequency content"
+    } else {
+        "Stereo, FM and bits"
+    }
+}
+
+/// One measurement: a dot of its level, its name, its value and what it means.
+fn measure_line(ui: &mut egui::Ui, p: Palette, m: &crate::report::Measure, extra: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal_top(|ui| {
+        let line = ui.text_style_height(&egui::TextStyle::Body);
+        let (dot, _) = ui.allocate_exact_size(egui::vec2(10.0, line), egui::Sense::hover());
+        let fill = if m.level == Level::Info { p.weak.gamma_multiply(0.45) } else { vivid(m.level) };
+        ui.painter().circle_filled(dot.center(), 4.0, fill);
+        ui.allocate_ui_with_layout(egui::vec2(200.0, line), egui::Layout::top_down(egui::Align::Min), |ui| {
+            ui.set_width(200.0);
+            ui.add(egui::Label::new(RichText::new(&m.name).color(p.weak)).wrap());
+        });
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.horizontal_wrapped(|ui| {
+                ui.add(egui::Label::new(colored(&m.value, m.level).family(crate::fonts::bold())).wrap());
+                extra(ui);
+            });
+            if !m.meaning.is_empty() {
+                ui.add(egui::Label::new(RichText::new(&m.meaning).size(12.0).color(p.weak)).wrap());
+            }
+        });
+    });
+    ui.add_space(4.0);
+}
+
+/// "See more" as cards: the verdict, then the measurements grouped in sections that fold
+/// (open when they hold a doubt or an error), the tracks of a show, the reasoning.
+fn report_cards(ui: &mut egui::Ui, p: Palette, report: &crate::report::Report, (kind, path): (ReportKind, &Path), opened: &mut Vec<(ReportKind, PathBuf)>) {
+    ui.spacing_mut().item_spacing.y = 10.0;
+    ui.add_space(4.0);
+    card(ui, p, |ui| {
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(40.0, 40.0), egui::Sense::hover());
+            let (fill, ink) = p.badge(report.level);
+            paint_mark(ui.painter(), rect.center(), 19.0, report.level, fill, ink);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.add(egui::Label::new(RichText::new(&report.title).color(p.weak)).truncate());
+                ui.label(colored(&report.label, report.level).size(21.0).family(crate::fonts::bold()));
+            });
+        });
+        ui.add_space(2.0);
+        ui.add(egui::Label::new(&report.sentence).wrap());
+        if !report.key_facts.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                for fact in report.key_facts.split(", ") {
+                    egui::Frame::none().fill(p.show_row).rounding(8.0).inner_margin(egui::Margin::symmetric(9.0, 3.0)).show(ui, |ui| {
+                        ui.label(RichText::new(fact).size(12.0));
+                    });
+                }
+            });
+        }
+    });
+    // Sections in a fixed order; a report with none of the named ones (Speed?) has one.
+    const ORDER: [&str; 3] = ["Coding traces", "Frequency content", "Stereo, FM and bits"];
+    let lossless = report.measures.iter().any(|m| report_section(&m.name) != ORDER[2]);
+    let mut sections: Vec<(&str, Vec<&crate::report::Measure>)> = Vec::new();
+    for m in &report.measures {
+        let name = if lossless { report_section(&m.name) } else { "Measurements" };
+        match sections.iter_mut().find(|(n, _)| *n == name) {
+            Some((_, list)) => list.push(m),
+            None => sections.push((name, vec![m])),
+        }
+    }
+    sections.sort_by_key(|(n, _)| ORDER.iter().position(|o| o == n).unwrap_or(0));
+    let rank = |l: Level| match l {
+        Level::Error => 3,
+        Level::Warn => 2,
+        Level::Ok => 1,
+        Level::Info => 0,
+    };
+    for (name, list) in sections {
+        let worst = list.iter().map(|m| m.level).max_by_key(|l| rank(*l)).unwrap_or(Level::Info);
+        let summary = match worst {
+            Level::Error | Level::Warn => list.iter().find(|m| m.level == worst).map(|m| m.name.clone()).unwrap_or_default(),
+            Level::Ok => "Nothing unusual".to_string(),
+            Level::Info => "For information".to_string(),
+        };
+        card(ui, p, |ui| {
+            let id = ui.make_persistent_id(("report section", kind, path, name));
+            egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, rank(worst) >= 2)
+                .show_header(ui, |ui| {
+                    ui.label(RichText::new(name).family(crate::fonts::bold()).size(14.0));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        badge(ui, summary, worst);
+                    });
+                })
+                .body(|ui| {
+                    ui.add_space(4.0);
+                    for m in list {
+                        measure_line(ui, p, m, |_| {});
+                    }
+                });
+        });
+    }
+    if !report.tracks.is_empty() {
+        card(ui, p, |ui| {
+            ui.label(RichText::new("Tracks").family(crate::fonts::bold()).size(14.0));
+            ui.add_space(4.0);
+            for m in &report.tracks {
+                measure_line(ui, p, m, |ui| {
+                    if ui.small_button("See more").clicked() {
+                        opened.push((kind, path.join(&m.name)));
+                    }
+                });
+            }
+        });
+    }
+    if !report.reasoning.is_empty() {
+        card(ui, p, |ui| {
+            let id = ui.make_persistent_id(("report reasoning", kind, path));
+            egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
+                .show_header(ui, |ui| {
+                    ui.label(RichText::new("Reasoning").family(crate::fonts::bold()).size(14.0));
+                })
+                .body(|ui| {
+                    ui.spacing_mut().item_spacing.y = 3.0;
+                    let mut step = 0;
+                    for line in &report.reasoning {
+                        // Indented lines belong to the step above them.
+                        match line.strip_prefix("    ") {
+                            Some(sub) => {
+                                ui.indent(egui::Id::new(("sub", line)), |ui| {
+                                    ui.label(sub);
+                                });
+                            }
+                            None => {
+                                step += 1;
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(RichText::new(format!("{step}.")).strong());
+                                    ui.label(line);
+                                });
+                            }
+                        }
+                    }
+                });
+        });
+    }
+}
+
 impl App {
     /// "See more": the full analysis (lossless, speed) of a file or a show, in its own window.
     fn report_windows(&mut self, ctx: &egui::Context) {
@@ -3708,70 +4366,20 @@ impl App {
                             if ui.button("📋 Copy report").on_hover_text("Copy this analysis as text (for a forum post or an info file)").clicked() {
                                 vctx.copy_text(report.to_text());
                             }
-                            if ui.button("Close").clicked() {
-                                closed.push(index);
-                            }
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let p = Palette::now();
+                                let close = egui::Button::new(RichText::new("Close").color(Color32::WHITE).family(crate::fonts::bold())).fill(p.accent).min_size(egui::vec2(72.0, 0.0));
+                                if ui.add(close).clicked() {
+                                    closed.push(index);
+                                }
+                            });
                         });
                         ui.add_space(2.0);
                     });
-                    egui::CentralPanel::default().show_inside(ui, |ui| {
+                    let p = Palette::now();
+                    egui::CentralPanel::default().frame(egui::Frame::central_panel(ui.style()).fill(p.chrome)).show_inside(ui, |ui| {
                         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                            ui.label(RichText::new(&report.title).size(17.0).strong());
-                            ui.add_space(6.0);
-                            ui.label(colored(&report.label, report.level).size(16.0).strong());
-                            ui.label(&report.sentence);
-                            ui.add_space(10.0);
-                            for (heading, list, links) in [("Measurements", &report.measures, false), ("Tracks", &report.tracks, true)] {
-                                if list.is_empty() {
-                                    continue;
-                                }
-                                ui.label(RichText::new(heading).size(15.0).strong());
-                                ui.separator();
-                                for m in list {
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.label(RichText::new(format!("{}:", m.name)).strong());
-                                        ui.label(colored(&m.value, m.level));
-                                        if links && ui.small_button("See more").clicked() {
-                                            opened.push((*kind, path.join(&m.name)));
-                                        }
-                                    });
-                                    if !m.meaning.is_empty() {
-                                        ui.indent(egui::Id::new(("meaning", heading, &m.name)), |ui| {
-                                            ui.label(RichText::new(&m.meaning).weak());
-                                        });
-                                    }
-                                    ui.add_space(4.0);
-                                }
-                                ui.add_space(6.0);
-                            }
-                            if !report.reasoning.is_empty() {
-                                ui.add_space(6.0);
-                                ui.label(RichText::new("Reasoning").size(15.0).strong());
-                                ui.separator();
-                                let mut step = 0;
-                                for line in &report.reasoning {
-                                    // Indented lines belong to the step above them.
-                                    match line.strip_prefix("    ") {
-                                        Some(sub) => {
-                                            ui.indent(egui::Id::new(("sub", line)), |ui| {
-                                                ui.label(sub);
-                                            });
-                                        }
-                                        None => {
-                                            step += 1;
-                                            ui.horizontal_wrapped(|ui| {
-                                                ui.label(RichText::new(format!("{step}.")).strong());
-                                                ui.label(line);
-                                            });
-                                        }
-                                    }
-                                    ui.add_space(3.0);
-                                }
-                            }
-                            ui.add_space(8.0);
-                            ui.label(RichText::new("Conclusion").size(15.0).strong());
-                            ui.separator();
-                            ui.label(colored(&report.sentence, report.level));
+                            report_cards(ui, p, &report, (*kind, path), &mut opened);
                         });
                     });
                 };
@@ -4275,8 +4883,9 @@ impl eframe::App for App {
         self.shortcuts(ctx, &mut actions);
         self.menu_open = false;
         self.menu_and_toolbar(ctx, &mut actions);
-        self.bottom(ctx);
+        self.bottom(ctx, &mut actions);
         self.table(ctx, &mut actions);
+        self.toasts(ctx, &mut actions);
         self.settings_window(ctx);
         self.about_window(ctx);
         self.help_window(ctx);
