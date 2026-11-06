@@ -164,7 +164,10 @@ impl Noise {
 /// (`hiss` false: nothing above 15.5 kHz, like a lossy file).
 fn signal(frames: usize, rate: u32, seed: u64, hiss: bool) -> Vec<[f64; 2]> {
     let mut noise = Noise(seed);
-    let tones: Vec<(f64, f64)> = (0..24).map(|i| (110.0 * 1.27f64.powi(i) % 15_000.0 + 80.0, 0.3 + 0.7 * noise.next().abs())).collect();
+    // 1.27^i by successive products, not powi: the compiler computes a constant powi with the
+    // C library of the system that compiles, which rounds differently on Windows.
+    let steps = std::iter::successors(Some(1.0f64), |p| Some(p * 1.27));
+    let tones: Vec<(f64, f64)> = steps.take(24).map(|p| (110.0 * p % 15_000.0 + 80.0, 0.3 + 0.7 * noise.next().abs())).collect();
     (0..frames)
         .map(|n| {
             let t = n as f64 / rate as f64;
