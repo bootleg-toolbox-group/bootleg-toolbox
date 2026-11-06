@@ -247,7 +247,7 @@ pub fn scan_float(source: &Path, cancel: &AtomicBool) -> Result<FloatScan, Strin
     let mut scan = FloatScan::default();
     let fits = |v: f64, bits: i32| {
         let x = v * 2f64.powi(bits - 1);
-        x == x.round() && x >= -(2f64.powi(bits - 1)) && x < 2f64.powi(bits - 1)
+        x == libm::round(x) && x >= -(2f64.powi(bits - 1)) && x < 2f64.powi(bits - 1)
     };
     float_samples(source, &info, cancel, |v| {
         if !v.is_finite() {
@@ -301,7 +301,7 @@ pub fn float_to_flac(source: &Path, out: &Path, level: u8, tags: &[(String, Stri
         let mut buf: Vec<u8> = Vec::with_capacity(1 << 16);
         float_samples(source, &info, cancel, |v| {
             let x = if v.is_finite() { v * scale } else if v > 0.0 { hi } else { lo };
-            let rounded = x.round();
+            let rounded = libm::round(x);
             let n = rounded.clamp(lo, hi);
             if n != rounded {
                 clipped += 1;

@@ -233,7 +233,7 @@ fn parse_wave_header(h: &[u8], channels: u32) -> Result<ShnHeader, String> {
                 // 80-bit extended float sample rate
                 let exp = u16be(pos + 16).unwrap_or(0) as i32 & 0x7fff;
                 let mant = h.get(pos + 18..pos + 26).map(|b| u64::from_be_bytes(b.try_into().unwrap())).unwrap_or(0);
-                let rate = (mant as f64 * 2f64.powi(exp - 16383 - 63)).round() as u32;
+                let rate = libm::round(mant as f64 * 2f64.powi(exp - 16383 - 63)) as u32;
                 return Ok(ShnHeader { channels: ch.max(channels), rate, bits, samples: frames });
             }
             pos += 8 + size + (size & 1);

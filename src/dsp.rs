@@ -263,7 +263,7 @@ pub fn percentile(values: &[f64], p: f64) -> Option<f64> {
     let mut v = values.to_vec();
     v.sort_by(f64::total_cmp);
     let pos = p / 100.0 * (v.len() - 1) as f64;
-    let (lo, hi) = (pos.floor() as usize, pos.ceil() as usize);
+    let (lo, hi) = (libm::floor(pos) as usize, libm::ceil(pos) as usize);
     Some(v[lo] + (v[hi] - v[lo]) * (pos - lo as f64))
 }
 

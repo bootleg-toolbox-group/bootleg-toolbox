@@ -191,7 +191,7 @@ fn write_wav(path: &Path, samples: &[[f64; 2]], rate: u32, bits: u16, extra: boo
     let scale = ((1i64 << (bits - 1)) - 1) as f64;
     for frame in samples {
         for v in frame {
-            let x = (v.clamp(-1.0, 1.0) * scale).round() as i32;
+            let x = libm::round(v.clamp(-1.0, 1.0) * scale) as i32;
             data.extend_from_slice(&x.to_le_bytes()[..width]);
         }
     }
@@ -259,6 +259,25 @@ fn remove_wavs(dir: &Path) {
     for f in files.iter().filter(|p| p.extension().is_some_and(|e| e == "wav")) {
         fs::remove_file(f).unwrap();
     }
+}
+
+/// The generated signals before rounding to integers (raw f64 bits): when `inputs` differs on
+/// a system, this tells the maths of the signal apart from the rounding.
+#[test]
+fn signals() {
+    let sum = |frames: usize, rate: u32, seed: u64, hiss: bool| {
+        let bytes: Vec<u8> = signal(frames, rate, seed, hiss).iter().flatten().flat_map(|v| v.to_bits().to_le_bytes()).collect();
+        format!("{}  {frames} {rate} {seed} {hiss}", hex(&Md5::digest(&bytes)))
+    };
+    let lines = [
+        sum(441_000 + 123, 44100, 1, true),
+        sum(330_750 + 7, 44100, 2, true),
+        sum(529_200 + 300, 44100, 3, true),
+        sum(264_600 + 41, 44100, 4, true),
+        sum(480_000, 96000, 5, true),
+        sum(441_000, 44100, 6, false),
+    ];
+    insta::assert_snapshot!("signals", lines.join("\n"));
 }
 
 #[test]

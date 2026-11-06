@@ -296,7 +296,7 @@ pub fn trim_float(value: f64) -> String {
 
 /// "1h28m48s" / "59m33s", like the folder names of the collection.
 pub fn fmt_total(seconds: f64) -> String {
-    let total = seconds.round() as u64;
+    let total = libm::round(seconds) as u64;
     let (h, m, s) = (total / 3600, total % 3600 / 60, total % 60);
     if h > 0 {
         format!("{h}h{m:02}m{s:02}s")
@@ -827,8 +827,8 @@ fn probe_undecoded(path: &Path, format: Format) -> Option<AudioInfo> {
     let c = crate::matroska::contents(path).ok()?;
     let t = c.tracks.iter().find(|t| t.audio())?;
     let codec = Codec::from_matroska(&t.codec_id)?;
-    let rate = t.rate.round() as u32;
-    let samples = (c.seconds? * rate as f64).round() as u64;
+    let rate = libm::round(t.rate) as u32;
+    let samples = libm::round(c.seconds? * rate as f64) as u64;
     Some(AudioInfo { format, rate, bits: 16, channels: t.channels as u32, samples, md5: None, float: false, codec: Some(codec) })
 }
 
@@ -914,7 +914,7 @@ fn container_info(path: &Path, format: Format, mut reader: Reader, track: Track,
         _ if format == Format::Aiff => aiff_frames(path)?,
         (Some(n), Some(base)) => {
             let t = base.calc_time(n);
-            ((t.seconds as f64 + t.frac) * rate as f64).round() as u64
+            libm::round((t.seconds as f64 + t.frac) * rate as f64) as u64
         }
         _ => {
             let mut n = 0u64;

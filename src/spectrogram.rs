@@ -189,7 +189,7 @@ fn draw(path: &Path, info: &AudioInfo, levels: &[f32]) -> Image {
     let step = [1.0, 2.0, 5.0, 10.0, 20.0, 50.0].into_iter().find(|s| nyquist / 1000.0 / s <= 12.0).unwrap_or(100.0);
     let mut khz = 0.0;
     while khz * 1000.0 <= nyquist {
-        let y = TOP + ROWS - 1 - ((khz * 1000.0 / nyquist) * (ROWS - 1) as f64).round() as usize;
+        let y = TOP + ROWS - 1 - libm::round((khz * 1000.0 / nyquist) * (ROWS - 1) as f64) as usize;
         canvas.hline(LEFT - 7, LEFT - 1, y, DIM);
         let label = audio::trim_float(khz);
         let w = canvas.text_width(&font, LABEL_SIZE, &label);
@@ -208,7 +208,7 @@ fn draw(path: &Path, info: &AudioInfo, levels: &[f32]) -> Image {
             .unwrap_or(7200.0);
         let mut t = 0.0;
         while t <= seconds {
-            let x = LEFT + ((t / seconds) * (COLS - 1) as f64).round() as usize;
+            let x = LEFT + libm::round((t / seconds) * (COLS - 1) as f64) as usize;
             canvas.vline(x, TOP + ROWS, TOP + ROWS + 7, DIM);
             let label = clock(t);
             let w = canvas.text_width(&font, LABEL_SIZE, &label);
@@ -230,7 +230,7 @@ fn draw(path: &Path, info: &AudioInfo, levels: &[f32]) -> Image {
     canvas.text(&font, bar as f32 - 4.0, TOP as f32 - LABEL_SIZE - 8.0, LABEL_SIZE, DIM, "dBFS");
     let mut db = 0.0f32;
     while db >= FLOOR_DB {
-        let y = TOP + ((db / FLOOR_DB) * (ROWS - 1) as f32).round() as usize;
+        let y = TOP + libm::roundf((db / FLOOR_DB) * (ROWS - 1) as f32) as usize;
         canvas.hline(bar + 12, bar + 17, y, DIM);
         canvas.text(&font, (bar + 21) as f32, y as f32 - LABEL_SIZE * 0.55, LABEL_SIZE, TEXT, &format!("{db}"));
         db -= 20.0;
@@ -240,7 +240,7 @@ fn draw(path: &Path, info: &AudioInfo, levels: &[f32]) -> Image {
 }
 
 fn clock(seconds: f64) -> String {
-    let s = seconds.round() as u64;
+    let s = libm::round(seconds) as u64;
     if s >= 3600 {
         format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
     } else {
@@ -274,7 +274,7 @@ impl Canvas {
         let i = (y as usize * self.width + x as usize) * 4;
         let a = alpha.clamp(0.0, 1.0);
         for (k, &ck) in c.iter().enumerate() {
-            self.rgba[i + k] = (self.rgba[i + k] as f32 * (1.0 - a) + ck as f32 * a).round() as u8;
+            self.rgba[i + k] = libm::roundf(self.rgba[i + k] as f32 * (1.0 - a) + ck as f32 * a) as u8;
         }
     }
 

@@ -355,7 +355,7 @@ pub fn read_title(vob: &Path) -> Result<(crate::audio::AudioInfo, Vec<DvdAudio>)
     let best = tracks.iter().find(|t| t.lossless()).or(tracks.first()).ok_or("DVD title without audio")?;
     // "5.1" -> 6 channels.
     let channels = best.channels.split('.').filter_map(|n| n.parse::<u32>().ok()).sum::<u32>().max(1);
-    let samples = set.seconds().map_or(0, |s| (s * best.rate as f64).round() as u64);
+    let samples = set.seconds().map_or(0, |s| libm::round(s * best.rate as f64) as u64);
     let info = crate::audio::AudioInfo {
         format: crate::audio::Format::Vob,
         rate: best.rate,

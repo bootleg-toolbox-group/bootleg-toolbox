@@ -432,7 +432,7 @@ fn conclude(path: &Path, info: &AudioInfo, m: &Measured, aac_check: bool) -> Res
 
     // Narrow tones: how far bin k stands above the median of +-1 kHz around it.
     let prominence = |k: usize| {
-        let (span, skip) = ((1000.0 / bin_hz) as usize, (150.0 / bin_hz).ceil() as usize);
+        let (span, skip) = ((1000.0 / bin_hz) as usize, libm::ceil(150.0 / bin_hz) as usize);
         let around: Vec<f64> =
             (k.saturating_sub(span)..(k + span + 1).min(bins)).filter(|&j| j + skip < k || j > k + skip).map(|j| raw[j]).collect();
         raw[k] - median(&around)
@@ -1009,8 +1009,8 @@ fn conclude(path: &Path, info: &AudioInfo, m: &Measured, aac_check: bool) -> Res
 fn coherence(mid_re: &[f64], mid_im: &[f64], side_re: &[f64], side_im: &[f64], bin_hz: f64, energy: f64) -> (f64, bool, f64) {
     let band = |lo: f64, hi: f64| -> f64 {
         let (mut cross_re, mut cross_im, mut ll, mut rr) = (0.0, 0.0, 0.0, 0.0);
-        let first = (lo / bin_hz).ceil() as usize;
-        let last = ((hi / bin_hz).ceil() as usize).min(mid_re.len());
+        let first = libm::ceil(lo / bin_hz) as usize;
+        let last = (libm::ceil(hi / bin_hz) as usize).min(mid_re.len());
         for k in first..last {
             let (lr, li) = (mid_re[k] + side_re[k], mid_im[k] + side_im[k]);
             let (rr_, ri) = (mid_re[k] - side_re[k], mid_im[k] - side_im[k]);
@@ -1662,7 +1662,7 @@ mod tests {
         let mut v = 0.0f64;
         while v < span as f64 {
             for x in [span as f64 + v, span as f64 - v] {
-                h[x.round() as usize] += 2000;
+                h[libm::round(x) as usize] += 2000;
             }
             v += 181.02;
         }

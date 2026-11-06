@@ -59,7 +59,7 @@ fn kbps(value: f64) -> String {
 
 /// "1:52:03" or "4:12"
 fn hms(seconds: f64) -> String {
-    let total = seconds.round() as u64;
+    let total = libm::round(seconds) as u64;
     let (h, m, s) = (total / 3600, total % 3600 / 60, total % 60);
     if h > 0 {
         format!("{h}:{m:02}:{s:02}")
@@ -566,7 +566,7 @@ fn write_set(doc: &mut Doc, set: &TitleSet) {
                 parts.push(s.to_string());
             }
             if v.fps > 0.0 {
-                parts.push(format!("{} fps", audio::trim_float((v.fps * 1000.0).round() / 1000.0)));
+                parts.push(format!("{} fps", audio::trim_float(libm::round(v.fps * 1000.0) / 1000.0)));
             }
             parts.push(ifo.map(|i| i.video.aspect).unwrap_or(v.aspect).to_string());
             if let Some(p) = v.progressive {

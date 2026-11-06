@@ -189,7 +189,7 @@ fn codeword_error_plain(piece: &[f64]) -> f64 {
         for &v in piece {
             let unit = v / norm;
             for l in 0..LANES {
-                let y = (unit * scale[l]).round();
+                let y = libm::round(unit * scale[l]);
                 dot[l] += y * v / norm;
                 yy[l] += y * y;
             }

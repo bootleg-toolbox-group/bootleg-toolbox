@@ -80,7 +80,7 @@ pub fn analyse(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<Spe
         return Err("invalid sample rate".into());
     }
     let channels = info.channels.max(1) as f64;
-    let pow2 = |seconds: f64| libm::log2(rate * seconds).round().clamp(10.0, 22.0) as u32;
+    let pow2 = |seconds: f64| libm::round(libm::log2(rate * seconds)).clamp(10.0, 22.0) as u32;
     // Pilot: an average spectrum of ~5 Hz bins.
     let n_pilot = 1usize << pow2(0.186);
     // Tuning: ~2.7 Hz bins, one window every ~0.75 s.
@@ -166,7 +166,7 @@ pub fn analyse(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<Spe
         let hz = rate / n_pilot as f64;
         let raw: Vec<f64> = pilot_power.iter().map(|p| 10.0 * libm::log10(p / pilot_blocks as f64 + 1e-30)).collect();
         let around = |k: usize| {
-            let (span, skip) = ((1000.0 / hz) as usize, (150.0 / hz).ceil() as usize);
+            let (span, skip) = ((1000.0 / hz) as usize, libm::ceil(150.0 / hz) as usize);
             let v: Vec<f64> = (k.saturating_sub(span)..(k + span + 1).min(raw.len())).filter(|&j| j + skip < k || j > k + skip).map(|j| raw[j]).collect();
             dsp::median(&v).unwrap_or(f64::INFINITY)
         };
@@ -187,7 +187,7 @@ pub fn analyse(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<Spe
     if hum_blocks > 0 {
         let hz = rate / n_hum as f64;
         let raw: Vec<f64> = hum_power.iter().map(|p| 10.0 * libm::log10(p / hum_blocks as f64 + 1e-30)).collect();
-        let (span, skip) = ((2.0 / hz) as usize, (0.3 / hz).ceil() as usize);
+        let (span, skip) = ((2.0 / hz) as usize, libm::ceil(0.3 / hz) as usize);
         let prominence_at = |k: usize| {
             let around: Vec<f64> = (k.saturating_sub(span)..=(k + span)).filter(|&j| j + skip < k || j > k + skip).map(|j| raw[j]).collect();
             raw[k] - dsp::median(&around).unwrap_or(raw[k])
@@ -367,7 +367,7 @@ pub fn show_verdict(title: String, tracks: &[(String, SpeedFacts, String, Level,
     };
     // Hum: kept only when several tracks show the same line (+-0.15 %).
     let hums: Vec<(f64, f64)> = tracks.iter().filter_map(|t| t.1.hum).map(|(n, f, _)| (n, f)).collect();
-    let needed = 3.max((tracks.len() as f64 * 0.3).ceil() as usize).min(tracks.len().max(1));
+    let needed = 3.max(libm::ceil(tracks.len() as f64 * 0.3) as usize).min(tracks.len().max(1));
     let hum = hums
         .iter()
         .map(|(n, f)| {
