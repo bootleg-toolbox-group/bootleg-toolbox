@@ -192,6 +192,13 @@ Tools > Get setlist from setlist.fm (also in the Convert menu and the right-clic
 - **Gentle on the service:** one request per second at most, answers kept until the program closes, a pause and new attempts when setlist.fm is busy, and a clear message when the key is refused or its daily limit is reached.
 - From the command line: `BT_SETLISTFM_KEY=<key> bootleg-toolbox --cli setlist <folders>` (several shows that day are listed, not chosen).
 
+### Share card
+
+Tools > Share card (also in the right-click menu, and on the band shown at the end of a long task) makes a picture of each selected show to post with it: 1200 × 630 PNG, saved beside the show folder as "<folder> - card.png", never inside it.
+
+- **What it says:** artist, date and venue (from the info file, the folder name or the tags), the recording source (SBD, AUD, FM...), format, number of tracks and length, and the checks run on the show in this session with their outcome: Lossless?, Speed?, checksums or decode test (when it was the last task), CD-ready or gap risk (SBE). A check not run is left out, never shown as passed.
+- **The pictures:** the cassette with the show written on its label, and the spectrogram of the longest track with the lowpass found by Lossless?.
+
 ### Lossy files (MP3, MP2, AAC, Vorbis)
 
 MP3 and MP2 files, AAC in M4A, MP4, MKA or MKV files, and Ogg Vorbis files can be added like any other show, mostly to recognise them for what they are.
@@ -300,21 +307,26 @@ The interface is one compact window, close in spirit to TLH: a list of shows and
 
 ### The table
 
-- Columns: Name, Format, Bits, Rate, Length, Ch, SBE, Source, Speed, Result. Any of them can be hidden (View menu or right-click on the header), and widths are remembered.
+- Columns: Name, Format, Bits, Rate, Length, Wave, Ch, SBE, Source, Speed, Result. Any of them can be hidden (View menu or right-click on the header), and widths are remembered.
 - Columns fit their content after each operation; double-click a separator to fit one by hand.
 - **Compact view** hides Bits, Rate and Ch (Format then reads "FLAC 16/44.1") and tightens the rows.
 - **Collapsed view** shows one row per show, its tracks folded: handy with a long list. A show still unfolds with its arrow.
+- **Discs:** a show on several discs (CD1, CD2... folders) has a row before each disc, with its number of tracks and length; clicking it selects the disc.
+- **Recording source:** a badge (SBD, AUD, MTX, FM, Pre-FM, DAT) before the show name, from the folder name or the Source/Lineage lines of the info file.
+- **Wave:** a small outline of each track (fades, silences, level jumps), drawn once Lossless?, Speed? or a spectrogram has read the file; nothing is decoded just for it.
+- The toolbar sums up the list: shows, files, length and size.
 - **Colours carry meaning:** green for OK, orange for a warning, red for an error. Every result has a tooltip with the details.
 
 ### Feedback while it works
 
-- A progress bar with a count, and the running operation shown in bold purple with a spinner, so a running task cannot be missed.
+- A progress bar with a count, and the running operation shown in bold purple with a spinner, so a running task cannot be missed; how much audio is done out of how much, and the time left once it can be told.
+- A task that took more than a minute ends with a band above the list (its outcome, how long it took, the files to check) that stays until closed.
 - Stop (or Escape) cancels cleanly: no half-written file is left behind.
 - **The log** folds to one line showing the last message, unfolds by itself on an error, and can be cleared or saved to a file.
 
 ### Settings and comfort
 
-- Light, dark or follow-the-system theme (read from the desktop on Linux as well).
+- Light, dark or follow-the-system theme (read from the desktop on Linux as well), and an accent colour: amber, teal, indigo or burgundy.
 - **Always on top**, remembered between sessions.
 - Settings cover checksum types, overwrite, line endings, number of parallel jobs, tracker announce URLs and extra trackers, torrent and MP3 folders, the file manager entry and the update check. All choices are remembered. The Settings window scrolls on small screens, with its buttons always in view.
 - The window opens at a modest 1000 x 465 and remembers its size.

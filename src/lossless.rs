@@ -1430,6 +1430,8 @@ fn build_report(title: String, verdict: &Verdict, f: &Facts) -> Report {
         reasoning,
         key_facts: key.join(", "),
         tracks: Vec::new(),
+        cutoff: f.cutoff,
+        speed: None,
     }
 }
 

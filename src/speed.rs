@@ -279,7 +279,9 @@ fn measures(pilot: Option<f64>, tuning: Option<(f64, f64)>, hum: Option<(f64, f6
 pub fn track_verdict(title: String, f: &SpeedFacts) -> SpeedVerdict {
     let hum = f.hum.filter(|(_, _, p)| *p >= 12.0).map(|(n, freq, _)| (n, freq));
     let mut reasoning = Vec::new();
+    let mut gauge = None;
     let (label, level, sentence) = if let Some(p) = f.pilot {
+        gauge = Some(p);
         reasoning.push(format!("The 19 kHz FM pilot is at {:.2} kHz: the recording plays {}.", 19.0 * (1.0 + p / 100.0), if p.abs() < 0.2 { "at the right speed".into() } else { describe(p) }));
         if p.abs() < 0.2 {
             ("OK".to_string(), Level::Ok, "Right speed: the 19 kHz FM pilot is where it should be".to_string())
@@ -291,12 +293,14 @@ pub fn track_verdict(title: String, f: &SpeedFacts) -> SpeedVerdict {
         match f.tuning {
             Some((c, coh)) if coh >= CLAIM_COHERENCE && c.abs() >= TUNING_TOLERANCE_CENTS => {
                 let p = cents_to_percent(c);
+                gauge = Some(p);
                 reasoning.push(format!("The instruments are {c:+.0} cents from A = 440 Hz: if the band tuned to 440 Hz, the recording plays {}.", describe(p)));
                 reasoning.push(format!("To correct: {}. Check it by ear before applying it.", correction(p)));
                 reasoning.push(semitone_alternatives(c));
                 (format!("{}?", describe(p)), Level::Warn, format!("Possibly plays {} (estimated from the tuning): {}", describe(p), correction(p)))
             }
             Some((c, coh)) if coh >= MIN_COHERENCE && c.abs() < TUNING_TOLERANCE_CENTS => {
+                gauge = Some(cents_to_percent(c));
                 reasoning.push(format!("The instruments are {c:+.0} cents from A = 440 Hz: in tune, so no small speed error."));
                 reasoning.push("A whole-semitone error (5.9 %) would also look in tune.".into());
                 ("OK?".to_string(), Level::Ok, "In tune with A = 440 Hz: no sign of a small speed error".to_string())
@@ -336,6 +340,8 @@ pub fn track_verdict(title: String, f: &SpeedFacts) -> SpeedVerdict {
         reasoning,
         key_facts: key,
         tracks: Vec::new(),
+        cutoff: None,
+        speed: gauge,
     };
     SpeedVerdict { label, level, sentence, report }
 }
@@ -389,7 +395,9 @@ pub fn show_verdict(title: String, tracks: &[(String, SpeedFacts, String, Level,
     if pilot.is_none() && !pilots.is_empty() {
         reasoning.push(format!("A tone that could be the FM pilot shows on only {}: not used.", of_tracks(pilots.len())));
     }
+    let mut gauge = None;
     let (label, level, sentence) = if let Some(p) = pilot {
+        gauge = Some(p);
         reasoning.push(format!("The 19 kHz FM pilot is on {}: the recording plays {}.", of_tracks(pilots.len()), if p.abs() < 0.2 { "at the right speed".into() } else { describe(p) }));
         if p.abs() < 0.2 {
             ("OK".to_string(), Level::Ok, "Right speed: the 19 kHz FM pilot is where it should be".to_string())
@@ -430,6 +438,7 @@ pub fn show_verdict(title: String, tracks: &[(String, SpeedFacts, String, Level,
                 ("Unclear (conflict)".to_string(), Level::Warn, format!("Tuning and mains hum disagree ({} vs {}): see the analysis", describe(t), describe(h)))
             }
             (Some((c, spread, _, coh)), Some(t), hum_pct) if spread <= 10.0 && coh >= CLAIM_COHERENCE && c.abs() >= TUNING_TOLERANCE_CENTS => {
+                gauge = Some(t);
                 let agree = hum_pct.is_some_and(|h| (t - h).abs() <= 0.5);
                 if agree {
                     reasoning.push("The mains hum agrees with the tuning.".into());
@@ -444,7 +453,8 @@ pub fn show_verdict(title: String, tracks: &[(String, SpeedFacts, String, Level,
                     format!("Possibly plays {} (estimated from the tuning{}): {}", describe(t), if agree { " and the mains hum" } else { "" }, correction(t)),
                 )
             }
-            (Some((c, spread, _, coh)), Some(_), hum_pct) if spread <= 10.0 && coh >= MIN_COHERENCE && c.abs() < TUNING_TOLERANCE_CENTS => {
+            (Some((c, spread, _, coh)), Some(t), hum_pct) if spread <= 10.0 && coh >= MIN_COHERENCE && c.abs() < TUNING_TOLERANCE_CENTS => {
+                gauge = Some(t);
                 if let Some(h) = hum_pct.filter(|h| h.abs() > 0.7) {
                     reasoning.push(format!("In tune with A = 440 Hz, but the hum says {}: the hum may have come in at a later copy.", describe(h)));
                 } else {
@@ -453,6 +463,7 @@ pub fn show_verdict(title: String, tracks: &[(String, SpeedFacts, String, Level,
                 ("OK?".to_string(), Level::Ok, "In tune with A = 440 Hz: no sign of a small speed error".to_string())
             }
             (_, _, Some(h)) => {
+                gauge = Some(h);
                 reasoning.push(format!("The tuning gives no usable answer; the hum alone suggests {}: {}.", describe(h), correction(h)));
                 (format!("{}?", describe(h)), Level::Warn, format!("Possibly plays {} (from the mains hum only): {}", describe(h), correction(h)))
             }
@@ -481,6 +492,8 @@ pub fn show_verdict(title: String, tracks: &[(String, SpeedFacts, String, Level,
         reasoning,
         key_facts: String::new(),
         tracks: tracks.iter().map(|(name, _, label, level, key)| Measure { name: name.clone(), value: label.clone(), meaning: key.clone(), level: *level }).collect(),
+        cutoff: None,
+        speed: gauge,
     };
     SpeedVerdict { label, level, sentence, report }
 }

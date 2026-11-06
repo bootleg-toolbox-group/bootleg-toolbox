@@ -48,6 +48,32 @@ pub fn render(path: &Path, cancel: &AtomicBool) -> Result<Image, String> {
     Ok(draw(path, &info, &levels))
 }
 
+/// The spectrogram alone, without its legend, for the analysis window: `COLS` × `ROWS`
+/// pixels, the low frequencies at the bottom, up to `nyquist` Hz, over `seconds`.
+pub struct Plot {
+    pub width: usize,
+    pub height: usize,
+    pub rgba: Vec<u8>,
+    pub nyquist: f64,
+    pub seconds: f64,
+}
+
+pub fn plot(path: &Path, cancel: &AtomicBool) -> Result<Plot, String> {
+    let info = audio::probe(path)?;
+    if info.channels == 0 || info.rate == 0 || info.bits == 0 {
+        return Err("invalid audio header".into());
+    }
+    let levels = analyse(path, &info, cancel)?;
+    let mut rgba = Vec::with_capacity(COLS * ROWS * 4);
+    for k in (0..ROWS).rev() {
+        for col in 0..COLS {
+            let [r, g, b] = palette((levels[col * ROWS + k] - FLOOR_DB) / -FLOOR_DB);
+            rgba.extend_from_slice(&[r, g, b, 255]);
+        }
+    }
+    Ok(Plot { width: COLS, height: ROWS, rgba, nyquist: info.rate as f64 / 2.0, seconds: info.seconds() })
+}
+
 pub fn save_png(image: &Image, path: &Path) -> Result<(), String> {
     let file = File::create(path).map_err(|e| e.to_string())?;
     let mut encoder = png::Encoder::new(BufWriter::new(file), image.width as u32, image.height as u32);
@@ -253,21 +279,21 @@ fn font() -> FontRef<'static> {
     FontRef::try_from_slice(crate::fonts::SANS).expect("the built-in font is valid")
 }
 
-struct Canvas {
-    width: usize,
-    height: usize,
-    rgba: Vec<u8>,
+pub(crate) struct Canvas {
+    pub(crate) width: usize,
+    pub(crate) height: usize,
+    pub(crate) rgba: Vec<u8>,
 }
 
 impl Canvas {
-    fn set(&mut self, x: usize, y: usize, c: [u8; 3]) {
+    pub(crate) fn set(&mut self, x: usize, y: usize, c: [u8; 3]) {
         if x < self.width && y < self.height {
             let i = (y * self.width + x) * 4;
             self.rgba[i..i + 3].copy_from_slice(&c);
         }
     }
 
-    fn blend(&mut self, x: i32, y: i32, c: [u8; 3], alpha: f32) {
+    pub(crate) fn blend(&mut self, x: i32, y: i32, c: [u8; 3], alpha: f32) {
         if x < 0 || y < 0 || x as usize >= self.width || y as usize >= self.height {
             return;
         }
@@ -297,7 +323,7 @@ impl Canvas {
         self.vline(x + w - 1, y, y + h - 1, c);
     }
 
-    fn text_width(&self, font: &FontRef<'static>, size: f32, text: &str) -> f32 {
+    pub(crate) fn text_width(&self, font: &FontRef<'static>, size: f32, text: &str) -> f32 {
         let scaled = font.as_scaled(PxScale::from(size));
         let mut width = 0.0;
         let mut prev = None;
@@ -313,7 +339,7 @@ impl Canvas {
     }
 
     /// Draws `text` with its top-left corner at (x, y).
-    fn text(&mut self, font: &FontRef<'static>, x: f32, y: f32, size: f32, color: [u8; 3], text: &str) {
+    pub(crate) fn text(&mut self, font: &FontRef<'static>, x: f32, y: f32, size: f32, color: [u8; 3], text: &str) {
         let scale = PxScale::from(size);
         let scaled = font.as_scaled(scale);
         let baseline = y + scaled.ascent();

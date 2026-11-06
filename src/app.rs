@@ -42,7 +42,7 @@ const COMPONENTS: &[(&str, &str, &str)] = &[
     ("zbus", "desktop services (Linux)", "MIT"),
     ("ureq, rustls", "update check (HTTPS)", "MIT or Apache-2.0 / Apache-2.0, ISC or MIT"),
     ("ring, rustls-webpki, rustls-platform-verifier", "encryption, certificates checked by the system", "Apache-2.0 and ISC / ISC / MIT or Apache-2.0"),
-    ("Noto Sans, Noto Sans Mono, Noto Emoji", "interface fonts", "OFL-1.1"),
+    ("Noto Sans, Noto Sans Mono, Noto Emoji, Caveat", "interface fonts", "OFL-1.1"),
     ("emoji-icon-font", "interface symbols (from egui)", "MIT"),
     ("Shorten decoder", "SHN decoding (written for Bootleg Toolbox)", "GPL-3.0"),
 ];
@@ -75,6 +75,9 @@ const EXTRACT_TIP: &str = "Extract one audio track of each selected DVD title or
                            for a lossy one, unchanged. A DVD title's track is gathered from all its VOB files into the DVD's folder; \
                            a video's goes beside it. A window lets you pick the track when there are several.";
 
+const SHARE_TIP: &str = "Make a picture (PNG, 1200 × 630) of each selected show to post with it: the show, its format and \
+     source, the checks run on it in this session (Lossless?, Speed?, checksums or decode test, SBE) and a spectrogram of its longest \
+     track. Saved beside the show folder.";
 const UNDO_TIP: &str = "Give shows changed by Tag and rename back their former tags, names and checksum files.";
 
 /// "Tag and rename from info file": what will be written, open for corrections.
@@ -345,6 +348,8 @@ pub fn run(paths: Vec<PathBuf>) -> eframe::Result<()> {
 
 /// The light theme needs darker greens and oranges to stay readable on white.
 static DARK_THEME: AtomicBool = AtomicBool::new(false);
+/// The accent chosen in the Settings (`Accent` as a number).
+static ACCENT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 /// Light/dark preference of the desktop (KDE, GNOME...) through the XDG portal;
 /// None when there is no portal or no preference. Waits at most one second.
@@ -397,11 +402,23 @@ struct Palette {
 impl Palette {
     fn of(dark: bool) -> Palette {
         let rgb = Color32::from_rgb;
+        // The accent and its pale tints, light and dark.
+        let accent = ops::Accent::ALL.get(ACCENT.load(Ordering::Relaxed) as usize).copied().unwrap_or_default();
+        let (accent, tint, tint_strong) = match (accent, dark) {
+            (ops::Accent::Amber, false) => (rgb(168, 86, 12), rgb(251, 236, 217), rgb(243, 217, 184)),
+            (ops::Accent::Amber, true) => (rgb(232, 161, 74), rgb(74, 53, 36), rgb(96, 68, 42)),
+            (ops::Accent::Teal, false) => (rgb(31, 111, 102), rgb(226, 242, 239), rgb(196, 228, 222)),
+            (ops::Accent::Teal, true) => (rgb(94, 200, 184), rgb(30, 58, 54), rgb(40, 78, 72)),
+            (ops::Accent::Indigo, false) => (rgb(63, 74, 168), rgb(232, 234, 250), rgb(208, 213, 243)),
+            (ops::Accent::Indigo, true) => (rgb(150, 160, 240), rgb(40, 44, 78), rgb(54, 60, 104)),
+            (ops::Accent::Burgundy, false) => (rgb(140, 47, 74), rgb(248, 232, 237), rgb(238, 206, 216)),
+            (ops::Accent::Burgundy, true) => (rgb(232, 130, 160), rgb(66, 34, 44), rgb(88, 44, 58)),
+        };
         if dark {
             Palette {
-                accent: rgb(232, 161, 74),
-                tint: rgb(74, 53, 36),
-                tint_strong: rgb(96, 68, 42),
+                accent,
+                tint,
+                tint_strong,
                 chrome: rgb(38, 36, 31),
                 ground: rgb(28, 27, 24),
                 show_row: rgb(46, 42, 36),
@@ -412,9 +429,9 @@ impl Palette {
             }
         } else {
             Palette {
-                accent: rgb(168, 86, 12),
-                tint: rgb(251, 236, 217),
-                tint_strong: rgb(243, 217, 184),
+                accent,
+                tint,
+                tint_strong,
                 chrome: rgb(247, 245, 241),
                 ground: Color32::WHITE,
                 show_row: rgb(246, 241, 233),
@@ -452,11 +469,102 @@ impl Palette {
 /// size of its text, so that a column fitted to its content shows it whole.
 fn badge(ui: &mut egui::Ui, text: impl Into<String>, level: Level) -> egui::Response {
     let (fill, ink) = Palette::now().badge(level);
-    let galley = ui.painter().layout_no_wrap(text.into(), egui::FontId::proportional(12.0), ink);
+    pill(ui, text.into(), egui::FontId::proportional(12.0), fill, ink)
+}
+
+fn pill(ui: &mut egui::Ui, text: String, font: egui::FontId, fill: Color32, ink: Color32) -> egui::Response {
+    let galley = ui.painter().layout_no_wrap(text, font, ink);
     let (rect, response) = ui.allocate_exact_size(galley.size() + egui::vec2(16.0, 4.0), egui::Sense::hover());
     ui.painter().rect_filled(rect, rect.height() / 2.0, fill);
     ui.painter().galley(rect.min + egui::vec2(8.0, 2.0), galley, ink);
     response
+}
+
+/// A recording source's badge (SBD, AUD...): (fill, text), a hue for each.
+fn lineage_colours(kind: &str, dark: bool) -> (Color32, Color32) {
+    let rgb = Color32::from_rgb;
+    match (kind, dark) {
+        ("SBD", false) => (rgb(226, 236, 248), rgb(29, 79, 143)),
+        ("SBD", true) => (rgb(29, 49, 80), rgb(169, 200, 240)),
+        ("FM" | "Pre-FM", false) => (rgb(239, 230, 247), rgb(91, 45, 134)),
+        ("FM" | "Pre-FM", true) => (rgb(56, 36, 72), rgb(213, 184, 239)),
+        ("DAT", false) => (rgb(230, 241, 239), rgb(31, 95, 87)),
+        ("DAT", true) => (rgb(23, 58, 53), rgb(163, 219, 210)),
+        ("MTX", false) => (rgb(236, 235, 245), rgb(63, 58, 120)),
+        ("MTX", true) => (rgb(44, 42, 80), rgb(195, 191, 240)),
+        (_, false) => (rgb(242, 227, 204), rgb(122, 62, 6)),
+        (_, true) => (rgb(74, 46, 18), rgb(242, 201, 149)),
+    }
+}
+
+/// The recording source of a show: from its folder name, else from the "Source:" lines of
+/// its info file (true).
+fn show_lineage(root: &Path) -> Option<(&'static str, bool)> {
+    if let Some(kind) = crate::files::lineage(&crate::files::show_name(root)) {
+        return Some((kind, false));
+    }
+    ops::info_candidates(root)
+        .iter()
+        .filter(|p| std::fs::metadata(p).is_ok_and(|m| m.len() < 1 << 20))
+        .take(3)
+        .find_map(|p| crate::files::read_text(p).ok().and_then(|text| crate::files::lineage_of_info(&text)))
+        .map(|kind| (kind, true))
+}
+
+/// The cassette of the welcome screen and of the drop frame, drawn in a 100 × 64 box scaled
+/// to `rect`: `label` handwritten on it, the tape moved by `turn` (the reels turn by it over
+/// their radius), `wound` the share of the tape on the right reel.
+fn paint_cassette(painter: &egui::Painter, rect: egui::Rect, label: &str, turn: f32, wound: f32) {
+    let s = rect.width() / 100.0;
+    let at = |x: f32, y: f32| rect.min + egui::vec2(x, y) * s;
+    let area = |x0: f32, y0: f32, x1: f32, y1: f32| egui::Rect::from_min_max(at(x0, y0), at(x1, y1));
+    let thin = |width: f32, colour: Color32| egui::Stroke::new(width * s, colour);
+    let rgb = Color32::from_rgb;
+    let (ink, tape) = (rgb(43, 41, 37), rgb(90, 47, 16));
+    // The shell, with a lighter edge.
+    painter.rect(area(1.0, 1.0, 99.0, 63.0), 5.0 * s, rgb(54, 50, 46), thin(0.6, rgb(20, 19, 18)));
+    painter.rect_stroke(area(2.2, 2.2, 97.8, 61.8), 4.2 * s, thin(0.35, rgb(90, 84, 77)));
+    // The label: an amber band along the top, a ruled line, the name written by hand.
+    painter.rect_filled(area(8.0, 5.0, 92.0, 40.0), 2.5 * s, rgb(243, 230, 204));
+    painter.rect_filled(area(8.0, 5.0, 92.0, 11.0), egui::Rounding { nw: 2.5 * s, ne: 2.5 * s, sw: 0.0, se: 0.0 }, rgb(168, 86, 12));
+    painter.text(at(88.0, 8.0), egui::Align2::RIGHT_CENTER, "C90 · TYPE II", egui::FontId::new(3.2 * s, crate::fonts::bold()), rgb(251, 233, 207));
+    painter.line_segment([at(11.0, 17.0), at(89.0, 17.0)], thin(0.3, rgb(217, 199, 166)));
+    let mut job = egui::text::LayoutJob::single_section(label.to_string(), egui::TextFormat::simple(egui::FontId::new(6.4 * s, crate::fonts::hand()), rgb(59, 42, 26)));
+    job.wrap = egui::text::TextWrapping { max_width: 76.0 * s, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    let galley = painter.layout_job(job);
+    painter.galley(at(12.0, 17.6) - egui::vec2(0.0, galley.size().y), galley, Color32::BLACK);
+    // The window: the tape on its two reels (the same area of tape in all), then the hubs,
+    // an amber dot on each to see them turn.
+    let window = area(26.0, 18.0, 74.0, 35.0);
+    painter.rect_filled(window, 8.5 * s, rgb(239, 227, 205));
+    let (small, big) = (4.6f32, 8.0f32);
+    let reel = |share: f32| libm::sqrtf(small * small + share.clamp(0.0, 1.0) * (big * big - small * small));
+    let reels = [(38.0, reel(1.0 - wound)), (62.0, reel(wound))];
+    let inside = painter.with_clip_rect(window.intersect(painter.clip_rect()));
+    for (x, r) in reels {
+        inside.circle(at(x, 26.5), r * s, tape, thin(0.35, rgb(61, 30, 8)));
+    }
+    inside.line_segment([at(34.0, 34.4), at(66.0, 34.4)], thin(0.9, tape));
+    painter.rect_stroke(window, 8.5 * s, thin(0.6, ink));
+    painter.rect_stroke(area(44.0, 21.0, 56.0, 32.0), 1.0 * s, thin(0.35, rgb(138, 122, 98)));
+    for (x, r) in reels {
+        let centre = at(x, 26.5);
+        painter.circle(centre, 3.6 * s, rgb(244, 239, 230), thin(0.4, ink));
+        painter.circle_filled(centre, 1.4 * s, ink);
+        let angle = turn / r;
+        painter.circle_filled(centre + egui::vec2(libm::sinf(angle), -libm::cosf(angle)) * 2.5 * s, 0.9 * s, rgb(217, 130, 43));
+    }
+    // The bottom edge, where the tape shows, and the screws.
+    painter.add(egui::Shape::convex_polygon(vec![at(23.0, 63.0), at(29.0, 51.0), at(71.0, 51.0), at(77.0, 63.0)], rgb(44, 41, 38), thin(0.5, rgb(20, 19, 18))));
+    painter.line_segment([at(29.5, 51.8), at(70.5, 51.8)], thin(0.7, tape));
+    for x in [35.0, 65.0] {
+        painter.circle_filled(at(x, 57.5), 1.7 * s, rgb(14, 13, 12));
+    }
+    painter.rect_filled(area(46.5, 54.0, 53.5, 57.4), 0.6 * s, rgb(201, 164, 106));
+    for (x, y) in [(5.0, 5.0), (95.0, 5.0), (5.0, 59.0), (95.0, 59.0), (50.0, 45.5)] {
+        painter.circle_filled(at(x, y), 1.4 * s, rgb(143, 138, 130));
+        painter.line_segment([at(x - 0.9, y), at(x + 0.9, y)], thin(0.4, rgb(74, 70, 63)));
+    }
 }
 
 /// A group of buttons on one pale track (the status bar's filter and density).
@@ -502,17 +610,9 @@ fn welcome(ui: &mut egui::Ui, p: Palette, busy: bool) -> Option<usize> {
         ui.painter().extend(egui::Shape::dashed_line(&rounded_outline(zone.shrink(1.0), 16.0), dash, 8.0, 6.0));
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(zone), |ui| {
             ui.vertical_centered(|ui| {
-                ui.add_space(((zone.height() - 330.0) / 2.0).max(16.0));
-                // A folder with an arrow going in, drawn (the emoji fonts have no clear one).
-                let (icon, _) = ui.allocate_exact_size(egui::vec2(68.0, 68.0), egui::Sense::hover());
-                ui.painter().rect_filled(icon, 18.0, p.tint);
-                let f = icon.shrink2(egui::vec2(17.0, 19.0));
-                let at = |x: f32, y: f32| egui::pos2(f.left() + x * f.width(), f.top() + y * f.height());
-                let pen = egui::Stroke::new(2.2f32, p.accent);
-                let outline = [at(0.0, 1.0), at(0.0, 0.0), at(0.38, 0.0), at(0.5, 0.18), at(1.0, 0.18), at(1.0, 1.0), at(0.0, 1.0)];
-                ui.painter().add(egui::Shape::line(outline.to_vec(), pen));
-                ui.painter().line_segment([at(0.5, 0.38), at(0.5, 0.82)], pen);
-                ui.painter().add(egui::Shape::line(vec![at(0.32, 0.64), at(0.5, 0.82), at(0.68, 0.64)], pen));
+                ui.add_space(((zone.height() - 360.0) / 2.0).max(16.0));
+                let (icon, _) = ui.allocate_exact_size(egui::vec2(150.0, 96.0), egui::Sense::hover());
+                paint_cassette(ui.painter(), icon, "Bootleg Toolbox", 0.0, 0.3);
                 ui.add_space(14.0);
                 ui.label(RichText::new("Drop show folders or audio files here").size(21.0).family(crate::fonts::bold()));
                 ui.add_space(4.0);
@@ -703,6 +803,101 @@ fn paint_ring(painter: &egui::Painter, centre: egui::Pos2, radius: f32, fraction
     }
 }
 
+/// A file's outline in the Wave column: its peaks, mirrored around the middle, scaled to the
+/// loudest.
+fn paint_wave(ui: &mut egui::Ui, peaks: &[f32]) -> egui::Response {
+    let height = (ui.available_height() - 6.0).clamp(8.0, 20.0);
+    let width = ui.available_width().clamp(30.0, 160.0);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    let loudest = peaks.iter().copied().fold(0f32, f32::max).max(1e-6);
+    let step = rect.width() / peaks.len() as f32;
+    let stroke = egui::Stroke::new((step * 0.7).clamp(0.6, 1.6), Palette::now().weak.gamma_multiply(0.75));
+    for (i, peak) in peaks.iter().enumerate() {
+        let x = rect.left() + (i as f32 + 0.5) * step;
+        let half = (peak / loudest * rect.height() / 2.0).max(0.4);
+        ui.painter().line_segment([egui::pos2(x, rect.center().y - half), egui::pos2(x, rect.center().y + half)], stroke);
+    }
+    response
+}
+
+/// The spectrogram of a file in its lossless analysis, with the lowpass found drawn on it.
+fn report_plot(ui: &mut egui::Ui, plot: Option<&PlotState>, cutoff: Option<f64>) {
+    ui.add_space(4.0);
+    let width = ui.available_width();
+    let size = egui::vec2(width, (width * 0.36).clamp(140.0, 260.0));
+    let Some(PlotState::Ready { texture, nyquist, seconds }) = plot else {
+        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+        ui.painter().rect_filled(rect, 10.0, Color32::from_rgb(13, 7, 22));
+        let text = match plot {
+            Some(PlotState::Failed(e)) => format!("No spectrogram: {e}"),
+            _ => "Drawing the spectrogram...".to_string(),
+        };
+        ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::proportional(13.0), Color32::from_rgb(201, 188, 214));
+        return;
+    };
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    egui::Image::new((texture.id(), size)).rounding(10.0).paint_at(ui, rect);
+    let label = |pos: egui::Pos2, align: egui::Align2, text: String| {
+        let galley = ui.painter().layout_no_wrap(text, egui::FontId::proportional(11.0), Color32::from_rgb(235, 228, 242));
+        let at = align.anchor_size(pos, galley.size());
+        ui.painter().rect_filled(at.expand2(egui::vec2(5.0, 1.0)), 4.0, Color32::from_black_alpha(150));
+        ui.painter().galley(at.min, galley, Color32::WHITE);
+    };
+    label(rect.left_top() + egui::vec2(10.0, 8.0), egui::Align2::LEFT_TOP, format!("{} kHz", crate::audio::trim_float(libm::round(nyquist / 100.0) / 10.0)));
+    label(rect.left_bottom() + egui::vec2(10.0, -8.0), egui::Align2::LEFT_BOTTOM, "0".to_string());
+    label(rect.right_bottom() + egui::vec2(-10.0, -8.0), egui::Align2::RIGHT_BOTTOM, fmt_total(*seconds));
+    if let Some(hz) = cutoff.filter(|hz| *hz < *nyquist) {
+        let y = rect.bottom() - (hz / nyquist) as f32 * rect.height();
+        let gold = Color32::from_rgb(255, 210, 122);
+        ui.painter().extend(egui::Shape::dashed_line(&[egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)], egui::Stroke::new(2.0f32, gold), 7.0, 5.0));
+        let galley = ui.painter().layout_no_wrap(format!("lowpass {:.1} kHz", hz / 1000.0), egui::FontId::new(12.0, crate::fonts::bold()), gold);
+        let at = egui::Align2::RIGHT_BOTTOM.anchor_size(egui::pos2(rect.right() - 12.0, y - 5.0), galley.size());
+        ui.painter().rect_filled(at.expand2(egui::vec2(7.0, 2.0)), 5.0, Color32::from_rgba_unmultiplied(13, 7, 22, 200));
+        ui.painter().galley(at.min, galley, gold);
+    }
+}
+
+/// The Speed? dial: how fast or slow the recording plays, -3 % to +3 %, green while
+/// within 0.3 %, yellow to 1 %.
+fn speed_dial(ui: &mut egui::Ui, p: Palette, percent: f64, level: Level) {
+    const RANGE: f64 = 3.0;
+    ui.add_space(6.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 150.0), egui::Sense::hover());
+    let radius = 104.0f32;
+    let centre = egui::pos2(rect.center().x, rect.top() + 18.0 + radius);
+    let at = |value: f64, r: f32| {
+        let a = std::f32::consts::FRAC_PI_2 - (value.clamp(-RANGE, RANGE) / RANGE) as f32 * std::f32::consts::FRAC_PI_2;
+        centre + egui::vec2(libm::cosf(a), -libm::sinf(a)) * r
+    };
+    let arc = |from: f64, to: f64, colour: Color32| {
+        let points: Vec<egui::Pos2> = (0..=32).map(|i| at(from + (to - from) * i as f64 / 32.0, radius)).collect();
+        ui.painter().add(egui::Shape::line(points, egui::Stroke::new(18.0f32, colour)));
+    };
+    arc(-RANGE, RANGE, p.show_row.lerp_to_gamma(p.border, 0.5));
+    let (yellow, _) = p.badge(Level::Warn);
+    let (green, _) = p.badge(Level::Ok);
+    arc(-1.0, 1.0, yellow);
+    arc(-0.3, 0.3, green);
+    ui.painter().line_segment([at(0.0, radius - 13.0), at(0.0, radius + 13.0)], egui::Stroke::new(2.0f32, p.weak));
+    for (value, text) in [(-RANGE, "−3 %"), (0.0, "0"), (RANGE, "+3 %")] {
+        let pos = if value == 0.0 { at(0.0, radius - 24.0) } else { at(value, radius) + egui::vec2(0.0, 18.0) };
+        ui.painter().text(pos, egui::Align2::CENTER_CENTER, text, egui::FontId::proportional(11.0), p.weak);
+    }
+    let needle = vivid(level);
+    ui.painter().line_segment([centre, at(percent, radius - 8.0)], egui::Stroke::new(3.5f32, needle));
+    ui.painter().circle_filled(centre, 8.0, needle);
+    ui.painter().circle_filled(centre, 3.0, p.ground);
+    let text = if percent.abs() < 0.05 {
+        "at the right speed".to_string()
+    } else {
+        format!("{:+.1} % · plays {}", percent, if percent > 0.0 { "fast" } else { "slow" })
+    };
+    let off = if percent.abs() > RANGE { " (off the dial)" } else { "" };
+    ui.vertical_centered(|ui| {
+        ui.label(colored(format!("{text}{off}"), level).size(17.0).family(crate::fonts::bold()));
+    });
+}
+
 /// Where a show stands on its row: the share of its files done by the running task, or the
 /// worst result of its files.
 #[derive(Clone, Copy)]
@@ -722,6 +917,8 @@ struct Toast {
     /// How long it has been shown (not counting the time under the pointer), and when last drawn.
     age: Duration,
     seen: Instant,
+    /// When it came: it slides in.
+    born: Instant,
     /// The task made files: "Open folder" shows the first show's folder.
     folder: Option<PathBuf>,
     /// Files to check or with an error: a link sets the list filter to them.
@@ -742,6 +939,8 @@ impl Toast {
 #[derive(Clone, Copy)]
 enum Row {
     Show(usize),
+    /// A disc's folder, by its first file.
+    Disc(usize, usize),
     File(usize, usize),
 }
 
@@ -755,6 +954,8 @@ enum Action {
     CopyInfo,
     TagInfo,
     Setlist,
+    /// Share cards of these shows, or of the selection.
+    ShareCard(Option<Vec<PathBuf>>),
     ExtractAudio,
     /// Pick .torrent files, then check the selection against them.
     TorrentCheck,
@@ -915,6 +1116,42 @@ pub struct App {
     results_of: Option<&'static str>,
     /// Top of the status bar and log: the notifications sit just above.
     bottom_top: f32,
+    /// The recording source of each show (SBD, AUD...) and whether its info file gave it.
+    lineage: HashMap<PathBuf, Option<(&'static str, bool)>>,
+    /// The size of the files of the list (its summary in the toolbar).
+    list_bytes: u64,
+    /// When files and shows got their result from a task: their rows glow for a moment.
+    fresh: HashMap<PathBuf, Instant>,
+    /// The end of a long task, in a band above the list until closed or another task starts.
+    banner: Option<Banner>,
+    /// The outline of the files an analysis read (Wave column).
+    waves: HashMap<PathBuf, Vec<f32>>,
+    /// The spectrograms of the lossless analysis windows.
+    plots: HashMap<PathBuf, PlotState>,
+    /// Share cards asked from the end-of-task band: made on the next frame.
+    pending_share: Option<Vec<PathBuf>>,
+}
+
+/// A drawn spectrogram, and the file's outline read on the way.
+type PlotDone = (Result<crate::spectrogram::Plot, String>, Option<Vec<f32>>);
+
+enum PlotState {
+    Pending(Receiver<PlotDone>),
+    Ready { texture: egui::TextureHandle, nyquist: f64, seconds: f64 },
+    Failed(String),
+}
+
+/// How long a row glows after its result came.
+const GLOW: f32 = 1.6;
+
+struct Banner {
+    level: Level,
+    title: String,
+    detail: String,
+    /// The show folders of the task (their share cards).
+    roots: Vec<PathBuf>,
+    /// Files to check or with an error: a link sets the list filter to them.
+    filter: Option<(Level, usize)>,
 }
 
 /// An open spectrogram window.
@@ -924,6 +1161,7 @@ enum Col {
     Name,
     Format,
     Length,
+    Wave,
     Rate,
     Bits,
     Ch,
@@ -934,13 +1172,14 @@ enum Col {
 }
 
 impl Col {
-    const ALL: [Col; 10] = [Col::Name, Col::Format, Col::Bits, Col::Rate, Col::Length, Col::Ch, Col::Sbe, Col::Source, Col::Speed, Col::Result];
+    const ALL: [Col; 11] = [Col::Name, Col::Format, Col::Bits, Col::Rate, Col::Length, Col::Wave, Col::Ch, Col::Sbe, Col::Source, Col::Speed, Col::Result];
 
     fn title(self) -> &'static str {
         match self {
             Col::Name => "Name",
             Col::Format => "Format",
             Col::Length => "Length",
+            Col::Wave => "Wave",
             Col::Rate => "Rate",
             Col::Bits => "Bits",
             Col::Ch => "Ch",
@@ -956,6 +1195,7 @@ impl Col {
             Col::Name => "File or show name",
             Col::Format => "Audio format",
             Col::Length => "Length (minutes:seconds.frames for CD audio)",
+            Col::Wave => "Outline of the sound (its peaks), once Lossless?, Speed? or a spectrogram has read the file: fades, silences, level jumps",
             Col::Rate => "Sample rate",
             Col::Bits => "Bit depth",
             Col::Ch => "Channels",
@@ -975,6 +1215,7 @@ impl Col {
         }
         match self {
             Col::Name => Column::initial(300.0).at_least(150.0).clip(true),
+            Col::Wave => Column::initial(96.0).at_least(40.0).clip(true),
             _ => Column::auto().at_least(24.0).clip(true).auto_size_this_frame(fit),
         }
     }
@@ -1088,37 +1329,18 @@ impl App {
             toasts_made: 0,
             results_of: None,
             bottom_top: f32::INFINITY,
+            lineage: HashMap::new(),
+            list_bytes: 0,
+            fresh: HashMap::new(),
+            banner: None,
+            waves: HashMap::new(),
+            plots: HashMap::new(),
+            pending_share: None,
         };
-        // The look: warm neutral panels, amber accent, rounded white buttons.
         cc.egui_ctx.set_fonts(crate::fonts::definitions());
         cc.egui_ctx.all_styles_mut(|style| {
             style.spacing.button_padding = egui::vec2(10.0, 5.0);
             style.spacing.interact_size.y = style.spacing.interact_size.y.max(28.0);
-            let p = Palette::of(style.visuals.dark_mode);
-            let v = &mut style.visuals;
-            v.window_rounding = egui::Rounding::same(10.0);
-            v.menu_rounding = egui::Rounding::same(8.0);
-            for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
-                w.rounding = egui::Rounding::same(7.0);
-                w.expansion = 0.0;
-            }
-            v.panel_fill = p.chrome;
-            v.window_fill = p.ground;
-            v.hyperlink_color = p.accent;
-            v.selection.bg_fill = p.tint;
-            v.selection.stroke = egui::Stroke::new(1.0f32, p.accent);
-            v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0f32, p.border);
-            v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0f32, p.button_border);
-            v.widgets.inactive.weak_bg_fill = p.button;
-            v.widgets.inactive.bg_fill = p.button;
-            v.widgets.hovered.weak_bg_fill = p.tint;
-            v.widgets.hovered.bg_fill = p.tint;
-            v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0f32, p.accent);
-            v.widgets.active.weak_bg_fill = p.tint_strong;
-            v.widgets.active.bg_fill = p.tint_strong;
-            v.widgets.active.bg_stroke = egui::Stroke::new(1.0f32, p.accent);
-            v.widgets.open.weak_bg_fill = p.tint;
-            v.widgets.open.bg_stroke = egui::Stroke::new(1.0f32, p.accent);
         });
         // egui's light theme writes text in mid grey (80/255, and fainter for weak text):
         // darker, for reading on white.
@@ -1194,6 +1416,35 @@ impl App {
         };
         ctx.set_theme(preference);
         DARK_THEME.store(ctx.theme() == egui::Theme::Dark, Ordering::Relaxed);
+        ACCENT.store(ops::Accent::ALL.iter().position(|a| *a == self.opt.accent).unwrap_or(0) as u8, Ordering::Relaxed);
+        // The look: warm neutral panels, the accent, rounded white buttons.
+        ctx.all_styles_mut(|style| {
+            let p = Palette::of(style.visuals.dark_mode);
+            let v = &mut style.visuals;
+            v.window_rounding = egui::Rounding::same(10.0);
+            v.menu_rounding = egui::Rounding::same(8.0);
+            for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
+                w.rounding = egui::Rounding::same(7.0);
+                w.expansion = 0.0;
+            }
+            v.panel_fill = p.chrome;
+            v.window_fill = p.ground;
+            v.hyperlink_color = p.accent;
+            v.selection.bg_fill = p.tint;
+            v.selection.stroke = egui::Stroke::new(1.0f32, p.accent);
+            v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0f32, p.border);
+            v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0f32, p.button_border);
+            v.widgets.inactive.weak_bg_fill = p.button;
+            v.widgets.inactive.bg_fill = p.button;
+            v.widgets.hovered.weak_bg_fill = p.tint;
+            v.widgets.hovered.bg_fill = p.tint;
+            v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0f32, p.accent);
+            v.widgets.active.weak_bg_fill = p.tint_strong;
+            v.widgets.active.bg_fill = p.tint_strong;
+            v.widgets.active.bg_stroke = egui::Stroke::new(1.0f32, p.accent);
+            v.widgets.open.weak_bg_fill = p.tint;
+            v.widgets.open.bg_stroke = egui::Stroke::new(1.0f32, p.accent);
+        });
     }
 
     // ------------------------------------------------------------ list
@@ -1356,14 +1607,27 @@ impl App {
         self.selected.clear();
         self.collapsed.clear();
         self.anchor = None;
+        self.lineage.clear();
+        self.list_bytes = 0;
+        self.banner = None;
+        self.waves.clear();
+        self.plots.clear();
     }
 
     fn rebuild(&mut self) {
         self.fit_columns = true;
         let before: HashSet<PathBuf> = self.shows.iter().map(|s| s.root.clone()).collect();
         self.shows = scan_paths(&self.roots, &self.excluded);
-        let existing: HashSet<&PathBuf> = self.shows.iter().flat_map(|s| s.files.iter().chain(std::iter::once(&s.root))).collect();
-        self.selected.retain(|p| existing.contains(p));
+        // Files, shows and their disc folders.
+        let existing: HashSet<&Path> =
+            self.shows.iter().flat_map(|s| s.files.iter().flat_map(|f| [f.as_path(), f.parent().unwrap_or(f)]).chain(std::iter::once(s.root.as_path()))).collect();
+        self.selected.retain(|p| existing.contains(p.as_path()));
+        self.list_bytes = self.shows.iter().flat_map(|s| &s.files).filter_map(|f| std::fs::metadata(f).ok()).map(|m| m.len()).sum();
+        for show in &self.shows {
+            if !self.lineage.contains_key(&show.root) {
+                self.lineage.insert(show.root.clone(), show_lineage(&show.root));
+            }
+        }
         // Shows arrive unfolded, track titles visible, unless the collapsed view is on; only
         // the user folds or unfolds them after that.
         if self.opt.collapsed_view {
@@ -1398,8 +1662,19 @@ impl App {
                 continue;
             }
             rows.push(Row::Show(si));
-            if !self.collapsed.contains(&show.root) {
-                rows.extend(files.into_iter().map(|fi| Row::File(si, fi)));
+            if self.collapsed.contains(&show.root) {
+                continue;
+            }
+            // A show on several discs (CD1, CD2... folders): a row before each disc.
+            let discs = show.files.windows(2).any(|w| w[0].parent() != w[1].parent());
+            let mut disc = None;
+            for fi in files {
+                let folder = show.files[fi].parent();
+                if discs && folder != disc {
+                    rows.push(Row::Disc(si, fi));
+                    disc = folder;
+                }
+                rows.push(Row::File(si, fi));
             }
         }
         rows
@@ -1464,7 +1739,25 @@ impl App {
     fn row_path(&self, row: Row) -> &Path {
         match row {
             Row::Show(si) => &self.shows[si].root,
+            Row::Disc(si, fi) => self.shows[si].files[fi].parent().unwrap_or(&self.shows[si].root),
             Row::File(si, fi) => &self.shows[si].files[fi],
+        }
+    }
+
+    /// The row is selected, or for a file its disc.
+    fn row_selected(&self, row: Row) -> bool {
+        let path = self.row_path(row);
+        self.selected.contains(path) || matches!(row, Row::File(..)) && path.parent().is_some_and(|disc| self.selected.contains(disc))
+    }
+
+    /// The row of a file or show that just got its result glows, fading: painted across the
+    /// list (`band`) by its first cell, under the others.
+    fn glow(&self, ui: &egui::Ui, path: &Path, band: egui::Rect) {
+        let Some(when) = self.fresh.get(path) else { return };
+        let left = 1.0 - when.elapsed().as_secs_f32() / GLOW;
+        if left > 0.0 {
+            let rect = egui::Rect::from_x_y_ranges(band.x_range(), ui.max_rect().y_range());
+            ui.ctx().layer_painter(ui.layer_id()).with_clip_rect(band).rect_filled(rect, 0.0, Palette::now().tint_strong.gamma_multiply(left * left));
         }
     }
 
@@ -1480,13 +1773,102 @@ impl App {
         for show in &self.shows {
             let whole = self.selected.is_empty() || self.selected.contains(&show.root);
             let picked: Vec<PathBuf> =
-                show.files.iter().filter(|f| (whole || self.selected.contains(*f)) && self.passes_filter(f)).cloned().collect();
+                show.files.iter().filter(|f| (whole || self.selected.contains(*f) || f.parent().is_some_and(|d| self.selected.contains(d))) && self.passes_filter(f)).cloned().collect();
             if !picked.is_empty() {
                 shows.push(show.clone());
                 files.extend(picked);
             }
         }
         (shows, files)
+    }
+
+    /// What the share card of a show says: from the list, its details and the verdicts and
+    /// results of this session (a check not run is left out).
+    fn card(&self, show: &Show) -> crate::sharecard::Card {
+        use crate::ops::plural;
+        let (artist, date, place) = crate::tagging::identity(show);
+        let artist = if artist.trim().is_empty() { crate::files::show_name(&show.root) } else { artist };
+        let when_where = [date.trim(), place.trim()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
+        let files = &show.files;
+        let infos: Vec<&AudioInfo> = files.iter().filter_map(|f| self.info.get(f)).collect();
+        let mut formats: Vec<String> = infos.iter().map(|i| i.label()).collect();
+        formats.sort();
+        formats.dedup();
+        let mut facts: Vec<String> = formats.into_iter().take(2).collect();
+        facts.push(plural(files.len(), "track", "tracks"));
+        let (seconds, _) = show_length(files, &self.info);
+        if seconds > 0.0 {
+            let s = libm::round(seconds) as u64;
+            facts.push(if s >= 3600 { format!("{} h {:02} min", s / 3600, s % 3600 / 60) } else { format!("{} min {:02} s", s / 60, s % 60) });
+        }
+        let n = files.len();
+        let mut checks = Vec::new();
+        // Checksums or decode test: the last task, if it gave every file of the show a result.
+        if let Some(task @ ("Verify checksums" | "Decode test")) = self.results_of {
+            let levels: Vec<Level> = files.iter().filter_map(|f| self.status.get(f).map(|s| s.1)).collect();
+            if levels.len() == n {
+                let bad = levels.iter().filter(|l| **l == Level::Error).count();
+                let warn = levels.iter().filter(|l| **l == Level::Warn).count();
+                let verify = task == "Verify checksums";
+                checks.push(match (bad, warn) {
+                    (0, 0) if verify => (Level::Ok, "Checksums verified".to_string(), format!("{} match their checksum files", plural(n, "file", "files"))),
+                    (0, 0) => (Level::Ok, "Decodes cleanly".to_string(), format!("no error in {}", plural(n, "file", "files"))),
+                    (0, w) => (Level::Warn, if verify { "Checksums to check" } else { "Decoding to check" }.to_string(), format!("{w} of {n} files")),
+                    (b, _) => (Level::Error, if verify { "Checksum errors" } else { "Decoding errors" }.to_string(), format!("{b} of {n} files")),
+                });
+            }
+        }
+        let verdict = |map: &HashMap<PathBuf, (String, Level, String)>| map.get(&show.root).or_else(|| files.first().filter(|_| n == 1).and_then(|f| map.get(f))).cloned();
+        if let Some((text, level, _)) = verdict(&self.source) {
+            let title = match level {
+                Level::Ok => "Lossless origin",
+                Level::Warn => "Origin to check",
+                Level::Error => "Lossy origin",
+                Level::Info => "Origin unclear",
+            };
+            checks.push((level, title.to_string(), format!("Lossless?: {text}")));
+        }
+        if let Some((text, level, _)) = verdict(&self.speed) {
+            let title = match level {
+                Level::Ok => "Right speed",
+                Level::Info => "Speed unclear",
+                _ => "Speed to check",
+            };
+            checks.push((level, title.to_string(), format!("Speed?: {text}")));
+        }
+        let cd = infos.len() == n && infos.iter().all(|i| !i.lossy() && i.bits == 16 && i.rate == 44100 && i.channels == 2);
+        if cd {
+            let sbe = (0..n).filter(|&fi| !last_of_disc(show, fi) && self.info.get(&files[fi]).and_then(|i| i.sbe()) == Some(true)).count();
+            checks.push(if sbe == 0 {
+                (Level::Ok, "CD-ready".to_string(), "no gap risk (SBE) before the last track of a disc".to_string())
+            } else {
+                (Level::Warn, "Gap risk if burned".to_string(), format!("{} with an SBE before the last track of their disc", plural(sbe, "track", "tracks")))
+            });
+        }
+        let label = match (date.trim(), place.trim()) {
+            ("", "") => artist.clone(),
+            (date, place) => format!("{artist} – {place} {date}").replace("  ", " ").trim().to_string(),
+        };
+        let track = crate::sharecard::longest(files, |f| self.info.get(f).map(|i| i.seconds()).unwrap_or(0.0)).map(|path| {
+            let report = self.reports.get(&(ReportKind::Lossless, path.clone())).filter(|r| !r.measures.is_empty());
+            let cutoff = report.and_then(|r| r.cutoff);
+            let caption = match (report, cutoff) {
+                (Some(_), Some(hz)) => format!("{} – lowpass at {:.1} kHz", file_name(&path), hz / 1000.0),
+                (Some(_), None) => format!("{} – full band, no lowpass", file_name(&path)),
+                _ => file_name(&path),
+            };
+            (path, caption, cutoff)
+        });
+        crate::sharecard::Card {
+            root: show.root.clone(),
+            artist,
+            when_where,
+            lineage: self.lineage.get(&show.root).copied().flatten().map(|(kind, _)| kind),
+            facts,
+            checks,
+            label,
+            track,
+        }
     }
 
     fn remove_selected(&mut self) {
@@ -1509,6 +1891,9 @@ impl App {
         if self.running.is_some() {
             return;
         }
+        if !quiet {
+            self.banner = None;
+        }
         let without_files = match &op {
             Op::TorrentCheck(_) | Op::Rollback { .. } => true,
             Op::MediaInfo(dvds) => !dvds.is_empty(),
@@ -1528,7 +1913,7 @@ impl App {
         let label = op.label().to_string();
         let name = op.name();
         let open_after = if matches!(op, Op::Torrent(_)) && self.opt.open_after_torrent { shows.iter().map(|s| s.root.clone()).collect() } else { Vec::new() };
-        let makes_files = matches!(op, Op::Create | Op::Torrent(_) | Op::Convert { .. } | Op::Mp3(_) | Op::FixSbe | Op::CleanWav | Op::ExtractAudio(_) | Op::Setlist);
+        let makes_files = matches!(op, Op::ShareCard(_) | Op::Create | Op::Torrent(_) | Op::Convert { .. } | Op::Mp3(_) | Op::FixSbe | Op::CleanWav | Op::ExtractAudio(_) | Op::Setlist);
         let task_files = files.iter().cloned().collect();
         let sizes: Vec<(f64, f64)> = files
             .iter()
@@ -1694,10 +2079,16 @@ impl App {
                         }
                         running.done_files.insert(path.clone());
                         running.updated.insert(path.clone());
+                        if !running.quiet {
+                            self.fresh.insert(path.clone(), Instant::now());
+                        }
                         self.status.insert(path, (text, level, tooltip));
                     }
                     Msg::Info { path, info } => {
                         self.info.insert(path, info);
+                    }
+                    Msg::Wave { path, peaks } => {
+                        self.waves.insert(path, peaks);
                     }
                     Msg::Source { path, text, level, tooltip, report } => {
                         // Reading the files again (Details) must not replace a measured verdict.
@@ -1706,11 +2097,13 @@ impl App {
                         }
                         self.reports.insert((ReportKind::Lossless, path.clone()), report);
                         running.done_files.insert(path.clone());
+                        self.fresh.insert(path.clone(), Instant::now());
                         self.source.insert(path, (text, level, tooltip));
                     }
                     Msg::Speed { path, text, level, tooltip, report } => {
                         self.reports.insert((ReportKind::Speed, path.clone()), report);
                         running.done_files.insert(path.clone());
+                        self.fresh.insert(path.clone(), Instant::now());
                         self.speed.insert(path, (text, level, tooltip));
                     }
                     Msg::Image { path, image } => {
@@ -1828,7 +2221,41 @@ impl App {
         } else {
             (Level::Ok, "Done".to_string(), None)
         };
+        // A long task (the user may have walked away): a band above the list that stays.
+        let took = running.started.elapsed();
+        if took >= Duration::from_secs(60) && !stopped {
+            let files: usize = running.tally.iter().sum();
+            let title = match (level, files) {
+                (Level::Ok, 0) => "Done".to_string(),
+                (Level::Ok, n) => {
+                    let all = if n == 1 { "The file".to_string() } else { format!("All {n} files") };
+                    match running.name {
+                        "Lossless?" => format!("{all} lossless"),
+                        "Verify checksums" => format!("{all} match their checksums"),
+                        "Decode test" => format!("{all} decode without error"),
+                        _ => format!("{all} OK"),
+                    }
+                }
+                _ => [(error, "with an error"), (warn, "to check")]
+                    .iter()
+                    .filter(|(n, _)| *n > 0)
+                    .map(|(n, what)| format!("{} {what}", crate::ops::plural(*n, "file", "files")))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            };
+            let seconds = took.as_secs();
+            let duration = if seconds >= 3600 {
+                format!("{} h {:02} min", seconds / 3600, seconds % 3600 / 60)
+            } else {
+                format!("{} min {:02} s", seconds / 60, seconds % 60)
+            };
+            let detail = format!("{}: {} in {duration}. {summary}", running.label, crate::ops::plural(running.roots.len(), "show", "shows"));
+            self.banner = Some(Banner { level, title, detail, roots: running.roots.clone(), filter });
+            return;
+        }
+        // "Open folder": the show's, or for a share card (beside it) the card itself, selected.
         let folder = (running.makes_files && !stopped).then(|| running.roots.first().cloned()).flatten();
+        let folder = if running.name == "Share card" { folder.map(|root| crate::sharecard::path_of(&root)) } else { folder };
         // A few at a time: the oldest that would close by itself goes first.
         if self.toasts.len() >= 3 {
             let index = self.toasts.iter().position(|t| t.life().is_some()).unwrap_or(0);
@@ -1843,6 +2270,7 @@ impl App {
             level,
             age: Duration::ZERO,
             seen: Instant::now(),
+            born: Instant::now(),
             folder,
             filter,
         });
@@ -2793,6 +3221,10 @@ impl App {
                     menu_open = true;
                     ops_menu(ui, busy || !has, self.opt.flac_level, &tracker_entries(&self.opt), actions);
                     ui.separator();
+                    if ui.add_enabled(!busy && has, egui::Button::new("🖼 Share card...")).on_hover_text(SHARE_TIP).clicked() {
+                        ui.close_menu();
+                        actions.push(Action::ShareCard(None));
+                    }
                     if ui.add_enabled(!busy, egui::Button::new("↶ Undo tagging...")).on_hover_text(UNDO_TIP).clicked() {
                         ui.close_menu();
                         self.open_undo_dialog();
@@ -3023,6 +3455,20 @@ impl App {
                     if ui.add_enabled(busy, egui::Button::new(stop)).on_hover_text("Stop the running task (Esc)").clicked() {
                         self.stop();
                     }
+                    // The whole list in a few words.
+                    if !self.shows.is_empty() {
+                        ui.add_space(8.0);
+                        let files: Vec<PathBuf> = self.shows.iter().flat_map(|s| s.files.iter().cloned()).collect();
+                        let (seconds, complete) = show_length(&files, &self.info);
+                        let mut parts = vec![crate::ops::plural(self.shows.len(), "show", "shows"), crate::ops::plural(files.len(), "file", "files")];
+                        if seconds > 0.0 {
+                            let minutes = libm::round(seconds / 60.0) as u64;
+                            parts.push(format!("{} h {:02} min{}", minutes / 60, minutes % 60, if complete { "" } else { " +" }));
+                        }
+                        parts.push(ops::human_size(self.list_bytes));
+                        let tip = if complete { "The whole list: shows, files, length and size" } else { "The whole list: shows, files, length (+: some lengths not read yet) and size" };
+                        ui.add(egui::Label::new(RichText::new(parts.join(" · ")).color(Palette::now().weak)).truncate()).on_hover_text(tip);
+                    }
                 });
             });
             ui.add_space(3.0);
@@ -3243,6 +3689,47 @@ impl App {
         self.bottom_top = status_bar.response.rect.top().min(log_panel.response.rect.top());
     }
 
+    /// The end of a long task, in a band above the list: its outcome, how long it took, a
+    /// link to the files to check.
+    fn banner(&mut self, ctx: &egui::Context) {
+        let Some(b) = &self.banner else { return };
+        let p = Palette::now();
+        let (fill, ink) = p.badge(b.level);
+        let (mut close, mut filter, mut share) = (false, None, false);
+        egui::TopBottomPanel::top("banner").frame(egui::Frame::none().fill(fill).inner_margin(egui::Margin::symmetric(14.0, 8.0))).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
+                let mark_ink = if b.level == Level::Warn { Color32::from_rgb(70, 50, 0) } else { Color32::WHITE };
+                paint_mark(ui.painter(), rect.center(), 13.0, b.level, vivid(b.level), mark_ink);
+                ui.add_space(4.0);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    ui.label(RichText::new(&b.title).size(15.0).family(crate::fonts::bold()).color(ink));
+                    ui.add(egui::Label::new(RichText::new(&b.detail).size(12.0).color(ink.gamma_multiply(0.85))).truncate());
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    close = ui.add(egui::Button::new(RichText::new("✕").color(ink)).frame(false)).on_hover_text("Close").clicked();
+                    share = ui.add_enabled(self.running.is_none(), egui::Button::new("🖼 Share card...")).on_hover_text(SHARE_TIP).clicked();
+                    if let Some((level, n)) = b.filter {
+                        if ui.button(format!("Show the {n}")).clicked() {
+                            filter = Some(level);
+                        }
+                    }
+                });
+            });
+        });
+        if close {
+            self.banner = None;
+        }
+        if share {
+            let roots = self.banner.as_ref().map(|b| b.roots.clone());
+            self.pending_share = roots;
+        }
+        if filter.is_some() {
+            self.filter = filter;
+        }
+    }
+
     /// The notifications of the tasks that ended, at the bottom right, newest at the bottom.
     fn toasts(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         if self.toasts.is_empty() {
@@ -3254,12 +3741,18 @@ impl App {
         let mut bottom = self.bottom_top.min(screen.bottom()) - 12.0;
         let mut closed = Vec::new();
         let mut filter = None;
+        let mut sliding = false;
         for (i, t) in self.toasts.iter_mut().enumerate().rev() {
+            // Slides in from the right in a quarter of a second, easing out.
+            let arrived = (t.born.elapsed().as_secs_f32() / 0.25).min(1.0);
+            sliding |= arrived < 1.0;
+            let ease = 1.0 - (1.0 - arrived) * (1.0 - arrived) * (1.0 - arrived);
             let area = egui::Area::new(egui::Id::new(("toast", t.id)))
                 .order(egui::Order::Foreground)
                 .pivot(egui::Align2::RIGHT_BOTTOM)
-                .fixed_pos(egui::pos2(screen.right() - 16.0, bottom))
+                .fixed_pos(egui::pos2(screen.right() - 16.0 + 48.0 * (1.0 - ease), bottom))
                 .show(ctx, |ui| {
+                    ui.set_opacity(ease);
                     egui::Frame::none()
                         .fill(p.ground)
                         .stroke(egui::Stroke::new(1.0f32, p.border))
@@ -3325,7 +3818,9 @@ impl App {
         if let Some(level) = filter {
             self.filter = Some(level);
         }
-        if self.toasts.iter().any(|t| t.life().is_some()) {
+        if sliding {
+            ctx.request_repaint();
+        } else if self.toasts.iter().any(|t| t.life().is_some()) {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
     }
@@ -3449,11 +3944,12 @@ impl App {
                             last_shown = last_shown.max(index);
                             let r = rows[index];
                             let path = self.row_path(r).to_path_buf();
-                            row.set_selected(self.selected.contains(&path));
+                            row.set_selected(self.row_selected(r));
                             let mut responses = Vec::new();
                             match r {
                                 Row::Show(si) => self.show_cells(&mut row, si, &cols, visible, &mut responses, actions),
-                                Row::File(si, fi) => self.file_cells(&mut row, si, fi, &cols, &mut responses, actions),
+                                Row::Disc(si, fi) => self.disc_cells(&mut row, si, fi, &cols, visible, &mut responses),
+                                Row::File(si, fi) => self.file_cells(&mut row, (si, fi), &cols, visible, &mut responses, actions),
                             }
                             let Some(mut response) = responses.pop() else { return };
                             for other in responses {
@@ -3479,6 +3975,7 @@ impl App {
                             // A show opens its folder; a file opens its folder with the file selected.
                             let folder = match r {
                                 Row::Show(si) => self.shows[si].root.clone(),
+                                Row::Disc(..) => path.clone(),
                                 Row::File(si, fi) => self.shows[si].files[fi].clone(),
                             };
                             let busy = self.running.is_some();
@@ -3492,6 +3989,10 @@ impl App {
                                 if ui.button("📁 Open folder").on_hover_text("Open the folder in the file manager (for a file, with the file selected)").clicked() {
                                     ui.close_menu();
                                     actions.push(Action::OpenFolder(folder.clone()));
+                                }
+                                if ui.add_enabled(!busy, egui::Button::new("🖼 Share card...")).on_hover_text(SHARE_TIP).clicked() {
+                                    ui.close_menu();
+                                    actions.push(Action::ShareCard(None));
                                 }
                                 ui.separator();
                                 ops_menu(ui, busy, flac_level, &trackers, actions);
@@ -3617,6 +4118,7 @@ impl App {
                 // The cell's own painter is clipped to the cell: the layer's, to the list.
                 ui.ctx().layer_painter(ui.layer_id()).with_clip_rect(band).rect_filled(rect, 0.0, fill);
             }
+            self.glow(ui, &show.root, band);
         };
         for &col in cols {
             match col {
@@ -3648,6 +4150,21 @@ impl App {
                         };
                         response.on_hover_text(tip);
                     }
+                    if let Some(Some((kind, from_info))) = self.lineage.get(&show.root) {
+                        let (fill, ink) = lineage_colours(kind, DARK_THEME.load(Ordering::Relaxed));
+                        let size = if self.opt.compact { 10.0 } else { 11.0 };
+                        let whence = if *from_info { "its info file" } else { "the folder name" };
+                        let what = match *kind {
+                            "SBD" => "soundboard",
+                            "AUD" => "audience",
+                            "MTX" => "matrix (soundboard and audience mixed)",
+                            "FM" => "FM broadcast",
+                            "Pre-FM" => "pre-FM (the feed before broadcast)",
+                            _ => "DAT master",
+                        };
+                        pill(ui, kind.to_string(), egui::FontId::new(size, crate::fonts::bold()), fill, ink)
+                            .on_hover_text(format!("Recording source, as {whence} says: {what}"));
+                    }
                     let parent_is_show = show.root.parent().is_some_and(|p| self.shows.iter().any(|s| s.root == p))
                         && !crate::files::is_output_dir(&file_name(&show.root));
                     let label = if parent_is_show {
@@ -3670,7 +4187,7 @@ impl App {
                         ui.label(format!("{}{suffix}", fmt_total(total)));
                     }
                 }).1),
-                Col::Rate | Col::Bits | Col::Ch => responses.push(row.col(|_| {}).1),
+                Col::Rate | Col::Bits | Col::Ch | Col::Wave => responses.push(row.col(|_| {}).1),
                 Col::Sbe => responses.push(row.col(|ui| {
                     // Only the SBEs that matter: not those on the last track of a disc.
                     let sbe = (0..show.files.len())
@@ -3689,13 +4206,41 @@ impl App {
         }
     }
 
-    fn file_cells(&self, row: &mut egui_extras::TableRow, si: usize, fi: usize, cols: &[Col], responses: &mut Vec<egui::Response>, actions: &mut Vec<Action>) {
+    /// A disc of a show: its folder name, number of tracks and length, under a rule.
+    fn disc_cells(&self, row: &mut egui_extras::TableRow, si: usize, fi: usize, cols: &[Col], band: egui::Rect, responses: &mut Vec<egui::Response>) {
+        let p = Palette::now();
+        let show = &self.shows[si];
+        let folder = show.files[fi].parent().unwrap_or(&show.root);
+        let files: Vec<PathBuf> = show.files.iter().filter(|f| f.parent() == Some(folder)).cloned().collect();
+        for &col in cols {
+            match col {
+                Col::Name => responses.push(row.col(|ui| {
+                    let top = ui.max_rect().top() + 0.5;
+                    ui.ctx().layer_painter(ui.layer_id()).with_clip_rect(band).hline(band.x_range(), top, egui::Stroke::new(1.0f32, p.border));
+                    ui.add_space(22.0);
+                    let name = if folder == show.root { "Show folder".to_string() } else { file_name(folder) };
+                    ui.label(RichText::new(name.to_uppercase()).size(11.0).family(crate::fonts::bold()).color(p.accent)).on_hover_text(folder.display().to_string());
+                    ui.label(RichText::new(crate::ops::plural(files.len(), "track", "tracks")).size(12.0).color(p.weak));
+                }).1),
+                Col::Length => responses.push(row.col(|ui| {
+                    let (total, complete) = show_length(&files, &self.info);
+                    if total > 0.0 {
+                        ui.label(RichText::new(format!("{}{}", fmt_total(total), if complete { "" } else { " +" })).size(12.0).color(p.weak));
+                    }
+                }).1),
+                _ => responses.push(row.col(|_| {}).1),
+            }
+        }
+    }
+
+    fn file_cells(&self, row: &mut egui_extras::TableRow, (si, fi): (usize, usize), cols: &[Col], band: egui::Rect, responses: &mut Vec<egui::Response>, actions: &mut Vec<Action>) {
         let show = &self.shows[si];
         let path = &show.files[fi];
         let info = self.info.get(path);
         for &col in cols {
             match col {
                 Col::Name => responses.push(row.col(|ui| {
+                    self.glow(ui, path, band);
                     // A file the running task has not reached yet: a small empty ring.
                     let left = ui.cursor().left();
                     ui.add_space(22.0);
@@ -3717,6 +4262,11 @@ impl App {
                     responses.push(row.col(|ui| { ui.label(format); }).1);
                 }
                 Col::Length => responses.push(row.col(|ui| { ui.label(info.map(|i| i.length()).unwrap_or_default()); }).1),
+                Col::Wave => responses.push(row.col(|ui| {
+                    if let Some(peaks) = self.waves.get(path) {
+                        paint_wave(ui, peaks).on_hover_text("Outline of the sound (its peaks, scaled to the loudest), from the last analysis that read the file");
+                    }
+                }).1),
                 Col::Rate => responses.push(row.col(|ui| { ui.label(info.map(|i| i.rate_label()).unwrap_or_default()); }).1),
                 Col::Bits => responses.push(row.col(|ui| {
                     ui.label(info.map(|i| if i.lossy() { "-".to_string() } else { i.bits.to_string() }).unwrap_or_default());
@@ -3807,6 +4357,19 @@ impl App {
                 Action::CopyInfo => self.copy_info(ctx),
                 Action::TagInfo => self.open_tag_dialog(),
                 Action::ExtractAudio => self.open_extract_dialog(),
+                Action::ShareCard(roots) => {
+                    let shows: Vec<Show> = match roots {
+                        Some(roots) => self.shows.iter().filter(|s| roots.contains(&s.root)).cloned().collect(),
+                        None => self.selection().0,
+                    };
+                    const MAX: usize = 20;
+                    if shows.len() > MAX {
+                        self.log(format!("Share cards are made for the first {MAX} shows."), Level::Warn);
+                    }
+                    let cards: Vec<crate::sharecard::Card> = shows.iter().take(MAX).map(|show| self.card(show)).collect();
+                    let files = shows.iter().take(MAX).flat_map(|s| s.files.clone()).collect();
+                    self.start(Op::ShareCard(cards), shows.into_iter().take(MAX).collect(), files, false);
+                }
                 Action::Setlist => {
                     if self.opt.setlistfm_key.trim().is_empty() {
                         self.flash("Enter your setlist.fm API key in Settings first (a free key, from setlist.fm).");
@@ -3906,17 +4469,58 @@ impl App {
         }
     }
 
+    /// Files dragged over the window: a dashed frame over the faded list, the cassette
+    /// turning with the first folder's name on it, and what the drop will do.
+    fn drop_frame(&self, ctx: &egui::Context, ctrl: bool) {
+        let p = Palette::now();
+        let hovered: Vec<PathBuf> = ctx.input(|i| i.raw.hovered_files.iter().filter_map(|f| f.path.clone()).collect());
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("drop")));
+        let screen = ctx.screen_rect();
+        painter.rect_filled(screen, 0.0, p.ground.gamma_multiply(0.7));
+        let frame = screen.shrink(14.0);
+        painter.rect_filled(frame, 14.0, p.tint.gamma_multiply(0.88));
+        painter.extend(egui::Shape::dashed_line(&rounded_outline(frame, 14.0), egui::Stroke::new(2.5f32, p.accent), 10.0, 7.0));
+        let label = match hovered.first() {
+            Some(first) if first.is_dir() => file_name(first),
+            Some(first) => first.parent().map(file_name).unwrap_or_default(),
+            None => "New shows".to_string(),
+        };
+        let size = egui::vec2(220.0, 141.0).min(frame.size() * 0.45);
+        let cassette = egui::Rect::from_center_size(frame.center() - egui::vec2(0.0, 40.0), egui::vec2(size.x, size.x * 0.64));
+        paint_cassette(&painter, cassette, &label, ctx.input(|i| i.time) as f32 * 12.0, 0.35);
+        let torrents = !hovered.is_empty() && hovered.iter().all(|f| crate::files::ext_lower(f) == "torrent");
+        let what = if hovered.iter().all(|f| f.is_dir()) {
+            crate::ops::plural(hovered.len(), "folder", "folders")
+        } else if hovered.iter().all(|f| f.is_file()) {
+            crate::ops::plural(hovered.len(), "file", "files")
+        } else {
+            crate::ops::plural(hovered.len(), "item", "items")
+        };
+        let (headline, hint) = match (torrents, hovered.is_empty(), ctrl) {
+            (true, _, _) => (format!("Drop to check the list against {}", crate::ops::plural(hovered.len(), "torrent", "torrents")), String::new()),
+            (_, true, false) => ("Drop to replace the list".to_string(), "Hold Ctrl to add to it instead".to_string()),
+            (_, true, true) => ("Drop to add to the list".to_string(), String::new()),
+            (_, false, false) => (format!("Drop to open {what}"), "They replace the list · hold Ctrl to add them to it".to_string()),
+            (_, false, true) => (format!("Drop to add {what} to the list"), String::new()),
+        };
+        let mut y = cassette.bottom() + 22.0;
+        let headline = painter.layout_no_wrap(headline, egui::FontId::new(21.0, crate::fonts::bold()), p.accent);
+        painter.galley(egui::pos2(frame.center().x - headline.size().x / 2.0, y), headline.clone(), p.accent);
+        y += headline.size().y + 6.0;
+        if !hint.is_empty() {
+            let hint = painter.layout_no_wrap(hint, egui::FontId::proportional(14.0), p.weak);
+            painter.galley(egui::pos2(frame.center().x - hint.size().x / 2.0, y), hint, p.weak);
+        }
+        ctx.request_repaint();
+    }
+
     fn drops(&mut self, ctx: &egui::Context) {
         let (dropped, ctrl, hovering) = ctx.input(|i| {
             let paths: Vec<PathBuf> = i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect();
             (paths, i.modifiers.command, !i.raw.hovered_files.is_empty())
         });
         if hovering {
-            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("drop")));
-            let rect = ctx.screen_rect();
-            painter.rect_filled(rect, 0.0, Color32::from_black_alpha(140));
-            painter.text(rect.center(), egui::Align2::CENTER_CENTER,
-                "Drop to replace the list\n(hold Ctrl to add to it)", egui::FontId::proportional(22.0), Color32::WHITE);
+            self.drop_frame(ctx, ctrl);
         }
         // Dropped .torrent files are checked against the shows (or the folders beside them).
         let (torrents, dropped): (Vec<PathBuf>, Vec<PathBuf>) =
@@ -4061,6 +4665,19 @@ impl App {
                     ui.radio_value(&mut draft.theme, ThemeChoice::Light, "Light");
                     ui.radio_value(&mut draft.theme, ThemeChoice::Dark, "Dark");
                 });
+                ui.horizontal(|ui| {
+                    ui.label("Accent");
+                    let dark = DARK_THEME.load(Ordering::Relaxed);
+                    for accent in ops::Accent::ALL {
+                        // Each name in its own colour.
+                        let saved = ACCENT.swap(ops::Accent::ALL.iter().position(|a| *a == accent).unwrap_or(0) as u8, Ordering::Relaxed);
+                        let colour = Palette::of(dark).accent;
+                        ACCENT.store(saved, Ordering::Relaxed);
+                        ui.radio_value(&mut draft.accent, accent, RichText::new(accent.name()).color(colour).family(crate::fonts::bold()));
+                    }
+                })
+                .response
+                .on_hover_text("The colour of buttons, links, selection and progress (the status colours stay green, yellow and red)");
             });
             ui.separator();
             ui.horizontal(|ui| {
@@ -4302,7 +4919,14 @@ fn measure_line(ui: &mut egui::Ui, p: Palette, m: &crate::report::Measure, extra
 
 /// "See more" as cards: the verdict, then the measurements grouped in sections that fold
 /// (open when they hold a doubt or an error), the tracks of a show, the reasoning.
-fn report_cards(ui: &mut egui::Ui, p: Palette, report: &crate::report::Report, (kind, path): (ReportKind, &Path), opened: &mut Vec<(ReportKind, PathBuf)>) {
+fn report_cards(
+    ui: &mut egui::Ui,
+    p: Palette,
+    report: &crate::report::Report,
+    (kind, path): (ReportKind, &Path),
+    visual: impl FnOnce(&mut egui::Ui),
+    opened: &mut Vec<(ReportKind, PathBuf)>,
+) {
     ui.spacing_mut().item_spacing.y = 10.0;
     ui.add_space(4.0);
     card(ui, p, |ui| {
@@ -4327,6 +4951,7 @@ fn report_cards(ui: &mut egui::Ui, p: Palette, report: &crate::report::Report, (
                 }
             });
         }
+        visual(ui);
     });
     // Sections in a fixed order; a report with none of the named ones (Speed?) has one.
     const ORDER: [&str; 3] = ["Coding traces", "Frequency content", "Stereo, FM and bits"];
@@ -4418,6 +5043,7 @@ fn report_cards(ui: &mut egui::Ui, p: Palette, report: &crate::report::Report, (
 impl App {
     /// "See more": the full analysis (lossless, speed) of a file or a show, in its own window.
     fn report_windows(&mut self, ctx: &egui::Context) {
+        self.prepare_plots(ctx);
         let mut closed = Vec::new();
         let mut opened = Vec::new();
         let mut spectrogram = None;
@@ -4459,7 +5085,14 @@ impl App {
                     let p = Palette::now();
                     egui::CentralPanel::default().frame(egui::Frame::central_panel(ui.style()).fill(p.chrome)).show_inside(ui, |ui| {
                         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                            report_cards(ui, p, &report, (*kind, path), &mut opened);
+                            let visual = |ui: &mut egui::Ui| match (*kind, report.speed) {
+                                (ReportKind::Speed, Some(percent)) => speed_dial(ui, p, percent, report.level),
+                                (ReportKind::Lossless, _) if !is_show && !report.measures.is_empty() => {
+                                    report_plot(ui, self.plots.get(path), report.cutoff);
+                                }
+                                _ => {}
+                            };
+                            report_cards(ui, p, &report, (*kind, path), visual, &mut opened);
                         });
                     });
                 };
@@ -4493,6 +5126,49 @@ impl App {
         }
         if let Some(path) = spectrogram {
             self.start(Op::Spectrogram, Vec::new(), vec![path], false);
+        }
+    }
+
+    /// The spectrograms of the open lossless analyses of files: drawn in a thread of their
+    /// own, then turned into textures. The file's outline comes with them.
+    fn prepare_plots(&mut self, ctx: &egui::Context) {
+        let wanted: Vec<PathBuf> = self
+            .open_reports
+            .iter()
+            .filter(|(kind, path)| *kind == ReportKind::Lossless && self.reports.get(&(*kind, path.clone())).is_some_and(|r| !r.measures.is_empty()))
+            .map(|(_, path)| path.clone())
+            .collect();
+        for path in wanted {
+            match self.plots.get(&path) {
+                None => {
+                    let (tx, rx) = mpsc::channel();
+                    let source = path.clone();
+                    let repaint = ctx.clone();
+                    std::thread::spawn(move || {
+                        crate::dsp::lower_priority();
+                        let plot = crate::spectrogram::plot(&source, &AtomicBool::new(false));
+                        let _ = tx.send((plot, crate::dsp::take_wave(&source)));
+                        repaint.request_repaint();
+                    });
+                    self.plots.insert(path, PlotState::Pending(rx));
+                }
+                Some(PlotState::Pending(rx)) => {
+                    let Ok((plot, wave)) = rx.try_recv() else { continue };
+                    if let Some(peaks) = wave {
+                        self.waves.insert(path.clone(), peaks);
+                    }
+                    let state = match plot {
+                        Ok(plot) => {
+                            let image = egui::ColorImage::from_rgba_unmultiplied([plot.width, plot.height], &plot.rgba);
+                            let texture = ctx.load_texture(format!("plot {}", path.display()), image, egui::TextureOptions::LINEAR);
+                            PlotState::Ready { texture, nyquist: plot.nyquist, seconds: plot.seconds }
+                        }
+                        Err(e) => PlotState::Failed(e),
+                    };
+                    self.plots.insert(path, state);
+                }
+                Some(_) => {}
+            }
         }
     }
 
@@ -4963,6 +5639,10 @@ impl eframe::App for App {
         self.shortcuts(ctx, &mut actions);
         self.menu_open = false;
         self.menu_and_toolbar(ctx, &mut actions);
+        self.banner(ctx);
+        if let Some(roots) = self.pending_share.take() {
+            actions.push(Action::ShareCard(Some(roots)));
+        }
         self.bottom(ctx, &mut actions);
         self.table(ctx, &mut actions);
         self.toasts(ctx, &mut actions);
@@ -4991,6 +5671,10 @@ impl eframe::App for App {
         if title != self.title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.title = title;
+        }
+        self.fresh.retain(|_, when| when.elapsed().as_secs_f32() < GLOW);
+        if !self.fresh.is_empty() {
+            ctx.request_repaint_after(Duration::from_millis(30));
         }
         if self.running.is_some() {
             ctx.request_repaint_after(Duration::from_millis(80));

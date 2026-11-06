@@ -46,6 +46,8 @@ pub enum Msg {
     Info { path: PathBuf, info: AudioInfo },
     Progress { done: usize, total: usize },
     Image { path: PathBuf, image: crate::spectrogram::Image },
+    /// A file's outline (`dsp::take_wave`), for its mini waveform.
+    Wave { path: PathBuf, peaks: Vec<f32> },
     /// Lossless check verdict, for the Source column, with the full analysis.
     Source { path: PathBuf, text: String, level: Level, tooltip: String, report: Arc<crate::lossless::Report> },
     /// Speed check verdict, for the Speed column, with the full analysis.
@@ -145,6 +147,8 @@ pub struct Options {
     /// Other trackers, added by the user.
     pub custom_trackers: Vec<CustomTracker>,
     pub theme: ThemeChoice,
+    /// The colour of buttons, links, selection and progress.
+    pub accent: Accent,
     /// FLAC compression level used by "To FLAC" (0-8).
     pub flac_level: u8,
     /// Folder for MP3 copies (empty: next to the show folder).
@@ -182,6 +186,28 @@ pub struct Options {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum Accent {
+    #[default]
+    Amber,
+    Teal,
+    Indigo,
+    Burgundy,
+}
+
+impl Accent {
+    pub const ALL: [Accent; 4] = [Accent::Amber, Accent::Teal, Accent::Indigo, Accent::Burgundy];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Accent::Amber => "Amber",
+            Accent::Teal => "Teal",
+            Accent::Indigo => "Indigo",
+            Accent::Burgundy => "Burgundy",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub enum ThemeChoice {
     #[default]
     System,
@@ -210,6 +236,7 @@ impl Default for Options {
             torrent_source: true,
             custom_trackers: Vec::new(),
             theme: ThemeChoice::System,
+            accent: Accent::Amber,
             flac_level: 8,
             mp3_dir: String::new(),
             after_flac_trash: true,
@@ -264,6 +291,8 @@ pub enum Op {
     ExtractAudio(Vec<(PathBuf, usize)>),
     /// Gives these shows of an undo journal run back as they were.
     Rollback { run: PathBuf, shows: Vec<usize> },
+    /// A share card (PNG) for each of these shows, beside its folder.
+    ShareCard(Vec<crate::sharecard::Card>),
     /// Follow-up of a conversion to FLAC (the choices of its window).
     AfterFlac { roots: Vec<PathBuf>, sources: Vec<PathBuf>, trash_sources: bool, trash_checksums: Vec<PathBuf>, create_ffp: bool },
 }
@@ -313,6 +342,7 @@ impl Op {
             Op::ExtractAudio(_) => "Extracting audio",
             Op::Rollback { .. } => "Rolling back tagging",
             Op::AfterFlac { .. } => "Tidying up after the conversion",
+            Op::ShareCard(_) => "Making share cards",
         }
     }
 
@@ -340,6 +370,7 @@ impl Op {
             Op::ExtractAudio(_) => "Extract audio",
             Op::Rollback { .. } => "Undo tagging",
             Op::AfterFlac { .. } => "After FLAC",
+            Op::ShareCard(_) => "Share card",
         }
     }
 }
@@ -364,6 +395,12 @@ impl Ctx {
             level,
             tooltip: tooltip.into(),
         });
+    }
+    /// The outline of a file an analysis just read whole, for its mini waveform.
+    fn wave(&self, path: &Path) {
+        if let Some(peaks) = crate::dsp::take_wave(path) {
+            let _ = self.tx.send(Msg::Wave { path: path.to_path_buf(), peaks });
+        }
     }
     fn info(&self, path: &Path, info: &AudioInfo) {
         let _ = self.tx.send(Msg::Info { path: path.to_path_buf(), info: info.clone() });
@@ -441,6 +478,7 @@ pub fn spawn(op: Op, shows: Vec<Show>, files: Vec<PathBuf>, opt: Options, tx: Se
                 Op::Setlist => op_setlist(&ctx, &shows),
                 Op::ExtractAudio(tracks) => op_extract_audio(&ctx, tracks),
                 Op::Rollback { run, shows } => op_rollback(&ctx, run, shows),
+                Op::ShareCard(cards) => op_share_card(&ctx, cards),
                 Op::AfterFlac { roots, sources, trash_sources, trash_checksums, create_ffp } => {
                     op_after_flac(&ctx, roots, sources, *trash_sources, trash_checksums, *create_ffp)
                 }
@@ -1032,6 +1070,7 @@ pub fn create_checksums(ctx: &Ctx, shows: &[Show], kinds: &[&'static str]) -> St
 pub fn op_lossless(ctx: &Ctx, shows: &[Show], files: &[PathBuf]) -> String {
     ctx.add_total(files.len());
     let source = |path: &Path, text: &str, level: Level, tooltip: &str, report: crate::lossless::Report| {
+        ctx.wave(path);
         let _ = ctx.tx.send(Msg::Source {
             path: path.to_path_buf(),
             text: text.into(),
@@ -1119,6 +1158,7 @@ pub fn op_lossless(ctx: &Ctx, shows: &[Show], files: &[PathBuf]) -> String {
                 .collect(),
             reasoning,
             key_facts: String::new(),
+            ..Default::default()
         };
         source(&show.root, &shown, level, &format!("Lossless check of the show:\n{text}\n\nClick to see the full analysis."), report);
     }
@@ -1580,6 +1620,7 @@ pub fn op_after_flac(ctx: &Ctx, roots: &[PathBuf], sources: &[PathBuf], trash_so
 pub fn op_speed(ctx: &Ctx, shows: &[Show], files: &[PathBuf]) -> String {
     ctx.add_total(files.len());
     let send = |path: &Path, v: &crate::speed::SpeedVerdict| {
+        ctx.wave(path);
         let _ = ctx.tx.send(Msg::Speed {
             path: path.to_path_buf(),
             text: v.label.clone(),
@@ -1634,6 +1675,7 @@ pub fn op_spectrogram(ctx: &Ctx, files: &[PathBuf]) -> String {
     ctx.add_total(targets.len());
     let results = par_map(ctx, targets, |p| p.clone(), |path| {
         let image = crate::spectrogram::render(path, &ctx.cancel)?;
+        ctx.wave(path);
         let _ = ctx.tx.send(Msg::Image { path: path.clone(), image });
         Ok(())
     });
@@ -2136,6 +2178,31 @@ pub fn op_tag(ctx: &Ctx, jobs: &[crate::tagging::TagJob]) -> String {
 /// name or the tags), written to "Artist - YYYY-MM-DD - Venue, City, Country.txt" in its
 /// folder. Several shows of the artist that day: the one whose venue the folder name or the
 /// info file gives, otherwise the user chooses (`Msg::SetlistChoice`).
+fn op_share_card(ctx: &Ctx, cards: &[crate::sharecard::Card]) -> String {
+    ctx.add_total(cards.len());
+    let mut made = 0;
+    for card in cards {
+        if ctx.cancelled() {
+            break;
+        }
+        let image = crate::sharecard::render(card, &ctx.cancel);
+        match crate::sharecard::save(card, &image) {
+            Ok(path) => {
+                let beside = path.parent().map(file_name).unwrap_or_default();
+                ctx.status(&card.root, format!("Share card saved beside the show folder, in {beside}: {}", file_name(&path)), Level::Ok, path.display().to_string());
+                ctx.log(format!("Share card saved: {}", path.display()), Level::Ok);
+                made += 1;
+            }
+            Err(e) => {
+                ctx.status(&card.root, format!("Share card not saved: {e}"), Level::Error, "");
+                ctx.log(format!("{}: share card not saved: {e}", files::show_name(&card.root)), Level::Error);
+            }
+        }
+        ctx.tick();
+    }
+    format!("{} saved beside the show folders.", plural(made, "share card", "share cards"))
+}
+
 fn op_setlist(ctx: &Ctx, shows: &[Show]) -> String {
     ctx.add_total(shows.len());
     let (mut written, mut there, mut choose, mut missing, mut failed) = (0, 0, 0, 0, 0);

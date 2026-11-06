@@ -17,6 +17,10 @@ pub struct Report {
     pub key_facts: String,
     /// A show report: one line per track (verdict, key figures), each with its own report.
     pub tracks: Vec<Measure>,
+    /// A track's lowpass (Hz), drawn on its spectrogram in the analysis window.
+    pub cutoff: Option<f64>,
+    /// The speed error the verdict gives (%, positive: plays fast), on the Speed? dial.
+    pub speed: Option<f64>,
 }
 
 #[derive(Clone, Debug)]

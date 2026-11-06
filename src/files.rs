@@ -130,6 +130,37 @@ pub fn natural_path_cmp(a: &Path, b: &Path) -> Ordering {
     natural_cmp(&a.to_string_lossy(), &b.to_string_lossy())
 }
 
+// ---------------------------------------------------------------- lineage
+
+/// The recording source a show's folder name says: "MTX" (matrix), "SBD", "Pre-FM", "FM",
+/// "AUD" or "DAT", the first found in that order (an AUD on DAT is an AUD).
+pub fn lineage(text: &str) -> Option<&'static str> {
+    static RE: OnceLock<Vec<(&'static str, Regex)>> = OnceLock::new();
+    let kinds = RE.get_or_init(|| {
+        [
+            ("MTX", r"matrix|mtx\d*"),
+            ("SBD", r"sbd\d*|soundboard|sound board"),
+            ("Pre-FM", r"pre[\s_-]?fm"),
+            ("FM", r"fm\d*|broadcast"),
+            ("AUD", r"aud\d*|audience"),
+            ("DAT", r"dat\d*"),
+        ]
+        .map(|(name, words)| (name, Regex::new(&format!(r"(?i)(?:^|[^a-z0-9])(?:{words})(?:$|[^a-z0-9])")).unwrap()))
+        .to_vec()
+    });
+    kinds.iter().find(|(_, re)| re.is_match(text)).map(|(name, _)| *name)
+}
+
+/// The recording source an info file gives on its "Source:" or "Lineage:" lines.
+pub fn lineage_of_info(text: &str) -> Option<&'static str> {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| ["source", "src", "lineage", "recording"].iter().any(|w| l.get(..w.len()).is_some_and(|start| start.eq_ignore_ascii_case(w))))
+        .collect();
+    lineage(&lines.join("\n"))
+}
+
 // ---------------------------------------------------------------- scanning
 
 /// A disc, set or tape side of a show: "CD1", "Disc 2 - Encore", "Disc Two", "D1", "Set B", "Side A",
@@ -443,6 +474,22 @@ mod tests {
         let mut v = vec!["d1t10.flac", "d1t2.flac", "d1t01.flac", "D1T03.flac"];
         v.sort_by(|a, b| natural_cmp(a, b));
         assert_eq!(v, vec!["d1t01.flac", "d1t2.flac", "D1T03.flac", "d1t10.flac"]);
+    }
+
+    #[test]
+    fn lineages() {
+        assert_eq!(lineage("Tesla - 1987-03-14 - La Crosse (SBD)"), Some("SBD"));
+        assert_eq!(lineage("Iron Maiden 1995 [AUD1]"), Some("AUD"));
+        assert_eq!(lineage("Rush 1981 AUD+SBD Matrix"), Some("MTX"));
+        assert_eq!(lineage("Yes 1977 Pre-FM"), Some("Pre-FM"));
+        assert_eq!(lineage("Genesis 1980 FM broadcast"), Some("FM"));
+        assert_eq!(lineage("Queen 1986 DAT master"), Some("DAT"));
+        assert_eq!(lineage("Queen 1986 AUD DAT master"), Some("AUD"));
+        // Not inside other words.
+        assert_eq!(lineage("Audio - Data - Saudi - FLAC - 1986-03-26 Updated"), None);
+        let info = "Tesla\nSheffield City Hall\n\nSource: Audience > Sony WM-D6C\nLineage: Master DAT > CDR > EAC\nTaper: someone with a board feed";
+        assert_eq!(lineage_of_info(info), Some("AUD"));
+        assert_eq!(lineage_of_info("01. Intro\n02. Soundboard Blues"), None);
     }
 
     #[test]

@@ -195,9 +195,63 @@ pub fn int_sample(b: &[u8]) -> i32 {
     (v << shift) >> shift
 }
 
+/// Points of a file's outline (`take_wave`).
+pub const WAVE_POINTS: usize = 120;
+
+fn waves() -> &'static std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Vec<f32>>> {
+    static WAVES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Vec<f32>>>> = std::sync::OnceLock::new();
+    WAVES.get_or_init(Default::default)
+}
+
+/// The outline of a file decoded whole by `for_each_frame` (an analysis that read it): the
+/// peak of each of `WAVE_POINTS` stretches, 0..1, for the list's mini waveforms. Once.
+pub fn take_wave(path: &Path) -> Option<Vec<f32>> {
+    waves().lock().ok()?.remove(path)
+}
+
 /// Decodes `path` and calls `frame` with the samples of each sample frame
-/// (one value per channel, -1.0..1.0) and its raw bytes per channel.
+/// (one value per channel, -1.0..1.0) and its raw bytes per channel. Its outline is kept
+/// on the way (`take_wave`), which changes nothing to what `frame` gets.
 pub fn for_each_frame(
+    path: &Path,
+    info: &AudioInfo,
+    cancel: &AtomicBool,
+    mut frame: impl FnMut(&[f64], &[u8]),
+) -> Result<(), String> {
+    let total = info.samples;
+    let mut peaks = vec![0f32; WAVE_POINTS];
+    let (mut count, mut point, mut next) = (0u64, 0usize, total / WAVE_POINTS as u64);
+    let outlined = |values: &[f64], count: &mut u64, point: &mut usize, next: &mut u64, peaks: &mut [f32]| {
+        if *count == *next && *point + 1 < WAVE_POINTS {
+            *point += 1;
+            *next = (*point as u64 + 1) * total / WAVE_POINTS as u64;
+        }
+        *count += 1;
+        let peak = values.iter().fold(0f64, |m, v| m.max(v.abs())) as f32;
+        if peak > peaks[*point] {
+            peaks[*point] = peak;
+        }
+    };
+    let result = decode_frames(path, info, cancel, |values, bytes| {
+        if total > 0 {
+            outlined(values, &mut count, &mut point, &mut next, &mut peaks);
+        }
+        frame(values, bytes);
+    });
+    // Kept only when read to the end (not a part, not stopped).
+    if result.is_ok() && total > 0 && count >= total - total / 100 {
+        if let Ok(mut waves) = waves().lock() {
+            // Outlines nobody took (conversions): not kept for ever.
+            if waves.len() >= 5000 {
+                waves.clear();
+            }
+            waves.insert(path.to_path_buf(), peaks);
+        }
+    }
+    result
+}
+
+fn decode_frames(
     path: &Path,
     info: &AudioInfo,
     cancel: &AtomicBool,

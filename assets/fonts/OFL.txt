@@ -1,5 +1,6 @@
 Noto Sans, Noto Sans Mono: Copyright 2022 The Noto Project Authors (https://github.com/notofonts/latin-greek-cyrillic)
 Noto Emoji: Copyright 2013 Google LLC (https://github.com/googlefonts/noto-emoji)
+Caveat: Copyright 2014 The Caveat Project Authors (https://github.com/googlefonts/caveat)
 
 This Font Software is licensed under the SIL Open Font License,
 Version 1.1.

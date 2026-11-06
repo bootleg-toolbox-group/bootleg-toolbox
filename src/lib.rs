@@ -20,6 +20,7 @@ pub mod ops;
 pub mod report;
 pub mod sbe;
 pub mod setlistfm;
+pub mod sharecard;
 pub mod torrent_check;
 pub mod update;
 pub mod shn;

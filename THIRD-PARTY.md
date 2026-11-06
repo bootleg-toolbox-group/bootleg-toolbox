@@ -15,8 +15,8 @@ program with a modified LAME.
 
 ## Fonts
 
-The user interface uses Noto Sans (Regular and SemiBold), Noto Sans Mono and Noto Emoji (copyright The Noto
-Project Authors and Google LLC, SIL Open Font Licence 1.1, see
+The user interface uses Noto Sans (Regular and SemiBold), Noto Sans Mono, Noto Emoji and Caveat Bold (copyright
+The Noto Project Authors, Google LLC and The Caveat Project Authors, SIL Open Font Licence 1.1, see
 [assets/fonts/OFL.txt](assets/fonts/OFL.txt)), and the emoji-icon-font symbols that egui
 ships (MIT, see [assets/fonts/emoji-icon-font-mit-license.txt](assets/fonts/emoji-icon-font-mit-license.txt)).
 
