@@ -1035,6 +1035,10 @@ impl Running {
 }
 
 /// "about 4 min left", "about 1 h 20 min left", "less than a minute left".
+/// The width the status bar keeps on its right while a task runs: the view buttons (the
+/// selection gets what is left).
+const STATUS_RIGHT: f32 = 130.0;
+
 fn time_left(seconds: f64) -> String {
     let minutes = libm::round(seconds / 60.0) as u64;
     match minutes {
@@ -3567,17 +3571,35 @@ impl App {
                     // A vivid colour, so that a running operation cannot be missed.
                     let busy = if DARK_THEME.load(Ordering::Relaxed) { Color32::from_rgb(196, 128, 255) } else { Color32::from_rgb(128, 36, 204) };
                     ui.add(egui::Spinner::new().color(busy));
-                    ui.label(RichText::new(format!("{}...", r.label)).color(busy).strong());
-                    // How much music is done, when the lengths are known.
-                    if secs > 0.0 {
-                        ui.label(RichText::new(format!("{} of {} of audio", audio(secs_done), audio(secs))).color(busy));
-                    }
                     // Time left: said to be coming until it can be told (15 s, 5 % of the work).
                     let eta = match (r.eta, left.is_some()) {
                         (Some((_, shown)), true) => time_left(shown),
                         _ => "estimating time left...".to_string(),
                     };
-                    ui.label(RichText::new(eta).color(busy));
+                    // How much music is done, when the lengths are known.
+                    let done = (secs > 0.0).then(|| format!("{} of {} of audio", audio(secs_done), audio(secs)));
+                    // What does not fit before the buttons on the right is left out: the amount of
+                    // audio first, then the time left.
+                    let width = |ui: &egui::Ui, text: &str| {
+                        let font = egui::TextStyle::Body.resolve(ui.style());
+                        ui.fonts(|f| f.layout_no_wrap(text.to_string(), font, busy).size().x) + ui.spacing().item_spacing.x + 2.0
+                    };
+                    let mut room = ui.available_width() - STATUS_RIGHT;
+                    let mut fits = |ui: &egui::Ui, text: &str| {
+                        let w = width(ui, text);
+                        (w <= room).then(|| room -= w).is_some()
+                    };
+                    let label = format!("{}...", r.label);
+                    if fits(ui, &label) {
+                        ui.label(RichText::new(label).color(busy).strong());
+                        let show_eta = fits(ui, &eta);
+                        if let Some(done) = done.filter(|d| fits(ui, d)) {
+                            ui.label(RichText::new(done).color(busy));
+                        }
+                        if show_eta {
+                            ui.label(RichText::new(eta).color(busy));
+                        }
+                    }
                 } else if let Some((text, when)) = &self.flash {
                     if when.elapsed() < Duration::from_secs(15) {
                         // At most half the bar, wrapped, so that the selection stays readable too.
@@ -3639,7 +3661,10 @@ impl App {
                         } else {
                             RichText::new(format!("Selected: {counts}"))
                         };
-                        ui.add(egui::Label::new(text).wrap());
+                        // On one line, cut short when a task leaves little room; left out when none.
+                        if ui.available_width() > 60.0 {
+                            ui.add(egui::Label::new(text).truncate());
+                        }
                     });
                 }
             });
