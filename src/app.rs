@@ -76,8 +76,8 @@ const EXTRACT_TIP: &str = "Extract one audio track of each selected DVD title or
                            a video's goes beside it. A window lets you pick the track when there are several.";
 
 const SHARE_TIP: &str = "Make a picture (PNG, 1200 × 630) of each selected show to post with it: the show, its format and \
-     source, the checks run on it in this session (Lossless?, Speed?, checksums or decode test, SBE) and a spectrogram of its longest \
-     track. Saved beside the show folder.";
+     source, the checks run on it in this session (checksums, decode test, Lossless?, Speed?, SBE) and a spectrogram of its longest \
+     track. Saved in the show folder.";
 const UNDO_TIP: &str = "Give shows changed by Tag and rename back their former tags, names and checksum files.";
 
 /// "Tag and rename from info file": what will be written, open for corrections.
@@ -1114,6 +1114,9 @@ pub struct App {
     toasts_made: u64,
     /// The task that gave the Result column (the status bar says so).
     results_of: Option<&'static str>,
+    /// The last outcome of Verify checksums and of Decode test for each file, kept for the
+    /// share card when other tasks run after them.
+    checked: HashMap<PathBuf, [Option<Level>; 2]>,
     /// Top of the status bar and log: the notifications sit just above.
     bottom_top: f32,
     /// The recording source of each show (SBD, AUD...) and whether its info file gave it.
@@ -1328,6 +1331,7 @@ impl App {
             toasts: Vec::new(),
             toasts_made: 0,
             results_of: None,
+            checked: HashMap::new(),
             bottom_top: f32::INFINITY,
             lineage: HashMap::new(),
             list_bytes: 0,
@@ -1604,6 +1608,7 @@ impl App {
         self.shows.clear();
         self.info.clear();
         self.status.clear();
+        self.checked.clear();
         self.source.clear();
         self.reports.clear();
         self.open_reports.clear();
@@ -1805,15 +1810,24 @@ impl App {
             let s = libm::round(seconds) as u64;
             facts.push(if s >= 3600 { format!("{} h {:02} min", s / 3600, s % 3600 / 60) } else { format!("{} min {:02} s", s / 60, s % 60) });
         }
+        // Every track with its artist, title and number: FLAC only, whose tags are read from the
+        // first kilobytes of the file.
+        let tagged = !files.is_empty()
+            && files.iter().all(|f| {
+                let tags = if crate::tagging::taggable(f) { crate::audio::source_tags(f) } else { Vec::new() };
+                ["ARTIST", "TITLE", "TRACKNUMBER"].iter().all(|key| tags.iter().any(|(k, v)| k == key && !v.trim().is_empty()))
+            });
+        if tagged {
+            facts.push("Tagged".to_string());
+        }
         let n = files.len();
         let mut checks = Vec::new();
-        // Checksums or decode test: the last task, if it gave every file of the show a result.
-        if let Some(task @ ("Verify checksums" | "Decode test")) = self.results_of {
-            let levels: Vec<Level> = files.iter().filter_map(|f| self.status.get(f).map(|s| s.1)).collect();
-            if levels.len() == n {
+        // Checksums and decode test: each one once it has given every file of the show a result.
+        for (slot, verify) in [(0, true), (1, false)] {
+            let levels: Vec<Level> = files.iter().filter_map(|f| self.checked.get(f).and_then(|c| c[slot])).collect();
+            if levels.len() == n && n > 0 {
                 let bad = levels.iter().filter(|l| **l == Level::Error).count();
                 let warn = levels.iter().filter(|l| **l == Level::Warn).count();
-                let verify = task == "Verify checksums";
                 checks.push(match (bad, warn) {
                     (0, 0) if verify => (Level::Ok, "Checksums verified".to_string(), format!("{} match their checksum files", plural(n, "file", "files"))),
                     (0, 0) => (Level::Ok, "Decodes cleanly".to_string(), format!("no error in {}", plural(n, "file", "files"))),
@@ -2086,6 +2100,9 @@ impl App {
                         if !running.quiet {
                             self.fresh.insert(path.clone(), Instant::now());
                         }
+                        if let Some(slot) = ["Verify checksums", "Decode test"].iter().position(|t| *t == running.name) {
+                            self.checked.entry(path.clone()).or_default()[slot] = Some(level);
+                        }
                         self.status.insert(path, (text, level, tooltip));
                     }
                     Msg::Info { path, info } => {
@@ -2257,7 +2274,7 @@ impl App {
             self.banner = Some(Banner { level, title, detail, roots: running.roots.clone(), filter });
             return;
         }
-        // "Open folder": the show's, or for a share card (beside it) the card itself, selected.
+        // "Open folder": the show's, or for a share card the card itself, selected.
         let folder = (running.makes_files && !stopped).then(|| running.roots.first().cloned()).flatten();
         let folder = if running.name == "Share card" { folder.map(|root| crate::sharecard::path_of(&root)) } else { folder };
         // A few at a time: the oldest that would close by itself goes first.

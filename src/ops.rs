@@ -291,7 +291,7 @@ pub enum Op {
     ExtractAudio(Vec<(PathBuf, usize)>),
     /// Gives these shows of an undo journal run back as they were.
     Rollback { run: PathBuf, shows: Vec<usize> },
-    /// A share card (PNG) for each of these shows, beside its folder.
+    /// A share card (PNG) for each of these shows, in its folder.
     ShareCard(Vec<crate::sharecard::Card>),
     /// Follow-up of a conversion to FLAC (the choices of its window).
     AfterFlac { roots: Vec<PathBuf>, sources: Vec<PathBuf>, trash_sources: bool, trash_checksums: Vec<PathBuf>, create_ffp: bool },
@@ -2188,8 +2188,7 @@ fn op_share_card(ctx: &Ctx, cards: &[crate::sharecard::Card]) -> String {
         let image = crate::sharecard::render(card, &ctx.cancel);
         match crate::sharecard::save(card, &image) {
             Ok(path) => {
-                let beside = path.parent().map(file_name).unwrap_or_default();
-                ctx.status(&card.root, format!("Share card saved beside the show folder, in {beside}: {}", file_name(&path)), Level::Ok, path.display().to_string());
+                ctx.status(&card.root, format!("Share card saved in the show folder: {}", file_name(&path)), Level::Ok, path.display().to_string());
                 ctx.log(format!("Share card saved: {}", path.display()), Level::Ok);
                 made += 1;
             }
@@ -2200,7 +2199,7 @@ fn op_share_card(ctx: &Ctx, cards: &[crate::sharecard::Card]) -> String {
         }
         ctx.tick();
     }
-    format!("{} saved beside the show folders.", plural(made, "share card", "share cards"))
+    format!("{} saved in the show folders.", plural(made, "share card", "share cards"))
 }
 
 fn op_setlist(ctx: &Ctx, shows: &[Show]) -> String {

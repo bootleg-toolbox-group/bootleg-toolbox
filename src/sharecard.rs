@@ -68,47 +68,46 @@ pub fn render(card: &Card, cancel: &AtomicBool) -> Image {
         c.text(font, x + 14.0, 228.0, 20.0, ink, &text);
         x += w + 10.0;
     }
-    let mut y = 292.0;
-    for (level, title, detail) in card.checks.iter().take(4) {
-        mark(&mut c, left + 18.0, y + 22.0, 18.0, *level);
-        c.text(&bold, left + 52.0, y, 24.0, INK, &fit(&c, &bold, 24.0, column - 52.0, title));
-        c.text(&sans, left + 52.0, y + 32.0, 18.0, WEAK, &fit(&c, &sans, 18.0, column - 52.0, detail));
-        y += 66.0;
+    // Up to five checks: checksums, decoding, Lossless?, Speed?, SBE.
+    let mut y = 284.0;
+    let step = if card.checks.len() > 4 { 54.0 } else { 64.0 };
+    for (level, title, detail) in card.checks.iter().take(5) {
+        mark(&mut c, left + 17.0, y + 20.0, 17.0, *level);
+        c.text(&bold, left + 50.0, y, 23.0, INK, &fit(&c, &bold, 23.0, column - 50.0, title));
+        c.text(&sans, left + 50.0, y + 29.0, 17.0, WEAK, &fit(&c, &sans, 17.0, column - 50.0, detail));
+        y += step;
     }
     if card.checks.is_empty() {
         c.text(&sans, left, y, 20.0, WEAK, "No check run yet in Bootleg Toolbox");
     }
-    let footer = format!(
-        "Checked with Bootleg Toolbox {} · free and open source · github.com/bootleg-toolbox-group/bootleg-toolbox",
-        crate::ops::APP_VERSION
-    );
-    c.text(&sans, left, 586.0, 16.0, WEAK, &footer);
+    let footer = format!("Checked with Bootleg Toolbox {} · free and open source", crate::ops::APP_VERSION);
+    c.text(&bold, left, 562.0, 20.0, WEAK, &footer);
+    c.text(&sans, left, 590.0, 19.0, ACCENT, "github.com/bootleg-toolbox-group/bootleg-toolbox");
 
     // Right: the cassette, and the spectrogram of a track under it.
-    let right = 730.0;
+    let right = 700.0;
     let width = WIDTH as f32 - 56.0 - right;
     let plot = card.track.as_ref().and_then(|(path, _, _)| crate::spectrogram::plot(path, cancel).ok());
-    let cassette_width = if plot.is_some() { 330.0 } else { width };
-    cassette(&mut c, &bold, &hand, right + (width - cassette_width) / 2.0, 44.0, cassette_width, &card.label);
+    let cassette_width = if plot.is_some() { 280.0 } else { width };
+    cassette(&mut c, &bold, &hand, right + (width - cassette_width) / 2.0, 40.0, cassette_width, &card.label);
     if let (Some(plot), Some((_, caption, cutoff))) = (plot, &card.track) {
-        let (top, height) = (276.0, 230.0);
+        let (top, height) = (238.0, 312.0);
         spectrogram(&mut c, &plot, (right, top, width, height), *cutoff, &bold);
         c.text(&sans, right, top + height + 10.0, 17.0, WEAK, &fit(&c, &sans, 17.0, width, caption));
     }
     Image { width: WIDTH, height: HEIGHT, rgba: c.rgba }
 }
 
-/// Saves the card beside the show folder (never inside it): "<folder> - card.png".
+/// Saves the card in the show folder: "<folder> - card.png".
 pub fn save(card: &Card, image: &Image) -> Result<PathBuf, String> {
     let path = path_of(&card.root);
     crate::spectrogram::save_png(image, &path)?;
     Ok(path)
 }
 
-/// Where the card of the show in `root` goes: beside the folder, so that it stays out of the
-/// show's torrent and checksums.
+/// Where the card of the show in `root` goes: in the folder, next to the tracks.
 pub fn path_of(root: &Path) -> PathBuf {
-    root.parent().unwrap_or(root).join(format!("{} - card.png", crate::files::file_name(root)))
+    root.join(format!("{} - card.png", crate::files::file_name(root)))
 }
 
 fn font(data: &'static [u8]) -> FontRef<'static> {

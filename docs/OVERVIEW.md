@@ -194,9 +194,9 @@ Tools > Get setlist from setlist.fm (also in the Convert menu and the right-clic
 
 ### Share card
 
-Tools > Share card (also in the right-click menu, and on the band shown at the end of a long task) makes a picture of each selected show to post with it: 1200 × 630 PNG, saved beside the show folder as "<folder> - card.png", never inside it.
+Tools > Share card (also in the right-click menu, and on the band shown at the end of a long task) makes a picture of each selected show to post with it: 1200 × 630 PNG, saved in the show folder as "<folder> - card.png", so that it goes with the show into its torrent.
 
-- **What it says:** artist, date and venue (from the info file, the folder name or the tags), the recording source (SBD, AUD, FM...), format, number of tracks and length, and the checks run on the show in this session with their outcome: Lossless?, Speed?, checksums or decode test (when it was the last task), CD-ready or gap risk (SBE). A check not run is left out, never shown as passed.
+- **What it says:** artist, date and venue (from the info file, the folder name or the tags), the recording source (SBD, AUD, FM...), format, number of tracks and length, "Tagged" when every track is a FLAC with its artist, title and number, and the checks run on the show in this session with their outcome: Lossless?, Speed?, checksums and decode test, CD-ready or gap risk (SBE). A check not run is left out, never shown as passed.
 - **The pictures:** the cassette with the show written on its label, and the spectrogram of the longest track with the lowpass found by Lossless?.
 
 ### Lossy files (MP3, MP2, AAC, Vorbis)
