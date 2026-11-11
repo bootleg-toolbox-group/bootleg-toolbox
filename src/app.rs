@@ -5041,6 +5041,38 @@ fn report_cards(
                 });
         });
     }
+    if !report.evidence.is_empty() {
+        card(ui, p, |ui| {
+            let id = ui.make_persistent_id(("report evidence", kind, path));
+            egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true)
+                .show_header(ui, |ui| {
+                    ui.label(RichText::new("Evidence").family(crate::fonts::bold()).size(14.0));
+                })
+                .body(|ui| {
+                    ui.spacing_mut().item_spacing.y = 3.0;
+                    for (lossy, title) in [(true, "Points to a lossy source"), (false, "Points to a lossless source")] {
+                        let mut items: Vec<&crate::report::Evidence> = report.evidence.iter().filter(|e| e.lossy == lossy).collect();
+                        if items.is_empty() {
+                            continue;
+                        }
+                        items.sort_by_key(|e| e.strength);
+                        ui.add_space(4.0);
+                        ui.label(RichText::new(title).color(p.weak));
+                        for e in items {
+                            let level = match (lossy, e.strength) {
+                                (true, crate::report::Strength::Strong) => Level::Error,
+                                (true, _) => Level::Warn,
+                                (false, _) => Level::Ok,
+                            };
+                            ui.horizontal_top(|ui| {
+                                badge(ui, e.strength.name().to_string(), if e.strength == crate::report::Strength::Weak { Level::Info } else { level });
+                                ui.add(egui::Label::new(&e.text).wrap());
+                            });
+                        }
+                    }
+                });
+        });
+    }
     if !report.tracks.is_empty() {
         card(ui, p, |ui| {
             ui.label(RichText::new("Tracks").family(crate::fonts::bold()).size(14.0));

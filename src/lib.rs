@@ -5,6 +5,7 @@ pub mod app;
 pub mod audio;
 pub mod dsp;
 pub mod encode;
+pub mod encoders;
 pub mod dvd;
 pub mod files;
 pub mod fonts;

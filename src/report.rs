@@ -21,6 +21,36 @@ pub struct Report {
     pub cutoff: Option<f64>,
     /// The speed error the verdict gives (%, positive: plays fast), on the Speed? dial.
     pub speed: Option<f64>,
+    /// What points to a lossy origin, and what to a lossless one (Lossless? of a file).
+    pub evidence: Vec<Evidence>,
+}
+
+/// One clue of a verdict, with the side it takes and how much it weighs.
+#[derive(Clone, Debug)]
+pub struct Evidence {
+    pub lossy: bool,
+    pub strength: Strength,
+    pub text: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Strength {
+    /// Proof, or close to it: coding traces, encoder holes, a lossy format.
+    Strong,
+    /// Points one way, but another cause can give it.
+    Moderate,
+    /// A hint only.
+    Weak,
+}
+
+impl Strength {
+    pub fn name(self) -> &'static str {
+        match self {
+            Strength::Strong => "strong",
+            Strength::Moderate => "moderate",
+            Strength::Weak => "weak",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -46,6 +76,17 @@ impl Report {
             out.push_str(&format!("- {}: {}\n", m.name, m.value));
             if !m.meaning.is_empty() {
                 out.push_str(&format!("  {}\n", m.meaning));
+            }
+        }
+        for (lossy, title) in [(true, "Points to a lossy source"), (false, "Points to a lossless source")] {
+            let mut items: Vec<&Evidence> = self.evidence.iter().filter(|e| e.lossy == lossy).collect();
+            if items.is_empty() {
+                continue;
+            }
+            items.sort_by_key(|e| e.strength);
+            out.push_str(&format!("\n{title}\n"));
+            for e in items {
+                out.push_str(&format!("- [{}] {}\n", e.strength.name(), e.text));
             }
         }
         if !self.tracks.is_empty() {

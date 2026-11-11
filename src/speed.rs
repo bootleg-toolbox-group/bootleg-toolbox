@@ -342,6 +342,7 @@ pub fn track_verdict(title: String, f: &SpeedFacts) -> SpeedVerdict {
         tracks: Vec::new(),
         cutoff: None,
         speed: gauge,
+        evidence: Vec::new(),
     };
     SpeedVerdict { label, level, sentence, report }
 }
@@ -494,6 +495,7 @@ pub fn show_verdict(title: String, tracks: &[(String, SpeedFacts, String, Level,
         tracks: tracks.iter().map(|(name, _, label, level, key)| Measure { name: name.clone(), value: label.clone(), meaning: key.clone(), level: *level }).collect(),
         cutoff: None,
         speed: gauge,
+        evidence: Vec::new(),
     };
     SpeedVerdict { label, level, sentence, report }
 }

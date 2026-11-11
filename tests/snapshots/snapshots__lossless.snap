@@ -62,7 +62,16 @@ expression: text
 
 
 
-   - A cutoff at 13.4 kHz is typical of an MP3/AAC at 96 kbps or less.
+
+
+
+
+
+
+
+
+
+   - A cutoff at 13.4 kHz is where lossy encoders often cut (no coding trace names the codec).
    - Above the cutoff there is digital silence: nothing was added after the encoder, so a lossy file was converted back to a lossless format.
    - Encoder holes of 43 dB below the 13.4 kHz lowpass: the fingerprint of a perceptual encoder (MP3, MP2, AAC). FM and analog recordings stay under about 5 dB.
    - High frequencies are present (-0 dB relative to 1-4 kHz above 15 kHz), so encoder traces would show.
@@ -74,6 +83,7 @@ expression: text
   A lossy file converted back has digital silence there (about 0 dB). Steady hiss well above 0 dB was added by an analog stage (tuner, sound card) after any encoder.
   A true hi-res recording has content (or at least hiss) up there; an upsampled 44.1/48 kHz file is empty above 22-24 kHz.
   An FM or analog capture keeps its hiss up to the converter's filter (+20 dB and more); an encoder after that stage leaves silence there.
+  An encoder's or a digital filter's lowpass is usually a wall: the level falls steeply from one band to the next and nothing of the music is left above it. Tape, microphones and analog filters roll off gradually (16 dB or less) and the band above still follows the music (0.6 and more). Lossy files can roll off gradually too: a hint, never a proof.
   Below about -55 dB an encoder's lowpass shows less, and below about -67 dB there is too little treble to see it at all (common with audience, cassette and FM recordings).
   Below about -55 dB an encoder's lowpass shows less, and below about -67 dB there is too little treble to see it at all (common with audience, cassette and FM recordings).
   Below about -55 dB an encoder's lowpass shows less, and below about -67 dB there is too little treble to see it at all (common with audience, cassette and FM recordings).
@@ -90,7 +100,7 @@ expression: text
   Concert mixes usually sit 4 to 10 dB below; 20 dB and more is nearly mono.
   Concert mixes usually sit 4 to 10 dB below; 20 dB and more is nearly mono.
   Concert mixes usually sit 4 to 10 dB below; 20 dB and more is nearly mono.
-  ERR  [<dir>/Muffled Band 2001-03-03/01 - Muffled.flac] Lossy source (high confidence): brick-wall lowpass at 13.4 kHz with encoder holes below it, typical of an MP3/AAC at 96 kbps or less
+  ERR  [<dir>/Muffled Band 2001-03-03/01 - Muffled.flac] Lossy source (high confidence): brick-wall lowpass at 13.4 kHz with encoder holes below it, as a lossy encoder leaves
   ERR  [<dir>/Muffled Band 2001-03-03/01 - Muffled.flac] Source: Lossy 13.4 kHz
   ERR  [<dir>/Muffled Band 2001-03-03] Source: 1 Lossy
   FM stereo stations transmit a 19 kHz tone; a capture that keeps it was recorded off air, and its exact frequency measures the tape speed. Tuners often filter it out, so its absence proves nothing.
@@ -187,7 +197,7 @@ expression: text
 - AAC coding traces: none (1.8 % of the bands, within the normal range)
 - AAC coding traces: none (1.8 % of the bands, within the normal range)
 - AAC coding traces: none (1.8 % of the bands, within the normal range)
-- AAC coding traces: none (16.8 % of the bands, but at every position alike: not an encoder's grid)
+- AAC coding traces: none at any position, but 16.8 % of the bands, more than genuine audio shows: noise reduction, or a lossy stage whose grid was erased since, can leave this
 - CD1/01 - Opening.flac: Lossless (treble -0 dB)
 - CD1/02 - Second Song.flac: Lossless (treble -0 dB)
 - CD1/03 - Long Jam.flac: Lossless (treble -0 dB)
@@ -201,6 +211,7 @@ expression: text
 - Content above 15 kHz: -0 dB relative to 1-4 kHz
 - Content above 15 kHz: -19 dB relative to 1-4 kHz
 - Edge of the lowpass: 230 dB per octave
+- Edge of the treble at the cutoff: drops by 66 dB at most between 300 Hz bands; the band above follows the music at 0.10
 - Encoder holes below the cutoff: 43 dB
 - Floor above the cutoff: -4 dB over digital silence, steady (quiet passages -3 dB, loud -3 dB)
 - Floor at 18-19.5 kHz: -4 dB over digital silence
@@ -219,7 +230,7 @@ expression: text
 - MP3 coding traces: none (1.8 % of the bands, within the normal range)
 - MP3 coding traces: none (1.9 % of the bands, within the normal range)
 - MP3 coding traces: none (1.9 % of the bands, within the normal range)
-- MP3 coding traces: none (31.5 % of the bands, but at every position alike: not an encoder's grid)
+- MP3 coding traces: none at any position, but 31.5 % of the bands, more than genuine audio shows: noise reduction, or a lossy stage whose grid was erased since, can leave this
 - Opus coding traces: none (0 of 247 frames)
 - Opus coding traces: none (0 of 248 frames)
 - Opus coding traces: none (0 of 248 frames)
@@ -243,6 +254,38 @@ expression: text
 - Treble roll-off: 0 dB per octave
 - Treble roll-off: 0 dB per octave
 - Treble roll-off: 1 dB per octave
+- [moderate] Digital silence above the cutoff: nothing analog came after the lowpass
+- [moderate] No brick-wall lowpass, with treble present above 15 kHz
+- [moderate] No brick-wall lowpass, with treble present above 15 kHz
+- [moderate] No brick-wall lowpass, with treble present above 15 kHz
+- [moderate] No brick-wall lowpass, with treble present above 15 kHz
+- [moderate] No brick-wall lowpass, with treble present above 15 kHz
+- [moderate] No brick-wall lowpass, with treble present above 15 kHz
+- [moderate] No brick-wall lowpass, with treble present above 15 kHz
+- [strong] Encoder holes of 43 dB below the 13.4 kHz lowpass
+- [weak] A wall at 13.4 kHz: 66 dB between neighbouring bands and nothing of the music above
+- [weak] Brick-wall lowpass at 13.4 kHz, where encoders cut (digital filters too)
+- [weak] No AAC coding traces (they do not survive effects or resampling after the decoder)
+- [weak] No AAC coding traces (they do not survive effects or resampling after the decoder)
+- [weak] No AAC coding traces (they do not survive effects or resampling after the decoder)
+- [weak] No AAC coding traces (they do not survive effects or resampling after the decoder)
+- [weak] No AAC coding traces (they do not survive effects or resampling after the decoder)
+- [weak] No AAC coding traces (they do not survive effects or resampling after the decoder)
+- [weak] No AAC coding traces (they do not survive effects or resampling after the decoder)
+- [weak] No MP3 coding traces (they do not survive effects or resampling after the decoder)
+- [weak] No MP3 coding traces (they do not survive effects or resampling after the decoder)
+- [weak] No MP3 coding traces (they do not survive effects or resampling after the decoder)
+- [weak] No MP3 coding traces (they do not survive effects or resampling after the decoder)
+- [weak] No MP3 coding traces (they do not survive effects or resampling after the decoder)
+- [weak] No MP3 coding traces (they do not survive effects or resampling after the decoder)
+- [weak] No Opus coding traces (they do not survive effects or resampling after the decoder)
+- [weak] No Opus coding traces (they do not survive effects or resampling after the decoder)
+- [weak] No Opus coding traces (they do not survive effects or resampling after the decoder)
+- [weak] No Opus coding traces (they do not survive effects or resampling after the decoder)
+- [weak] No Opus coding traces (they do not survive effects or resampling after the decoder)
+- [weak] No Opus coding traces (they do not survive effects or resampling after the decoder)
+- [weak] No Opus coding traces (they do not survive effects or resampling after the decoder)
+- [weak] No Opus coding traces (they do not survive effects or resampling after the decoder)
 01 - Encore.flac
 01 - Extra chunk.wav
 01 - Hires.flac
@@ -275,7 +318,7 @@ expression: text
 2. Most tracks read "Lossless". Why, for 01 - Hires.flac:
 2. Most tracks read "Lossless". Why, for 01 - Opening.flac:
 2. Most tracks read "Lossy". Why, for 01 - Muffled.flac:
-3. A cutoff at 13.4 kHz is typical of an MP3/AAC at 96 kbps or less.
+3. A cutoff at 13.4 kHz is where lossy encoders often cut (no coding trace names the codec).
 8 file(s) checked for lossless origin: 7 OK, 1 error(s)
 ==============
 ===============
@@ -289,10 +332,10 @@ expression: text
 =====================
 =======================
 =========================
-ERR  01 - Muffled.flac: Lossy source (high confidence): brick-wall lowpass at 13.4 kHz with encoder holes below it, typical of an MP3/AAC at 96 kbps or less
+ERR  01 - Muffled.flac: Lossy source (high confidence): brick-wall lowpass at 13.4 kHz with encoder holes below it, as a lossy encoder leaves
 Hires Band 2000-02-02
-Lossy source (high confidence): brick-wall lowpass at 13.4 kHz with encoder holes below it, typical of an MP3/AAC at 96 kbps or less
-Lossy source (high confidence): brick-wall lowpass at 13.4 kHz with encoder holes below it, typical of an MP3/AAC at 96 kbps or less
+Lossy source (high confidence): brick-wall lowpass at 13.4 kHz with encoder holes below it, as a lossy encoder leaves
+Lossy source (high confidence): brick-wall lowpass at 13.4 kHz with encoder holes below it, as a lossy encoder leaves
 Measurements
 Measurements
 Measurements
@@ -312,6 +355,15 @@ No sign of lossy encoding or upsampling: no encoder lowpass, high frequencies pr
 No sign of lossy encoding or upsampling: no encoder lowpass, high frequencies present
 No sign of lossy encoding or upsampling: no encoder lowpass, high frequencies present
 No sign of lossy encoding or upsampling: no encoder lowpass, high frequencies present
+Points to a lossless source
+Points to a lossless source
+Points to a lossless source
+Points to a lossless source
+Points to a lossless source
+Points to a lossless source
+Points to a lossless source
+Points to a lossless source
+Points to a lossy source
 Reasoning
 Reasoning
 Reasoning

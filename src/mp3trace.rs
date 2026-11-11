@@ -17,6 +17,9 @@ pub const THRESHOLD: f64 = 0.025;
 /// genuine files 3.5 to 4.7, MP3 at 320 kbps 14 and more, lower bitrates 17 to 170.
 pub const MIN_CONTRAST: f64 = 10.0;
 
+/// Side channel this far under the mid one (-40 dB, in energy) on the analysed windows: not
+/// searched (near-mono file, the side is only rounding noise).
+const SILENT_SIDE: f64 = 1e-4;
 const GRANULE: usize = 576;
 const WINDOWS: usize = 16;
 const SCALE_FACTORS: usize = 8;
@@ -137,10 +140,18 @@ impl Collector {
             return None;
         }
         let tables = Tables::new(&bands);
-        let modes: &[Mode] = if channels == 2 {
-            &[(false, |f| f[0] as f64), (false, |f| f[1] as f64), (true, |f| (f[0] as f64 + f[1] as f64) / 2.0), (true, |f| (f[0] as f64 - f[1] as f64) / 2.0)]
-        } else {
+        let mid: fn([f32; 2]) -> f64 = |f| (f[0] as f64 + f[1] as f64) / 2.0;
+        let side: fn([f32; 2]) -> f64 = |f| (f[0] as f64 - f[1] as f64) / 2.0;
+        let energy = |take: fn([f32; 2]) -> f64| segments.iter().flatten().map(|f| take(*f).powi(2)).sum::<f64>();
+        let modes: &[Mode] = if channels != 2 {
             &[(false, |f| f[0] as f64)]
+        } else if energy(side) < energy(mid) * SILENT_SIDE {
+            // A near-mono file: its side channel is only rounding noise, which falls under the
+            // error thresholds at every position, and one of them may stand out by chance. An
+            // MP3 of such a file shows its grid in the mid channel anyway.
+            &[(false, |f| f[0] as f64), (false, |f| f[1] as f64), (true, |f| (f[0] as f64 + f[1] as f64) / 2.0)]
+        } else {
+            &[(false, |f| f[0] as f64), (false, |f| f[1] as f64), (true, |f| (f[0] as f64 + f[1] as f64) / 2.0), (true, |f| (f[0] as f64 - f[1] as f64) / 2.0)]
         };
         // The filter bank's output (one slot every 32 samples) for every start in the segment,
         // per channel and segment: a window at position `offset` takes the 36 slots from

@@ -43,22 +43,15 @@ const TREBLE_UNCLEAR: f64 = -67.0;
 /// Without the MP3 traces (other sample rates): one limit, as before.
 const TREBLE_PLAIN: f64 = -60.0;
 pub const LOSSLESS_UPSAMPLED: &str = "Lossless (upsampled)";
+/// A gradual roll-off, not a wall: the treble falls by at most this much between neighbouring
+/// 300 Hz cells. Set on synthetic filters (9-15 dB) and encodes (18 dB and more); on real
+/// shows a fifth to a third of the lossy files with a cutoff also stay under it, so it never
+/// decides alone...
+const ANALOG_STEP: f64 = 16.0;
+/// ...and the band just above the cutoff still follows the music (few lossy files with a
+/// cutoff reach it on real shows, but neither do most lossless ones).
+const ANALOG_COHERENCE: f64 = 0.6;
 pub const LOSSLESS_PADDED: &str = "Lossless (16-bit in 24)";
-
-fn lossy_bitrate_hint(cutoff: f64) -> &'static str {
-    for (limit, hint) in [
-        (15500.0, "96 kbps or less"),
-        (17500.0, "about 128 kbps"),
-        (18400.0, "about 160 kbps"),
-        (19300.0, "about 192 kbps"),
-        (19900.0, "about 256 kbps"),
-    ] {
-        if cutoff < limit {
-            return hint;
-        }
-    }
-    "about 320 kbps"
-}
 
 /// Python's round(): halves go to the even neighbour.
 fn round_py(x: f64) -> usize {
@@ -94,6 +87,10 @@ pub fn analyse(path: &Path, info: &AudioInfo, aac: bool, cancel: &AtomicBool) ->
         verdict.report.label = verdict.label.clone();
         verdict.report.level = Level::Error;
         verdict.report.sentence = verdict.sentence.clone();
+        verdict.report.evidence.insert(
+            0,
+            crate::report::Evidence { lossy: true, strength: crate::report::Strength::Strong, text: format!("The file is an {name}: a lossy format") },
+        );
         verdict.report.reasoning.insert(
             0,
             format!(
@@ -639,7 +636,16 @@ fn conclude(path: &Path, info: &AudioInfo, m: &Measured, aac_check: bool) -> Res
             m.rise.map(|r| format!(", rising {r:.0} dB toward 19 kHz")).unwrap_or_default()
         ));
     }
+    let roll = cutoff.and_then(|c| rolloff(kept, kept_bands, &|b| band_freq(kept_lo + b), &|f| (18900.0..19100.0).contains(&f) || in_tone(f), c));
+    if let Some(r) = roll {
+        details.push(format!(
+            "Edge of the treble: drops by {:.0} dB at most between 300 Hz bands; the band above follows the music at {:.2}",
+            r.step, r.coherence
+        ));
+    }
     let holes = traces.map(|t| t.0).unwrap_or(0.0);
+    // Holes this deep are proof of an encoder on their own; shallower ones (10-15 dB) only
+    // with a second clue: digital silence above the cutoff, which no analog stage leaves.
     let encoder_holes = holes >= 15.0;
     // Encoder holes, yet steady hiss above the cutoff: the hiss was added after the encoder,
     // so this is a capture (FM, analog line) of a program already coded upstream (a radio's
@@ -648,11 +654,18 @@ fn conclude(path: &Path, info: &AudioInfo, m: &Measured, aac_check: bool) -> Res
     let upstream = |c: f64, details: Vec<String>| {
         Verdict::new(
             format!("{LOSSY_UPSTREAM} {:.1} kHz", c / 1000.0),
-            format!(
-                "Lossy-coded program: encoder holes below the {:.1} kHz lowpass, with steady noise above it that came later (an analog stage such as a radio's digital link or a sound card, or dither added when converting): the content itself was lossy-coded",
-                c / 1000.0
-            ),
-            Level::Error,
+            if encoder_holes {
+                format!(
+                    "Lossy source upstream (e.g. MiniDisc, broadcast MPEG, MP3): encoder holes below the {:.1} kHz lowpass, with steady noise above it that came later (an analog stage such as a tuner or a sound card, or dither added when converting): the content itself was lossy-coded",
+                    c / 1000.0
+                )
+            } else {
+                format!(
+                    "Probably a lossy source upstream (e.g. MiniDisc, broadcast MPEG, MP3): encoder holes of {holes:.0} dB below the {:.1} kHz lowpass, with steady noise above it that came later (an analog stage, or dither added when converting); holes this shallow are not proof on their own",
+                    c / 1000.0
+                )
+            },
+            if encoder_holes { Level::Error } else { Level::Warn },
             details,
         )
     };
@@ -697,6 +710,17 @@ fn conclude(path: &Path, info: &AudioInfo, m: &Measured, aac_check: bool) -> Res
             }
         }
     }
+    // A wall where a lower sample rate's band ends (a resampler's filter), even when clipped
+    // inter-sample peaks put some noise above it: the rate the file was upsampled from.
+    let origin = cutoff.filter(|_| rate >= 88200.0).and_then(source_rate).filter(|&r| r * 1.5 < rate);
+    upsampled |= origin.is_some();
+    // A 48 kHz file whose content stops dead at the top of a 44.1 kHz band, with digital
+    // silence above: possibly upsampled from 44.1 kHz (a 48 kHz converter's own filter may cut
+    // there too, so only said).
+    let from_44k = rate == 48000.0 && cutoff.is_some_and(|c| (20900.0..=22150.0).contains(&c)) && silent_above && holes < 5.0;
+    if let Some(c) = cutoff.filter(|_| from_44k) {
+        details.push(format!("Content stops at {:.1} kHz with digital silence above: possibly upsampled from a 44.1 kHz source", c / 1000.0));
+    }
     if let Some(p) = &padded {
         details.push(p.clone());
     } else if let Some(c) = comb.filter(|c| c.bits < 23.0) {
@@ -732,7 +756,7 @@ fn conclude(path: &Path, info: &AudioInfo, m: &Measured, aac_check: bool) -> Res
             Verdict::new(
                 format!("Lossy {} kHz", khz(c)),
                 format!(
-                    "Lossy source likely: lowpass at {} kHz with encoder holes below it (bands switched off and on): an MP3/AAC, even if the show was broadcast on FM",
+                    "Lossy source likely: lowpass at {} kHz with encoder holes below it (bands switched off and on): a lossy encoder, even if the show was broadcast on FM",
                     khz(c)
                 ),
                 Level::Error,
@@ -742,7 +766,7 @@ fn conclude(path: &Path, info: &AudioInfo, m: &Measured, aac_check: bool) -> Res
             Verdict::new(
                 "15 kHz lowpass",
                 format!(
-                    "Steep lowpass at {} kHz with digital silence above it: a lossy encoder (MP3/AAC) or a digital filter, not a plain FM capture",
+                    "Steep lowpass at {} kHz with digital silence above it: a lossy encoder or a digital filter, not a plain FM capture",
                     khz(c)
                 ),
                 Level::Warn,
@@ -783,13 +807,22 @@ fn conclude(path: &Path, info: &AudioInfo, m: &Measured, aac_check: bool) -> Res
         // coding was upstream of an analog stage (a stream captured through a sound card).
         if holes >= 8.0 && hiss_above && traces.is_some_and(|(_, _, h)| h.is_none_or(|h| h >= 10.0)) {
             upstream(c, details)
+        } else if holes >= 10.0 && !encoder_holes && !silent_above {
+            Verdict::new(
+                format!("Lossy? {} kHz", khz(c)),
+                format!(
+                    "Probably lossy: brick-wall lowpass at {} kHz with encoder holes of {holes:.0} dB below it, but holes this shallow are not proof on their own, and noise goes on above the cutoff (no digital silence to confirm a decoder)",
+                    khz(c)
+                ),
+                Level::Warn,
+                details,
+            )
         } else if holes >= 10.0 {
             Verdict::new(
                 format!("Lossy {} kHz", khz(c)),
                 format!(
-                    "Lossy source (high confidence): brick-wall lowpass at {} kHz with encoder holes below it, typical of an MP3/AAC at {}",
-                    khz(c),
-                    lossy_bitrate_hint(c)
+                    "Lossy source (high confidence): brick-wall lowpass at {} kHz with encoder holes below it, as a lossy encoder leaves",
+                    khz(c)
                 ),
                 Level::Error,
                 details,
@@ -799,9 +832,8 @@ fn conclude(path: &Path, info: &AudioInfo, m: &Measured, aac_check: bool) -> Res
             Verdict::new(
                 format!("Lossy? {} kHz", khz(c)),
                 format!(
-                    "Possibly lossy: brick-wall lowpass at {} kHz with {above}, as an MP3/AAC at {} leaves; but no encoder holes, and a digital lowpass filter (some remasters) looks the same",
-                    khz(c),
-                    lossy_bitrate_hint(c)
+                    "Possibly lossy: brick-wall lowpass at {} kHz with {above}, as a lossy encoder leaves; but no encoder holes, and a digital lowpass filter (some remasters) looks the same",
+                    khz(c)
                 ),
                 Level::Warn,
                 details,
@@ -818,7 +850,7 @@ fn conclude(path: &Path, info: &AudioInfo, m: &Measured, aac_check: bool) -> Res
         Verdict::new(
             format!("Unsure {} kHz", khz(c)),
             format!(
-                "Possible lossy source: lowpass at {} kHz matches an MP3 at 320 kbps, but some recorders' anti-alias filters also cut there",
+                "Possible lossy source: lowpass at {} kHz, where high-bitrate lossy encoders also cut, but so do some recorders' anti-alias filters",
                 khz(c)
             ),
             Level::Warn,
@@ -826,16 +858,13 @@ fn conclude(path: &Path, info: &AudioInfo, m: &Measured, aac_check: bool) -> Res
         )
     } else if upsampled {
         // Only reached without a lossy lowpass. Unlike the reference, say so, and keep
-        // the 20.5-21.5 kHz doubt (MP3 at 320 kbps) that hi-res rates otherwise skip.
-        let origin = format!(
-            "no real content above about 22-24 kHz, so this {} kHz file comes from a 44.1 or 48 kHz source",
-            crate::audio::trim_float(rate / 1000.0)
-        );
+        // the 20.5-21.5 kHz doubt (high-bitrate lossy) that hi-res rates otherwise skip.
+        let origin = upsampled_from(rate, cutoff, origin);
         match cutoff.filter(|c| *c < 21500.0) {
             Some(c) => Verdict::new(
                 "Unsure (upsampled)",
                 format!(
-                    "Upsampled, and possibly lossy: lowpass at {} kHz matches an MP3 at 320 kbps, but some recorders' anti-alias filters also cut there; {origin}",
+                    "Upsampled, and possibly lossy: lowpass at {} kHz, where high-bitrate lossy encoders also cut, but so do some recorders' anti-alias filters; {origin}",
                     khz(c)
                 ),
                 Level::Warn,
@@ -877,15 +906,42 @@ fn conclude(path: &Path, info: &AudioInfo, m: &Measured, aac_check: bool) -> Res
             details,
         )
     };
+    // A doubtful lowpass that is a gradual roll-off with the music still above it, and no
+    // encoder holes: often tape, microphones or an analog filter, but lossy files can roll off
+    // like this too, so the verdict stays neutral. Still looked at for AAC and Opus traces
+    // (`doubt`), which would overrule it.
+    let analog = cutoff.is_some_and(|_| doubtful(&verdict.label) && !verdict.label.contains("upsampled"))
+        && holes < 8.0
+        && roll.is_some_and(|r| r.step <= ANALOG_STEP && r.coherence >= ANALOG_COHERENCE);
+    if let (true, Some(c), Some(r)) = (analog, cutoff, roll) {
+        let mut unclear = Verdict::new(
+            "Unclear",
+            format!(
+                "Gradual roll-off, no coding trace: the treble fades out around {} kHz (at most {:.0} dB between neighbouring bands) with the music still above it, as tape, microphones and analog filters leave, but some lossy files look the same",
+                khz(c),
+                r.step
+            ),
+            Level::Info,
+            verdict.details.clone(),
+        );
+        unclear.report = std::mem::take(&mut verdict.report);
+        verdict = unclear;
+    }
+    if from_44k && (verdict.label.starts_with("Unsure") || verdict.label == "Lossless" || verdict.label == LIKELY_LOSSLESS) {
+        verdict.sentence.push_str(&format!(
+            "; the content stops at {} kHz with digital silence above, as a 44.1 kHz source upsampled to 48 kHz leaves",
+            khz(cutoff.unwrap_or(0.0))
+        ));
+    }
     // A lowpass hidden under noise-shaped dither: no FM capture (no pilot tone) and no
     // plain lossless file leaves the music stopping dead under such a noise.
     let hidden = masked.filter(|m| m.dithered() && !fm_pilot && matches!(verdict.label.as_str(), "Lossless" | LIKELY_LOSSLESS | FM_15K));
     if let Some(m) = hidden {
         let c = m.cutoff;
         let (label, doubt) = if c < 20500.0 {
-            (format!("Lossy? {} kHz", khz(c)), format!("as an MP3/AAC/Opus at {} leaves", lossy_bitrate_hint(c)))
+            (format!("Lossy? {} kHz", khz(c)), "as a lossy encoder leaves".to_string())
         } else {
-            (format!("Unsure {} kHz", khz(c)), "as an MP3 at 320 kbps or an AAC/Opus at a high bitrate leaves, but some converters' filters also cut there".to_string())
+            (format!("Unsure {} kHz", khz(c)), "where high-bitrate lossy encoders also cut, but so do some converters' filters".to_string())
         };
         let sentence = format!(
             "Possibly lossy: the music stops at {} kHz, {doubt}; the band above holds only steady noise rising toward 19 kHz, the noise-shaped dither of a conversion to 16-bit, which hides the lowpass",
@@ -975,6 +1031,7 @@ fn conclude(path: &Path, info: &AudioInfo, m: &Measured, aac_check: bool) -> Res
         cutoff,
         drop: best_drop,
         holes: traces.map(|t| t.0),
+        uniform: mp3_trace.as_ref().is_some_and(uniform_high),
         above_floor: traces.and_then(|t| t.1),
         high_floor: traces.and_then(|t| t.2),
         hiss,
@@ -986,6 +1043,10 @@ fn conclude(path: &Path, info: &AudioInfo, m: &Measured, aac_check: bool) -> Res
         silent_above,
         stereo: dsp::median(side_vs_mid),
         upsampled,
+        origin,
+        from_44k,
+        roll: roll.map(|r| (r.step, r.coherence)),
+        analog,
         padded,
         comb: comb.map(|c| (c.used, c.bits)),
         waste: waste.map(|w| (w.share, w.mean_bits)),
@@ -999,7 +1060,7 @@ fn conclude(path: &Path, info: &AudioInfo, m: &Measured, aac_check: bool) -> Res
     // An FM pilot tone survives an Opus or AAC stream at a high bitrate: with the music
     // stopping dead around 20 kHz (FM itself stops at 15 kHz), the origin is open too.
     let stream_lowpass = cutoff.is_some_and(|c| (19500.0..20800.0).contains(&c));
-    verdict.doubt = doubtful(&verdict.label) || (fm_pilot && stream_lowpass);
+    verdict.doubt = doubtful(&verdict.label) || (fm_pilot && stream_lowpass) || analog || (verdict.label.starts_with(LOSSY_UPSTREAM) && verdict.level == Level::Warn);
     Ok(verdict)
 }
 
@@ -1047,6 +1108,31 @@ fn intensity_share(frames: &[(f64, bool, f64)]) -> Option<f64> {
     let share = loud.iter().filter(|f| f.1).count() as f64 / loud.len() as f64;
     let mids = loud.iter().map(|f| f.2).sum::<f64>() / loud.len() as f64;
     (share >= 0.10 && mids < 0.9).then_some(share)
+}
+
+/// The sample rate whose band ends at `end` Hz (a resampler cuts a little under half the rate).
+fn source_rate(end: f64) -> Option<f64> {
+    match end {
+        19500.0..=22150.0 => Some(44100.0),
+        22150.0..=24300.0 => Some(48000.0),
+        40000.0..=44200.0 => Some(88200.0),
+        44200.0..=48300.0 => Some(96000.0),
+        _ => None,
+    }
+}
+
+/// Why an upsampled file is one: "no real content above about 21.6 kHz, so this 96 kHz file
+/// comes from a 44.1 kHz source".
+fn upsampled_from(rate: f64, cutoff: Option<f64>, origin: Option<f64>) -> String {
+    let rate_khz = crate::audio::trim_float(rate / 1000.0);
+    match (cutoff, origin) {
+        (Some(c), Some(r)) => format!(
+            "no real content above about {:.1} kHz, so this {rate_khz} kHz file comes from a {} kHz source",
+            c / 1000.0,
+            crate::audio::trim_float(r / 1000.0)
+        ),
+        _ => format!("no real content above about 22-24 kHz, so this {rate_khz} kHz file comes from a 44.1 or 48 kHz source"),
+    }
 }
 
 /// A lowpass seen through the noise: where the music stops above its own steady floor.
@@ -1111,11 +1197,72 @@ fn masked_cutoff(kept: &[f32], kept_bands: usize, freq: &dyn Fn(usize) -> f64, s
     Some(Masked { cutoff, floor_above, rise })
 }
 
+/// How the treble ends at a lowpass, frame by frame: what tells an analog roll-off (tape,
+/// microphones, a tuner) from an encoder's or a digital filter's wall.
+#[derive(Clone, Copy, Debug)]
+struct Rolloff {
+    /// Median over the loud frames of the steepest drop between two 300 Hz bands within
+    /// 1 kHz of the cutoff, in dB: a wall drops by tens of dB at once, a roll-off gradually.
+    step: f64,
+    /// Correlation over the frames between the level just below the cutoff and just above:
+    /// under an analog roll-off the band above still follows the music.
+    coherence: f64,
+}
+
+fn correlation(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n < 2 {
+        return 0.0;
+    }
+    let (ma, mb) = (a[..n].iter().sum::<f64>() / n as f64, b[..n].iter().sum::<f64>() / n as f64);
+    let cov: f64 = a[..n].iter().zip(&b[..n]).map(|(x, y)| (x - ma) * (y - mb)).sum();
+    let var = |v: &[f64], m: f64| v.iter().map(|x| (x - m) * (x - m)).sum::<f64>();
+    cov / (var(&a[..n], ma) * var(&b[..n], mb)).sqrt().max(1e-12)
+}
+
+/// The roll-off measures around `cutoff`, on the kept frames (bands of about 100 Hz; `skip`:
+/// bands left out, tones). None without enough frames or bands around the cutoff.
+fn rolloff(kept: &[f32], kept_bands: usize, freq: &dyn Fn(usize) -> f64, skip: &dyn Fn(f64) -> bool, cutoff: f64) -> Option<Rolloff> {
+    if kept_bands == 0 || kept.len() / kept_bands < 100 {
+        return None;
+    }
+    let db = |p: f64| 10.0 * libm::log10(p + 1e-30);
+    let frames: Vec<&[f32]> = kept.chunks_exact(kept_bands).collect();
+    let pick = |lo: f64, hi: f64| -> Vec<usize> { (0..kept_bands).filter(|&b| freq(b) >= lo && freq(b) < hi && !skip(freq(b))).collect() };
+    let mean_db = |frame: &[f32], bands: &[usize]| db(bands.iter().map(|&b| frame[b] as f64).sum::<f64>() / bands.len().max(1) as f64);
+    let (reference, below, above) = (pick(cutoff - 3000.0, cutoff - 1500.0), pick(cutoff - 1000.0, cutoff - 300.0), pick(cutoff + 300.0, cutoff + 1000.0));
+    if reference.len() < 5 || below.len() < 3 || above.len() < 3 {
+        return None;
+    }
+    let loudness: Vec<f64> = frames.iter().map(|f| mean_db(f, &reference)).collect();
+    let median_loudness = dsp::median(&loudness)?;
+    let loud: Vec<usize> = (0..frames.len()).filter(|&i| loudness[i] >= median_loudness).collect();
+    if loud.len() < 50 {
+        return None;
+    }
+    // Steepest drop between neighbouring 300 Hz bands within 1 kHz of the cutoff.
+    let cells: Vec<Vec<usize>> =
+        (0..7).map(|k| pick(cutoff - 1000.0 + 300.0 * k as f64, cutoff - 700.0 + 300.0 * k as f64)).filter(|c| !c.is_empty()).collect();
+    let steps: Vec<f64> = loud
+        .iter()
+        .map(|&i| {
+            let levels: Vec<f64> = cells.iter().map(|c| mean_db(frames[i], c)).collect();
+            levels.windows(2).map(|w| w[0] - w[1]).fold(f64::NEG_INFINITY, f64::max)
+        })
+        .collect();
+    let lo: Vec<f64> = frames.iter().map(|f| mean_db(f, &below)).collect();
+    let hi: Vec<f64> = frames.iter().map(|f| mean_db(f, &above)).collect();
+    Some(Rolloff { step: dsp::median(&steps)?, coherence: correlation(&lo, &hi) })
+}
+
 struct Facts {
     rate: f64,
     cutoff: Option<f64>,
     drop: f64,
     holes: Option<f64>,
+    /// No MP3 grid, but small rounding errors at every position more often than genuine
+    /// audio shows: the absence of a grid then says nothing either way.
+    uniform: bool,
     above_floor: Option<f64>,
     high_floor: Option<f64>,
     /// Floor above the cutoff in quiet and loud passages, and its correlation with the music.
@@ -1130,6 +1277,15 @@ struct Facts {
     /// Difference channel against the sum, 5-10 kHz.
     stereo: Option<f64>,
     upsampled: bool,
+    /// The sample rate an upsampled file comes from, when its content's edge tells it.
+    origin: Option<f64>,
+    /// A 48 kHz file whose content stops at the top of a 44.1 kHz band.
+    from_44k: bool,
+    /// At the cutoff: the steepest drop between neighbouring bands (dB) and how much the band
+    /// above follows the music (correlation).
+    roll: Option<(f64, f64)>,
+    /// The lowpass was judged an analog roll-off.
+    analog: bool,
     /// Why the file holds 16-bit audio, when it does.
     padded: Option<String>,
     /// 24-bit files: share of the values used around zero, and the bits that gives.
@@ -1319,7 +1475,11 @@ fn build_report(title: String, verdict: &Verdict, f: &Facts) -> Report {
     if f.rate >= 88200.0 {
         add(
             "Hi-res content",
-            if f.upsampled { "nothing above 22-24 kHz".into() } else { "real content above 22-24 kHz".into() },
+            match (f.upsampled, f.origin, f.cutoff) {
+                (true, Some(r), Some(c)) => format!("nothing above {}: from a {} kHz source", khz(c), crate::audio::trim_float(r / 1000.0)),
+                (true, _, _) => "nothing above 22-24 kHz".into(),
+                _ => "real content above 22-24 kHz".into(),
+            },
             "A true hi-res recording has content (or at least hiss) up there; an upsampled 44.1/48 kHz file is empty above 22-24 kHz.",
             if f.upsampled { Level::Warn } else { Level::Ok },
         );
@@ -1339,7 +1499,7 @@ fn build_report(title: String, verdict: &Verdict, f: &Facts) -> Report {
                 trace_none(t.likelihood, crate::mp3trace::THRESHOLD)
             },
             "The sound is analysed again with an MP3 encoder's own filter bank, at every possible position. A file decoded from an MP3 falls back onto the encoder's rounding grid in many bands (3 % and more, far above the other positions), even at 320 kbps; genuine audio stays around 2 %, at no particular position. Resampling or effects after the decoder erase this trace, so its absence does not prove a file lossless.",
-            if t.found() { Level::Error } else { Level::Ok },
+            if t.found() { Level::Error } else if f.uniform { Level::Info } else { Level::Ok },
         );
     }
     if let Some(t) = f.aac_trace {
@@ -1401,6 +1561,31 @@ fn build_report(title: String, verdict: &Verdict, f: &Facts) -> Report {
         );
     }
 
+    if let Some((step, coherence)) = f.roll {
+        add(
+            "Edge of the treble at the cutoff",
+            format!("drops by {step:.0} dB at most between 300 Hz bands; the band above follows the music at {coherence:.2}"),
+            "An encoder's or a digital filter's lowpass is usually a wall: the level falls steeply from one band to the next and nothing of the music is left above it. Tape, microphones and analog filters roll off gradually (16 dB or less) and the band above still follows the music (0.6 and more). Lossy files can roll off gradually too: a hint, never a proof.",
+            if f.analog { Level::Info } else if step > ANALOG_STEP && coherence < 0.3 { Level::Warn } else { Level::Info },
+        );
+    }
+    if let Some(settings) = encoder_settings(verdict, f) {
+        add(
+            "Lowpass of encoder settings",
+            settings,
+            "Lossy encoders cut at a set frequency for each bitrate or quality (LAME, FDK-AAC, Vorbis; Opus always at 20 kHz). A cutoff that matches one is a hint only: a filter may cut there too, and several settings share a cutoff.",
+            Level::Info,
+        );
+    }
+    if f.from_44k {
+        add(
+            "Hi-res content",
+            "content stops at the top of a 44.1 kHz band, digital silence above".into(),
+            "A 48 kHz file upsampled from a 44.1 kHz source is empty above about 21-22 kHz; some 48 kHz converters' filters also cut there, so this is a hint only.",
+            Level::Info,
+        );
+    }
+    let evidence = evidence(verdict, f);
     let reasoning = reasoning(verdict, f);
     let mut key = Vec::new();
     if let Some(c) = f.cutoff {
@@ -1432,7 +1617,91 @@ fn build_report(title: String, verdict: &Verdict, f: &Facts) -> Report {
         tracks: Vec::new(),
         cutoff: f.cutoff,
         speed: None,
+        evidence,
     }
+}
+
+/// The codec the coding traces name, when they were found.
+fn traced_codec(f: &Facts) -> Option<crate::encoders::Codec> {
+    use crate::encoders::Codec;
+    if f.mp3_trace.is_some_and(|t| t.found()) {
+        Some(Codec::Mp3)
+    } else if f.aac_trace.is_some_and(|t| crate::aactrace::found(&t)) {
+        Some(Codec::Aac)
+    } else if f.opus_trace.is_some_and(|t| t.found()) {
+        Some(Codec::Opus)
+    } else {
+        None
+    }
+}
+
+/// The encoder settings whose lowpass matches the cutoff, for a verdict that leaves a lossy
+/// origin possible or certain ("MP3 128 kbps, AAC VBR 4 (FDK) or Vorbis q1").
+fn encoder_settings(verdict: &Verdict, f: &Facts) -> Option<String> {
+    let c = f.cutoff?;
+    let lossy = verdict.level == Level::Error || doubtful(&verdict.label);
+    if !lossy || f.analog || f.upsampled {
+        return None;
+    }
+    // Without a coding trace, a cutoff does not name a codec, let alone a bitrate.
+    crate::encoders::describe(c, Some(traced_codec(f)?))
+}
+
+/// The clues of a verdict, on each side.
+fn evidence(verdict: &Verdict, f: &Facts) -> Vec<crate::report::Evidence> {
+    use crate::report::{Evidence, Strength};
+    let khz = |c: f64| format!("{:.1} kHz", c / 1000.0);
+    let mut e = Vec::new();
+    let mut push = |lossy: bool, strength: Strength, text: String| e.push(Evidence { lossy, strength, text });
+    for (name, found) in [
+        ("MP3", f.mp3_trace.filter(|_| !f.uniform).map(|t| t.found())),
+        ("AAC", f.aac_trace.map(|t| crate::aactrace::found(&t))),
+        ("Opus", f.opus_trace.map(|t| t.found())),
+    ] {
+        match found {
+            Some(true) => push(true, Strength::Strong, format!("{name} coding traces: the file falls back onto an {name} encoder's rounding grid")),
+            Some(false) => push(false, Strength::Weak, format!("No {name} coding traces (they do not survive effects or resampling after the decoder)")),
+            None => {}
+        }
+    }
+    if f.lossywav {
+        push(true, Strength::Strong, "Lowest bits zeroed block by block, as lossyWAV does".into());
+    }
+    match (f.cutoff, f.holes) {
+        (Some(c), Some(h)) if h >= 15.0 => push(true, Strength::Strong, format!("Encoder holes of {h:.0} dB below the {} lowpass", khz(c))),
+        (Some(c), Some(h)) if h >= 10.0 => push(true, Strength::Moderate, format!("Encoder holes of {h:.0} dB below the {} lowpass (not proof on their own under 15 dB)", khz(c))),
+        (Some(c), Some(h)) if h < 5.0 => push(false, Strength::Moderate, format!("No encoder holes below the {} lowpass ({h:.0} dB)", khz(c))),
+        _ => {}
+    }
+    if let Some(c) = f.cutoff.filter(|c| *c < 20500.0 && !f.analog) {
+        push(true, Strength::Weak, format!("Brick-wall lowpass at {}, where encoders cut (digital filters too)", khz(c)));
+    }
+    if let (Some(c), Some((step, coherence))) = (f.cutoff, f.roll) {
+        if f.analog {
+            push(false, Strength::Weak, format!("Gradual roll-off at {} with the music still above it, as analog sources leave", khz(c)));
+        } else if step > ANALOG_STEP && coherence < 0.3 {
+            push(true, Strength::Weak, format!("A wall at {}: {step:.0} dB between neighbouring bands and nothing of the music above", khz(c)));
+        }
+    }
+    if f.cutoff.is_some() {
+        if f.silent_above {
+            push(true, Strength::Moderate, "Digital silence above the cutoff: nothing analog came after the lowpass".into());
+        } else if f.above_floor.is_some_and(|a| a >= 10.0) && f.high_floor.is_none_or(|h| h >= 10.0) {
+            push(false, Strength::Moderate, "Hiss goes on above the cutoff, which no decoder leaves (unless added afterwards)".into());
+        }
+    } else if f.hf.is_some_and(|h| h >= TREBLE_PLAIN) && !f.upsampled {
+        push(false, Strength::Moderate, "No brick-wall lowpass, with treble present above 15 kHz".into());
+    }
+    if f.pilot_on_19k || f.shifted_pilot.is_some() {
+        push(false, Strength::Moderate, "19 kHz FM stereo pilot tone: recorded off air".into());
+    }
+    if verdict.label.starts_with("Lossy? (Opus)") {
+        push(true, Strength::Moderate, "Treble locked between the channels (intensity stereo), as Opus codes it".into());
+    }
+    if let Some(s) = encoder_settings(verdict, f) {
+        push(true, Strength::Weak, format!("The cutoff matches the lowpass of {s}"));
+    }
+    e
 }
 
 /// The steps from the measurements to the verdict.
@@ -1458,8 +1727,13 @@ fn reasoning(verdict: &Verdict, f: &Facts) -> Vec<String> {
         r.push("So the lowpass is the FM transmitter's, not an encoder's: a lossless capture of an FM broadcast.".into());
     } else if label.starts_with(LOSSY_UPSTREAM) {
         r.push(format!("Encoder holes of {holes:.0} dB below the {cut} lowpass are the fingerprint of a perceptual encoder (MP3, MP2, AAC). FM and analog recordings stay under about 5 dB."));
+        if holes < 15.0 {
+            r.push("Under 15 dB, though, holes are not proof on their own, and the noise above the cutoff hides the second clue (digital silence): probably, not certainly, lossy.".into());
+        }
         r.push(format!("Yet steady hiss ({above:+.0} dB over digital silence, the same in quiet and loud passages) fills the band above the cutoff. An encoder removes everything above its lowpass, so this hiss was added afterwards, by an analog stage (tuner, sound card)."));
-        r.push("The noise above the cutoff came after the encoder (an analog stage, or dither added when converting): either way, the content itself was lossy-coded.".into());
+        if holes >= 15.0 {
+            r.push("The noise above the cutoff came after the encoder (an analog stage, or dither added when converting): either way, the content itself was lossy-coded.".into());
+        }
         let mut hints = 0;
         if f.cutoff.is_some_and(|c| c > 15800.0) && !f.pilot_on_19k && f.shifted_pilot.is_none() {
             r.push(format!("The audio goes up to {cut}, beyond the 15 kHz an FM stereo transmitter passes, and there is no 19 kHz pilot: probably not captured off air."));
@@ -1475,7 +1749,7 @@ fn reasoning(verdict: &Verdict, f: &Facts) -> Vec<String> {
             "The encoder may be the station's digital link (studio to transmitter) or an internet stream recorded through a sound card.".into()
         });
     } else if label.starts_with("Lossy?") {
-        r.push(format!("A brick-wall lowpass at {cut}, as MP3/AAC encoders leave."));
+        r.push(format!("A brick-wall lowpass at {cut}, as lossy encoders leave."));
         r.push(format!("But no encoder holes below it ({holes:.0} dB; MP3 usually shows 10 dB and more)."));
         r.push(if f.silent_above {
             "Above the cutoff there is digital silence: nothing analog came after this filter.".into()
@@ -1490,8 +1764,11 @@ fn reasoning(verdict: &Verdict, f: &Facts) -> Vec<String> {
         } else {
             r.push(format!("Above the cutoff the floor is {above:+.0} dB over digital silence."));
         }
-        if let Some(c) = f.cutoff {
-            r.push(format!("A cutoff at {cut} is typical of an MP3/AAC at {}.", lossy_bitrate_hint(c)));
+        if f.cutoff.is_some() {
+            r.push(match encoder_settings(verdict, f) {
+                Some(settings) => format!("A cutoff at {cut} matches the lowpass of {settings}."),
+                None => format!("A cutoff at {cut} is where lossy encoders often cut (no coding trace names the codec)."),
+            });
         }
     } else if label == "15 kHz lowpass" {
         r.push(format!("A steep lowpass at {cut}: both FM broadcasts and low-bitrate MP3s cut there."));
@@ -1507,20 +1784,30 @@ fn reasoning(verdict: &Verdict, f: &Facts) -> Vec<String> {
             "The floor above the cutoff does not settle the question either way.".into()
         });
     } else if label.starts_with("Unsure") {
-        r.push(format!("A lowpass at {cut}: an MP3 at 320 kbps cuts there, but so do the anti-alias filters of some recorders and converters."));
+        r.push(format!("A lowpass at {cut}: high-bitrate lossy encoders cut there, but so do the anti-alias filters of some recorders and converters."));
         r.push(format!("Encoder holes: {holes:.0} dB; floor above the cutoff: {above:+.0} dB over digital silence."));
         if label.contains("upsampled") {
-            r.push("The file is also upsampled: it comes from a 44.1 or 48 kHz source.".into());
+            r.push(format!("The file is also upsampled: {}.", upsampled_from(f.rate, f.cutoff, f.origin)));
+        } else if f.from_44k {
+            r.push("The content stops at the top of a 44.1 kHz band with digital silence above: the file may also have been upsampled from a 44.1 kHz source.".into());
         }
     } else if label == LOSSLESS_UPSAMPLED {
         r.push("No lowpass from a lossy encoder and no encoder holes: the source is lossless.".into());
-        r.push(format!("But this {} kHz file has no real content above about 22-24 kHz: it was upsampled from a 44.1 or 48 kHz source.", crate::audio::trim_float(f.rate / 1000.0)));
+        r.push(format!("But it was upsampled: {}.", upsampled_from(f.rate, f.cutoff, f.origin)));
     } else if label == LOSSLESS_PADDED {
         r.push("No lowpass from a lossy encoder and no encoder holes: the source is lossless.".into());
         r.push(format!("But {}.", f.padded.as_deref().unwrap_or("this is 16-bit audio stored in a 24-bit file")));
-    } else if label == "Unclear" {
+    } else if label == "Unclear" && !f.analog {
         r.push(format!("There is almost nothing above 15 kHz ({:.0} dB relative to 1-4 kHz).", f.hf.unwrap_or(0.0)));
         r.push("Encoder traces live up there, so neither lossy nor lossless can be shown. Audience and cassette recordings often look like this; the spectrogram and the lineage are the best clues.".into());
+    } else if label == "Unclear" && f.analog {
+        let (step, coherence) = f.roll.unwrap_or_default();
+        r.push(format!("A lowpass at {cut}, which at first sight could be an encoder's."));
+        r.push(format!(
+            "But it is a gradual roll-off: the level falls by {step:.0} dB at most from one 300 Hz band to the next, and the band just above still follows the music (correlation {coherence:.2})."
+        ));
+        r.push(format!("No encoder holes below it ({holes:.0} dB) and no coding traces were found."));
+        r.push("Tape, microphones and analog filters roll off like this, but so do some lossy files: neither lossy nor lossless can be shown. The spectrogram and the lineage are the best clues.".into());
     } else if label == LIKELY_LOSSLESS {
         r.push("No brick-wall lowpass, and the sound does not fall back onto an MP3 encoder's rounding grid (no MP3 coding traces).".into());
         r.push(format!(
@@ -1594,8 +1881,14 @@ fn trace_none(likelihood: f64, threshold: f64) -> String {
     if likelihood <= threshold {
         format!("none ({share:.1} % of the bands, within the normal range)")
     } else {
-        format!("none ({share:.1} % of the bands, but at every position alike: not an encoder's grid)")
+        format!("none at any position, but {share:.1} % of the bands, more than genuine audio shows: noise reduction, or a lossy stage whose grid was erased since, can leave this")
     }
+}
+
+/// No MP3 grid, yet more small rounding errors at every position than genuine audio shows:
+/// official CDs measured 1.8 to 2.0 %, the detector's threshold is 2.5 %.
+fn uniform_high(t: &crate::mp3trace::Trace) -> bool {
+    !t.found() && t.likelihood > crate::mp3trace::THRESHOLD
 }
 
 #[cfg(test)]
@@ -1614,6 +1907,42 @@ mod tests {
 
     /// Music up to 16 kHz over a steady floor; above it the floor alone, rising toward
     /// 19 kHz (noise-shaped dither) or flat (FM hiss).
+    #[test]
+    fn analog_rolloff_and_wall() {
+        let freq = |b: usize| 7050.0 + b as f64 * 100.0;
+        let bands = 150;
+        let frames = 400;
+        // The music's loudness changes from frame to frame (0 to 30 dB); above 15 kHz either a
+        // wall (steady noise only) or a roll-off of 3 dB per 100 Hz down to a steady hiss.
+        let make = |wall: bool| -> Vec<f32> {
+            let mut kept = Vec::new();
+            for i in 0..frames {
+                let loudness = ((i * 37) % 31) as f64;
+                for b in 0..bands {
+                    let f = freq(b);
+                    let fall = if f <= 15000.0 { 0.0 } else if wall { 200.0 } else { (f - 15000.0) / 100.0 * 3.0 };
+                    let music = libm::pow(10.0, (60.0 + loudness - fall) / 10.0);
+                    kept.push((music + 1000.0 * (1.0 + 0.1 * ((i + b) % 3) as f64)) as f32);
+                }
+            }
+            kept
+        };
+        let none = |_: f64| false;
+        let analog = rolloff(&make(false), bands, &freq, &none, 15500.0).unwrap();
+        assert!(analog.step <= ANALOG_STEP && analog.coherence >= ANALOG_COHERENCE, "{analog:?}");
+        let wall = rolloff(&make(true), bands, &freq, &none, 15050.0).unwrap();
+        assert!(wall.step > ANALOG_STEP && wall.coherence < ANALOG_COHERENCE, "{wall:?}");
+    }
+
+    #[test]
+    fn upsampling_origin() {
+        assert_eq!(source_rate(21600.0), Some(44100.0));
+        assert_eq!(source_rate(23300.0), Some(48000.0));
+        assert_eq!(source_rate(47500.0), Some(96000.0));
+        assert_eq!(source_rate(30000.0), None);
+        assert!(upsampled_from(96000.0, Some(21600.0), Some(44100.0)).contains("from a 44.1 kHz source"));
+    }
+
     #[test]
     fn lowpass_under_dither() {
         let freq = |b: usize| 10050.0 + b as f64 * 100.0;
