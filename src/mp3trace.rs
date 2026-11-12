@@ -27,7 +27,7 @@ const SF_MIN: f64 = 0.5;
 const SF_MAX: f64 = 0.7;
 
 /// The result for a file.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct Trace {
     /// Share of the bands whose rounding error is improbably small (genuine audio: about 1 %).
     pub likelihood: f64,

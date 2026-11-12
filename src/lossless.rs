@@ -21,11 +21,13 @@ pub struct Verdict {
     pub report: Report,
     /// The origin is left open: worth the slower search for AAC and Opus traces.
     pub(crate) doubt: bool,
+    /// The measures the verdict was drawn from, as JSON (only with BT_FACTS).
+    facts: Option<String>,
 }
 
 impl Verdict {
     fn new(label: impl Into<String>, sentence: impl Into<String>, level: Level, details: Vec<String>) -> Self {
-        Verdict { label: label.into(), sentence: sentence.into(), level, details, report: Report::default(), doubt: false }
+        Verdict { label: label.into(), sentence: sentence.into(), level, details, report: Report::default(), doubt: false, facts: None }
     }
 }
 
@@ -100,7 +102,39 @@ pub fn analyse(path: &Path, info: &AudioInfo, aac: bool, cancel: &AtomicBool) ->
             ),
         );
     }
+    write_facts(path, &verdict);
     Ok(verdict)
+}
+
+/// BT_FACTS=<file>: one JSON line per analysed file (its path, final verdict and measures)
+/// is appended to that file, to score the verdicts and replay the decision without the audio.
+fn write_facts(path: &Path, verdict: &Verdict) {
+    use std::io::Write;
+    static OUT: std::sync::OnceLock<Option<std::sync::Mutex<std::fs::File>>> = std::sync::OnceLock::new();
+    let (Some(out), Some(facts)) = (OUT.get_or_init(facts_file), &verdict.facts) else {
+        return;
+    };
+    let level = match verdict.level {
+        Level::Ok => "ok",
+        Level::Warn => "warn",
+        Level::Error => "error",
+        Level::Info => "info",
+    };
+    let line = serde_json::json!({
+        "path": path.to_string_lossy(),
+        "label": verdict.label,
+        "level": level,
+        "doubt": verdict.doubt,
+        "facts": serde_json::from_str::<serde_json::Value>(facts).unwrap_or_default(),
+    });
+    if let Ok(mut file) = out.lock() {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
+fn facts_file() -> Option<std::sync::Mutex<std::fs::File>> {
+    let name = std::env::var_os("BT_FACTS")?;
+    std::fs::OpenOptions::new().create(true).append(true).open(name).ok().map(std::sync::Mutex::new)
 }
 
 /// The verdict for a file lossy by its format, without measuring its sound: "Lossy (AAC)".
@@ -1057,6 +1091,9 @@ fn conclude(path: &Path, info: &AudioInfo, m: &Measured, aac_check: bool) -> Res
         opus_trace,
     };
     verdict.report = build_report(crate::files::file_name(path), &verdict, &facts);
+    if std::env::var_os("BT_FACTS").is_some() {
+        verdict.facts = serde_json::to_string(&facts).ok();
+    }
     // An FM pilot tone survives an Opus or AAC stream at a high bitrate: with the music
     // stopping dead around 20 kHz (FM itself stops at 15 kHz), the origin is open too.
     let stream_lowpass = cutoff.is_some_and(|c| (19500.0..20800.0).contains(&c));
@@ -1255,6 +1292,7 @@ fn rolloff(kept: &[f32], kept_bands: usize, freq: &dyn Fn(usize) -> f64, skip: &
     Some(Rolloff { step: dsp::median(&steps)?, coherence: correlation(&lo, &hi) })
 }
 
+#[derive(serde::Serialize)]
 struct Facts {
     rate: f64,
     cutoff: Option<f64>,
