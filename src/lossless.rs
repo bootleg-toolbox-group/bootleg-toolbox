@@ -22,7 +22,7 @@ pub struct Verdict {
     /// The origin is left open: worth the slower search for AAC and Opus traces.
     pub(crate) doubt: bool,
     /// The measures the verdict was drawn from, as JSON (only with BT_FACTS).
-    pub(crate) facts: Option<String>,
+    pub(crate) facts: Option<Facts>,
 }
 
 impl Verdict {
@@ -67,13 +67,25 @@ pub fn analyse(path: &Path, info: &AudioInfo, aac: bool, cancel: &AtomicBool) ->
     if info.codec.is_some_and(|c| !c.decoded()) {
         return Ok(by_format(path, info));
     }
-    let measured = measure(path, info, cancel)?;
-    let mut verdict = crate::decision::decide(path, &facts(info, &measured, aac));
-    // The AAC search is slow, so an option; a doubt is worth it anyway: the verdict is drawn
-    // again with it, and an AAC converted straight back turns the doubt into a certainty.
-    if !aac && verdict.doubt && !cancel.load(std::sync::atomic::Ordering::Relaxed) {
-        verdict = crate::decision::decide(path, &facts(info, &measured, true));
-    }
+    // `--cli replay`: the measures recorded earlier (BT_FACTS), the audio not read again.
+    let mut verdict = if let Some(recorded) = REPLAY.get() {
+        match recorded.get(path.to_string_lossy().as_ref()).ok_or("no measures recorded for this file")? {
+            Ok(facts) => crate::decision::decide(path, facts),
+            Err(message) => {
+                write_line(path, serde_json::json!({ "error": message }));
+                return Err(message.clone());
+            }
+        }
+    } else {
+        let measured = measure(path, info, cancel).inspect_err(|e| write_line(path, serde_json::json!({ "error": e })))?;
+        let mut verdict = crate::decision::decide(path, &facts(info, &measured, aac));
+        // The AAC search is slow, so an option; a doubt is worth it anyway: the verdict is drawn
+        // again with it, and an AAC converted straight back turns the doubt into a certainty.
+        if !aac && verdict.doubt && !cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            verdict = crate::decision::decide(path, &facts(info, &measured, true));
+        }
+        verdict
+    };
     if info.lossy() {
         let name = info.name();
         verdict.label = format!("Lossy ({name})");
@@ -107,11 +119,10 @@ pub fn analyse(path: &Path, info: &AudioInfo, aac: bool, cancel: &AtomicBool) ->
 }
 
 /// BT_FACTS=<file>: one JSON line per analysed file (its path, final verdict and measures)
-/// is appended to that file, to score the verdicts and replay the decision without the audio.
+/// is appended to that file (or its error, when the analysis failed), to score the verdicts and
+/// replay the decision without the audio.
 fn write_facts(path: &Path, verdict: &Verdict) {
-    use std::io::Write;
-    static OUT: std::sync::OnceLock<Option<std::sync::Mutex<std::fs::File>>> = std::sync::OnceLock::new();
-    let (Some(out), Some(facts)) = (OUT.get_or_init(facts_file), &verdict.facts) else {
+    let Some(facts) = &verdict.facts else {
         return;
     };
     let level = match verdict.level {
@@ -120,13 +131,17 @@ fn write_facts(path: &Path, verdict: &Verdict) {
         Level::Error => "error",
         Level::Info => "info",
     };
-    let line = serde_json::json!({
-        "path": path.to_string_lossy(),
-        "label": verdict.label,
-        "level": level,
-        "doubt": verdict.doubt,
-        "facts": serde_json::from_str::<serde_json::Value>(facts).unwrap_or_default(),
-    });
+    write_line(path, serde_json::json!({ "label": verdict.label, "level": level, "doubt": verdict.doubt, "facts": facts }));
+}
+
+/// Appends the line of `path` to the BT_FACTS file (nothing without the variable).
+fn write_line(path: &Path, mut line: serde_json::Value) {
+    use std::io::Write;
+    static OUT: std::sync::OnceLock<Option<std::sync::Mutex<std::fs::File>>> = std::sync::OnceLock::new();
+    let Some(out) = OUT.get_or_init(facts_file) else {
+        return;
+    };
+    line["path"] = path.to_string_lossy().into();
     if let Ok(mut file) = out.lock() {
         let _ = writeln!(file, "{line}");
     }
@@ -135,6 +150,30 @@ fn write_facts(path: &Path, verdict: &Verdict) {
 fn facts_file() -> Option<std::sync::Mutex<std::fs::File>> {
     let name = std::env::var_os("BT_FACTS")?;
     std::fs::OpenOptions::new().create(true).append(true).open(name).ok().map(std::sync::Mutex::new)
+}
+
+/// The measures read back by `--cli replay`, by path as written in the BT_FACTS lines.
+static REPLAY: std::sync::OnceLock<std::collections::HashMap<String, Result<Facts, String>>> = std::sync::OnceLock::new();
+
+/// Loads the BT_FACTS lines of `file`: from then on `analyse` draws its verdicts from them
+/// instead of reading the audio. Returns the number of files.
+pub fn load_replay(file: &Path) -> Result<usize, String> {
+    let text = std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let mut recorded = std::collections::HashMap::new();
+    for (n, line) in text.lines().enumerate() {
+        let at = |e: String| format!("{} line {}: {e}", file.display(), n + 1);
+        let v: serde_json::Value = serde_json::from_str(line).map_err(|e| at(e.to_string()))?;
+        let path = v["path"].as_str().ok_or_else(|| at("no path".into()))?.to_string();
+        // A file whose analysis failed is recorded with its error message.
+        let facts = match v["error"].as_str() {
+            Some(message) => Err(message.to_string()),
+            None => Ok(serde_json::from_value(v["facts"].clone()).map_err(|e| at(e.to_string()))?),
+        };
+        recorded.insert(path, facts);
+    }
+    let count = recorded.len();
+    REPLAY.set(recorded).map_err(|_| "measures already loaded".to_string())?;
+    Ok(count)
 }
 
 /// The verdict for a file lossy by its format, without measuring its sound: "Lossy (AAC)".
@@ -771,12 +810,15 @@ pub(crate) fn upsampled_from(rate: f64, cutoff: Option<f64>, origin: Option<f64>
 }
 
 /// A lowpass seen through the noise: where the music stops above its own steady floor.
-#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Masked {
+    #[serde(with = "crate::wire")]
     pub(crate) cutoff: f64,
     /// The steady floor above the cutoff, in dB over 16-bit digital silence.
+    #[serde(with = "crate::wire")]
     pub(crate) floor_above: f64,
     /// How much that floor rises toward 18.5-19.5 kHz (None when the cutoff is too high).
+    #[serde(with = "crate::wire")]
     pub(crate) rise: Option<f64>,
 }
 
@@ -891,54 +933,74 @@ fn rolloff(kept: &[f32], kept_bands: usize, freq: &dyn Fn(usize) -> f64, skip: &
 }
 
 /// What was measured in a file, numbers only: the decision (decision.rs) and the report are drawn from it.
-#[derive(Clone, Default, serde::Serialize)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Facts {
+    #[serde(with = "crate::wire")]
     pub(crate) rate: f64,
     /// Blocks analysed (0: digital silence only).
     pub(crate) frames: usize,
+    #[serde(with = "crate::wire")]
     pub(crate) cutoff: Option<f64>,
+    #[serde(with = "crate::wire")]
     pub(crate) drop: f64,
+    #[serde(with = "crate::wire")]
     pub(crate) holes: Option<f64>,
     /// No MP3 grid, but small rounding errors at every position more often than genuine
     /// audio shows: the absence of a grid then says nothing either way.
     pub(crate) uniform: bool,
+    #[serde(with = "crate::wire")]
     pub(crate) above_floor: Option<f64>,
+    #[serde(with = "crate::wire")]
     pub(crate) high_floor: Option<f64>,
     /// Floor above the cutoff in quiet and loud passages, and its correlation with the music.
+    #[serde(with = "crate::wire")]
     pub(crate) hiss: Option<(f64, f64, f64)>,
     /// 15-19.5 kHz against 1-4 kHz.
+    #[serde(with = "crate::wire")]
     pub(crate) hf: Option<f64>,
     /// Hi-res files: level 27-30 kHz against 18.5-20.5 kHz.
+    #[serde(with = "crate::wire")]
     pub(crate) hires_gap: Option<f64>,
     pub(crate) pilot_on_19k: bool,
+    #[serde(with = "crate::wire")]
     pub(crate) shifted_pilot: Option<f64>,
     pub(crate) speed: Option<String>,
+    #[serde(with = "crate::wire")]
     pub(crate) line_whistle: Option<f64>,
     pub(crate) silent_above: bool,
     /// Difference channel against the sum, 5-10 kHz.
+    #[serde(with = "crate::wire")]
     pub(crate) stereo: Option<f64>,
     /// Share of the loud frames whose treble is locked between the channels (intensity stereo).
+    #[serde(with = "crate::wire")]
     pub(crate) intensity: Option<f64>,
     /// A lowpass seen through noise-shaped dither.
     pub(crate) masked: Option<Masked>,
     pub(crate) upsampled: bool,
     /// The sample rate an upsampled file comes from, when its content's edge tells it.
+    #[serde(with = "crate::wire")]
     pub(crate) origin: Option<f64>,
     /// A 48 kHz file whose content stops at the top of a 44.1 kHz band.
     pub(crate) from_44k: bool,
     /// At the cutoff: the steepest drop between neighbouring bands (dB) and how much the band
     /// above follows the music (correlation).
+    #[serde(with = "crate::wire")]
     pub(crate) roll: Option<(f64, f64)>,
-    /// The lowpass was judged an analog roll-off: filled in by the decision, not measured.
+    /// The lowpass was judged an analog roll-off: a result of the decision, not a measure. Written
+    /// for the report, never read back: the decision works it out again.
+    #[serde(skip_deserializing)]
     pub(crate) analog: bool,
     /// Why the file holds 16-bit audio, when it does.
     pub(crate) padded: Option<String>,
     /// 24-bit files: share of the values used around zero, and the bits that gives.
+    #[serde(with = "crate::wire")]
     pub(crate) comb: Option<(f64, f64)>,
     /// Share of the blocks with extra zero low bits, and their mean number.
+    #[serde(with = "crate::wire")]
     pub(crate) waste: Option<(f64, f64)>,
     pub(crate) lossywav: bool,
     /// dB per octave across the cutoff, or over 10-16 kHz without one.
+    #[serde(with = "crate::wire")]
     pub(crate) edge: Option<f64>,
     /// The MP3 encoder's rounding pattern, looked for in its own filter bank.
     pub(crate) mp3_trace: Option<crate::mp3trace::Trace>,

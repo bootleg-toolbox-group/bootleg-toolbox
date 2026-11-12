@@ -126,6 +126,19 @@ fn run_cli(args: &[String]) -> i32 {
             None => return 0,
         },
         "setlist" => Op::Setlist,
+        // Hidden, for tests: `replay <BT_FACTS file> <paths>` is `lossless` with the measures read
+        // back from the file instead of the audio.
+        "replay" => match args.get(1).map(|f| lossless::load_replay(Path::new(f))) {
+            Some(Ok(_)) => Op::Lossless,
+            Some(Err(e)) => {
+                eprintln!("{e}");
+                return 1;
+            }
+            None => {
+                eprintln!("replay: the file of recorded measures is missing");
+                return 2;
+            }
+        },
         // Each DVD title and video: track BT_TRACK (1, 2...), else the first lossless one
         // (for a video, the first that extracts to FLAC), else the first that extracts.
         // "extract-dvd" was its name before videos.
@@ -171,7 +184,8 @@ fn run_cli(args: &[String]) -> i32 {
             return 2;
         }
     };
-    let paths: Vec<PathBuf> = args[1..].iter().map(PathBuf::from).collect();
+    let given = if command == "replay" { &args[2..] } else { &args[1..] };
+    let paths: Vec<PathBuf> = given.iter().map(PathBuf::from).collect();
     let shows = files::scan_paths(&paths, &Default::default());
     let all: Vec<PathBuf> = shows.iter().flat_map(|s| s.files.clone()).collect();
     // Folder for mp3-320/mp3-v0: BT_MP3_DIR (default: next to the show).

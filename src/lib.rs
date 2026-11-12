@@ -32,3 +32,4 @@ pub mod wv;
 pub mod spectrogram;
 pub mod tagging;
 pub mod undo;
+pub(crate) mod wire;

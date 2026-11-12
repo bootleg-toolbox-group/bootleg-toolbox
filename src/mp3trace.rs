@@ -27,9 +27,10 @@ const SF_MIN: f64 = 0.5;
 const SF_MAX: f64 = 0.7;
 
 /// The result for a file.
-#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Trace {
     /// Share of the bands whose rounding error is improbably small (genuine audio: about 1 %).
+    #[serde(with = "crate::wire")]
     pub likelihood: f64,
     /// Position of the MP3 granules in the file, in samples (0-575).
     pub offset: usize,
@@ -37,6 +38,7 @@ pub struct Trace {
     pub mid_side: bool,
     /// How far the best position stands out from the others, in robust standard deviations
     /// (a genuine file only has the highest of 576 random values).
+    #[serde(with = "crate::wire")]
     pub contrast: f64,
 }
 

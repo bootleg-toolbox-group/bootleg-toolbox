@@ -320,6 +320,34 @@ fn synthetic_shows() {
     snap("images", png_sums(dir));
 }
 
+/// `replay` draws the verdicts from the measures that BT_FACTS recorded: the same output as
+/// the direct run (reports included), and the same measures written back, byte for byte.
+#[test]
+fn replay_matches_direct() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    make_shows(dir);
+    // A silent file takes its own way through the decision.
+    write_wav(&dir.join("Silent Band 2003-03-03").join("01 - Silence.wav"), &vec![[0.0, 0.0]; 44100], 44100, 16, false);
+    let all = [SHOW, HIRES, MUFFLED, WAVS, "Silent Band 2003-03-03"];
+    let (direct_facts, replay_facts) = (dir.join("direct.jsonl"), dir.join("replay.jsonl"));
+    let (direct_text, replay_text) = (direct_facts.to_str().unwrap(), replay_facts.to_str().unwrap());
+    let direct = cli(dir, "lossless", &all, &[("BT_AAC", "1"), ("BT_REPORT", "1"), ("BT_FACTS", direct_text)]);
+    let mut args = vec![direct_text];
+    args.extend(all);
+    let replayed = cli(dir, "replay", &args, &[("BT_AAC", "1"), ("BT_REPORT", "1"), ("BT_FACTS", replay_text)]);
+    assert_eq!(direct, replayed);
+    assert!(direct.contains("Silent"), "{direct}");
+    let sorted = |p: &Path| {
+        let mut lines: Vec<String> = fs::read_to_string(p).unwrap().lines().map(String::from).collect();
+        lines.sort();
+        lines
+    };
+    let (a, b) = (sorted(&direct_facts), sorted(&replay_facts));
+    assert_eq!(a.len(), 9);
+    assert!(a == b, "the measures written back differ");
+}
+
 /// Tag and rename (tags, new names, .md5 and .sfv updated), then undo-tagging: every file
 /// of the show is back byte for byte.
 #[test]

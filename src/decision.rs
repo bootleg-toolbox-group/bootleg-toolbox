@@ -95,6 +95,9 @@ pub(crate) fn decide(path: &Path, f: &Facts) -> Verdict {
             reasoning: vec!["Every sample is zero: there is no audio to analyse.".into()],
             ..Default::default()
         };
+        if std::env::var_os("BT_FACTS").is_some() {
+            verdict.facts = Some(f.clone());
+        }
         return verdict;
     }
     let (rate, cutoff, silent_above, upsampled, origin, from_44k, lossywav) = (f.rate, f.cutoff, f.silent_above, f.upsampled, f.origin, f.from_44k, f.lossywav);
@@ -432,7 +435,7 @@ pub(crate) fn decide(path: &Path, f: &Facts) -> Verdict {
     let facts = Facts { analog, ..f.clone() };
     verdict.report = build_report(crate::files::file_name(path), &verdict, &facts);
     if std::env::var_os("BT_FACTS").is_some() {
-        verdict.facts = serde_json::to_string(&facts).ok();
+        verdict.facts = Some(facts);
     }
     // An FM pilot tone survives an Opus or AAC stream at a high bitrate: with the music
     // stopping dead around 20 kHz (FM itself stops at 15 kHz), the origin is open too.
@@ -516,4 +519,75 @@ pub(crate) fn aggregate(title: String, done: &[TrackResult]) -> Option<ShowDecis
         ..Default::default()
     };
     Some(ShowDecision { label: shown, text, level, report })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A lowpass at 16.5 kHz without holes and with hiss above: doubtful, so "analog" when the
+    /// roll-off is gradual (`step` small, the band above follows the music).
+    fn lowpass(step: f64) -> Facts {
+        Facts {
+            rate: 44100.0,
+            frames: 100,
+            cutoff: Some(16500.0),
+            drop: 30.0,
+            holes: Some(3.0),
+            above_floor: Some(5.0),
+            high_floor: Some(5.0),
+            hf: Some(-30.0),
+            roll: Some((step, 0.8)),
+            edge: Some(40.0),
+            ..Default::default()
+        }
+    }
+
+    fn view(v: &Verdict) -> (String, String, bool, bool) {
+        (v.label.clone(), v.sentence.clone(), v.doubt, v.report.to_text().contains("roll-off"))
+    }
+
+    #[test]
+    fn analog_is_worked_out_not_read() {
+        let path = Path::new("x.flac");
+        // Gradual roll-off: Unclear, and the report's facts say it was judged analog.
+        let gradual = decide(path, &lowpass(10.0));
+        assert_eq!(gradual.label, "Unclear");
+        // A wall: the doubt stays, whatever the flag claims.
+        let wall = lowpass(30.0);
+        let plain = decide(path, &wall);
+        assert!(plain.label.starts_with("Lossy? 16.5"), "{}", plain.label);
+        let claimed = decide(path, &Facts { analog: true, ..wall.clone() });
+        assert_eq!(view(&plain), view(&claimed));
+        // And the other way round: a flag that says "not analog" does not hide a roll-off.
+        let denied = decide(path, &Facts { analog: false, ..lowpass(10.0) });
+        assert_eq!(view(&gradual), view(&denied));
+        let granted = decide(path, &Facts { analog: true, ..lowpass(10.0) });
+        assert_eq!(view(&gradual), view(&granted));
+    }
+
+    #[test]
+    fn facts_survive_json_with_awkward_values() {
+        let mut f = lowpass(10.0);
+        f.rate = 5e-324;
+        f.drop = f64::NAN;
+        f.holes = Some(f64::INFINITY);
+        f.above_floor = Some(f64::NEG_INFINITY);
+        f.hf = Some(0.1 + 0.2);
+        f.hiss = Some((-0.0, f64::MAX, f64::MIN_POSITIVE));
+        f.comb = Some((1.0 / 3.0, 23.999999999999996));
+        f.masked = Some(crate::lossless::Masked { cutoff: 18000.5, floor_above: f64::NAN, rise: None });
+        f.mp3_trace = Some(crate::mp3trace::Trace { likelihood: 0.025000000000000005, offset: 358, mid_side: true, contrast: 9.999999999999998 });
+        f.analog = true;
+        let text = serde_json::to_string(&f).unwrap();
+        assert!(text.contains(r#""drop":"NaN""#) && text.contains(r#""holes":"inf""#) && !text.contains(r#""drop":null"#), "{text}");
+        let back: Facts = serde_json::from_str(&text).unwrap();
+        // The analog flag is written, never read back.
+        assert!(!back.analog);
+        assert_eq!(serde_json::to_string(&Facts { analog: true, ..back.clone() }).unwrap(), text);
+        assert!(back.drop.is_nan() && back.holes == Some(f64::INFINITY) && back.above_floor == Some(f64::NEG_INFINITY));
+        assert_eq!(back.hf.unwrap().to_bits(), (0.1f64 + 0.2).to_bits());
+        assert_eq!(back.hiss.unwrap().0.to_bits(), (-0.0f64).to_bits());
+        assert_eq!(back.mp3_trace.unwrap().contrast.to_bits(), 9.999999999999998f64.to_bits());
+    }
 }

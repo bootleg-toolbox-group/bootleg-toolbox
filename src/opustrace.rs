@@ -31,7 +31,7 @@ pub const MIN_CLEAN: usize = 10;
 pub const MIN_SHARE: f64 = 0.005;
 
 /// The result for a file.
-#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Trace {
     /// Frames whose bands are Opus codewords (in the better of mid and side).
     pub clean: usize,
