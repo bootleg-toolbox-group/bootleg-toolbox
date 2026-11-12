@@ -3,6 +3,7 @@
 
 pub mod app;
 pub mod audio;
+pub mod decision;
 pub mod dsp;
 pub mod encode;
 pub mod encoders;

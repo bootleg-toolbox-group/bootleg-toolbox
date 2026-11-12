@@ -1098,69 +1098,21 @@ pub fn op_lossless(ctx: &Ctx, shows: &[Show], files: &[PathBuf]) -> String {
     let by_path: HashMap<&PathBuf, (&String, &crate::lossless::Report)> =
         files.iter().zip(results.iter()).filter_map(|(f, r)| r.as_ref().map(|(label, _, report)| (f, (label, report)))).collect();
     for show in shows {
-        let done: Vec<(&PathBuf, &String, &crate::lossless::Report)> =
-            show.files.iter().filter_map(|f| by_path.get(f).map(|(l, r)| (f, *l, *r))).collect();
-        let labels: Vec<&String> = done.iter().map(|(_, l, _)| *l).collect();
-        if labels.is_empty() {
+        let done: Vec<crate::decision::TrackResult> = show
+            .files
+            .iter()
+            .filter_map(|f| by_path.get(f).map(|(l, r)| crate::decision::TrackResult { name: rel_posix(f, &show.root), label: l.as_str(), report: r }))
+            .collect();
+        let Some(decided) = crate::decision::aggregate(files::show_name(&show.root), &done) else {
             continue;
-        }
-        // Counts in order of first appearance, then sorted by count (as the reference).
-        let mut counts: Vec<(String, usize)> = Vec::new();
-        for label in &labels {
-            // "Lossy upstream 16.1 kHz" counts as "Lossy upstream": the frequency is dropped.
-            let key = match label.strip_suffix(" kHz").and_then(|l| l.rsplit_once(' ')) {
-                Some((head, _)) => head.to_string(),
-                None => label.to_string(),
-            };
-            match counts.iter_mut().find(|(k, _)| *k == key) {
-                Some(entry) => entry.1 += 1,
-                None => counts.push((key, 1)),
-            }
-        }
-        counts.sort_by_key(|a| std::cmp::Reverse(a.1));
-        let text = counts.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", ");
-        let flagged: usize =
-            counts.iter().filter(|(k, _)| !["Lossless", crate::lossless::LIKELY_LOSSLESS, "FM broadcast", crate::lossless::FM_15K, "Unclear", "Silent"].contains(&k.as_str())).map(|(_, n)| n).sum();
-        // "Lossy" (encoder holes found) and the lossy formats or traces ("Lossy (MP3)",
-        // "Lossy (MP3 traces)") in red; "Lossy?" alone is only a doubt.
-        let level = if counts.iter().any(|(k, _)| k == "Lossy" || k.starts_with("Lossy (") || k == crate::lossless::LOSSY_UPSTREAM) {
-            Level::Error
-        } else if flagged > 0 {
-            Level::Warn
-        } else {
-            Level::Ok
         };
-        let all_lossless = counts.len() == 1 && counts[0].0 == "Lossless";
-        let shown = if all_lossless { "All lossless".to_string() } else { text.clone() };
-        // Show report: every track, then the reasoning of the most common verdict.
-        let main = &counts[0].0;
-        let example = done.iter().find(|(_, l, _)| l.starts_with(main.as_str())).map(|(_, _, r)| *r);
-        let mut reasoning = vec![format!("{} track(s) analysed: {text}.", done.len())];
-        if let Some(r) = example {
-            reasoning.push(format!("Most tracks read \"{main}\". Why, for {}:", r.title));
-            reasoning.extend(r.reasoning.iter().map(|line| format!("    {line}")));
-        }
-        let report = crate::lossless::Report {
-            heading: "Lossless analysis".into(),
-            title: files::show_name(&show.root),
-            label: shown.clone(),
-            level,
-            sentence: example.map(|r| r.sentence.clone()).unwrap_or_default(),
-            measures: Vec::new(),
-            tracks: done
-                .iter()
-                .map(|(f, _, r)| crate::lossless::Measure {
-                    name: rel_posix(f, &show.root),
-                    value: r.label.clone(),
-                    meaning: r.key_facts.clone(),
-                    level: r.level,
-                })
-                .collect(),
-            reasoning,
-            key_facts: String::new(),
-            ..Default::default()
-        };
-        source(&show.root, &shown, level, &format!("Lossless check of the show:\n{text}\n\nClick to see the full analysis."), report);
+        source(
+            &show.root,
+            &decided.label,
+            decided.level,
+            &format!("Lossless check of the show:\n{}\n\nClick to see the full analysis.", decided.text),
+            decided.report,
+        );
     }
     // Lossy sources count as errors (the reference counted them as warnings).
     let levels: Vec<Option<Level>> = results
