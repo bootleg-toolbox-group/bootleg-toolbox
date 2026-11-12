@@ -343,6 +343,7 @@ pub fn track_verdict(title: String, f: &SpeedFacts) -> SpeedVerdict {
         cutoff: None,
         speed: gauge,
         evidence: Vec::new(),
+        confidence: None,
     };
     SpeedVerdict { label, level, sentence, report }
 }
@@ -496,6 +497,7 @@ pub fn show_verdict(title: String, tracks: &[(String, SpeedFacts, String, Level,
         cutoff: None,
         speed: gauge,
         evidence: Vec::new(),
+        confidence: None,
     };
     SpeedVerdict { label, level, sentence, report }
 }

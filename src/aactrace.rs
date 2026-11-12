@@ -83,12 +83,12 @@ pub fn detect(collector: Collector, rate: u32) -> Option<Trace> {
         )
         .collect();
     let mut per_offset = vec![0f64; FRAME];
-    let mut best = Trace { likelihood: 0.0, offset: 0, mid_side: false, contrast: 0.0 };
+    let mut best = Trace::default();
     for (offset, row) in likelihoods.iter().enumerate() {
         for (&(mid_side, _), &likelihood) in modes.iter().zip(row) {
             per_offset[offset] = per_offset[offset].max(likelihood);
             if likelihood > best.likelihood {
-                best = Trace { likelihood, offset, mid_side, contrast: 0.0 };
+                best = Trace { likelihood, offset, mid_side, ..Default::default() };
             }
         }
     }
@@ -99,6 +99,7 @@ pub fn detect(collector: Collector, rate: u32) -> Option<Trace> {
     dev.sort_by(f64::total_cmp);
     let sigma = (1.4826 * dev[dev.len() / 2]).max(1e-4);
     best.contrast = (best.likelihood - median) / sigma;
+    (best.median, best.sigma, best.second) = (median, sigma, others[others.len() - 1]);
     Some(best)
 }
 

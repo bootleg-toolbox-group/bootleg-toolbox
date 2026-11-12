@@ -27,7 +27,7 @@ const SF_MIN: f64 = 0.5;
 const SF_MAX: f64 = 0.7;
 
 /// The result for a file.
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Trace {
     /// Share of the bands whose rounding error is improbably small (genuine audio: about 1 %).
     #[serde(with = "crate::wire")]
@@ -40,6 +40,14 @@ pub struct Trace {
     /// (a genuine file only has the highest of 576 random values).
     #[serde(with = "crate::wire")]
     pub contrast: f64,
+    /// What the contrast is measured against: the median of the rates at the positions away from
+    /// the best one, their robust standard deviation, and the best of them (the runner-up).
+    #[serde(with = "crate::wire")]
+    pub median: f64,
+    #[serde(with = "crate::wire")]
+    pub sigma: f64,
+    #[serde(with = "crate::wire")]
+    pub second: f64,
 }
 
 impl Trace {
@@ -187,13 +195,13 @@ impl Collector {
                     .collect()
             })
             .collect();
-        let mut best = Trace { likelihood: 0.0, offset: 0, mid_side: false, contrast: 0.0 };
+        let mut best = Trace::default();
         let mut per_offset = vec![0f64; GRANULE];
         for (offset, row) in likelihoods.iter().enumerate() {
             for (&(mid_side, _), &likelihood) in modes.iter().zip(row) {
                 per_offset[offset] = per_offset[offset].max(likelihood);
                 if likelihood > best.likelihood {
-                    best = Trace { likelihood, offset, mid_side, contrast: 0.0 };
+                    best = Trace { likelihood, offset, mid_side, ..Default::default() };
                 }
             }
         }
@@ -205,6 +213,7 @@ impl Collector {
         dev.sort_by(f64::total_cmp);
         let sigma = (1.4826 * dev[dev.len() / 2]).max(1e-4);
         best.contrast = (best.likelihood - median) / sigma;
+        (best.median, best.sigma, best.second) = (median, sigma, others[others.len() - 1]);
         Some(best)
     }
 }

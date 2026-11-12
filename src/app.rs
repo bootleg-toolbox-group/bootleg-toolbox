@@ -4984,6 +4984,9 @@ fn report_cards(
                 ui.spacing_mut().item_spacing.y = 2.0;
                 ui.add(egui::Label::new(RichText::new(&report.title).color(p.weak)).truncate());
                 ui.label(colored(&report.label, report.level).size(21.0).family(crate::fonts::bold()));
+                if let Some(c) = report.confidence {
+                    ui.label(RichText::new(format!("Confidence: {}", c.name())).size(12.0).color(p.weak));
+                }
             });
         });
         ui.add_space(2.0);
@@ -5050,22 +5053,19 @@ fn report_cards(
                 })
                 .body(|ui| {
                     ui.spacing_mut().item_spacing.y = 3.0;
-                    for (lossy, title) in [(true, "Points to a lossy source"), (false, "Points to a lossless source")] {
-                        let mut items: Vec<&crate::report::Evidence> = report.evidence.iter().filter(|e| e.lossy == lossy).collect();
-                        if items.is_empty() {
-                            continue;
-                        }
-                        items.sort_by_key(|e| e.strength);
+                    use crate::report::{Side, Strength};
+                    for (family, items) in report.by_family() {
                         ui.add_space(4.0);
-                        ui.label(RichText::new(title).color(p.weak));
+                        ui.label(RichText::new(family.name()).color(p.weak));
                         for e in items {
-                            let level = match (lossy, e.strength) {
-                                (true, crate::report::Strength::Strong) => Level::Error,
-                                (true, _) => Level::Warn,
-                                (false, _) => Level::Ok,
+                            let level = match (e.side, e.strength) {
+                                (_, Strength::Weak) | (Side::Neutral | Side::Origin, _) => Level::Info,
+                                (Side::Lossy, Strength::Strong) => Level::Error,
+                                (Side::Lossy | Side::Cap, _) => Level::Warn,
+                                (Side::Lossless, _) => Level::Ok,
                             };
                             ui.horizontal_top(|ui| {
-                                badge(ui, e.strength.name().to_string(), if e.strength == crate::report::Strength::Weak { Level::Info } else { level });
+                                badge(ui, format!("{}, {}", e.side.name(), e.strength.name()), level);
                                 ui.add(egui::Label::new(&e.text).wrap());
                             });
                         }

@@ -321,7 +321,8 @@ fn synthetic_shows() {
 }
 
 /// `replay` draws the verdicts from the measures that BT_FACTS recorded: the same output as
-/// the direct run (reports included), and the same measures written back, byte for byte.
+/// the direct run (reports included), and the same measures written back, byte for byte. The
+/// measures recorded with every detector (BT_AAC=1) replay either mode.
 #[test]
 fn replay_matches_direct() {
     let tmp = tempfile::tempdir().unwrap();
@@ -330,22 +331,39 @@ fn replay_matches_direct() {
     // A silent file takes its own way through the decision.
     write_wav(&dir.join("Silent Band 2003-03-03").join("01 - Silence.wav"), &vec![[0.0, 0.0]; 44100], 44100, 16, false);
     let all = [SHOW, HIRES, MUFFLED, WAVS, "Silent Band 2003-03-03"];
-    let (direct_facts, replay_facts) = (dir.join("direct.jsonl"), dir.join("replay.jsonl"));
-    let (direct_text, replay_text) = (direct_facts.to_str().unwrap(), replay_facts.to_str().unwrap());
-    let direct = cli(dir, "lossless", &all, &[("BT_AAC", "1"), ("BT_REPORT", "1"), ("BT_FACTS", direct_text)]);
-    let mut args = vec![direct_text];
-    args.extend(all);
-    let replayed = cli(dir, "replay", &args, &[("BT_AAC", "1"), ("BT_REPORT", "1"), ("BT_FACTS", replay_text)]);
-    assert_eq!(direct, replayed);
-    assert!(direct.contains("Silent"), "{direct}");
-    let sorted = |p: &Path| {
+    let path_of = |name: &str| dir.join(name).to_str().unwrap().to_string();
+    let (normal_facts, forced_facts, back_facts, back_normal_facts) =
+        (path_of("normal.jsonl"), path_of("forced.jsonl"), path_of("back.jsonl"), path_of("back-normal.jsonl"));
+    let direct = |facts: &str, forced: bool| {
+        let mut env = vec![("BT_REPORT", "1"), ("BT_FACTS", facts)];
+        if forced {
+            env.push(("BT_AAC", "1"));
+        }
+        cli(dir, "lossless", &all, &env)
+    };
+    let replay = |from: &str, to: &str, forced: bool| {
+        let mut env = vec![("BT_REPORT", "1"), ("BT_FACTS", to)];
+        if forced {
+            env.push(("BT_AAC", "1"));
+        }
+        let mut args = vec![from];
+        args.extend(all);
+        cli(dir, "replay", &args, &env)
+    };
+    let sorted = |p: &str| {
         let mut lines: Vec<String> = fs::read_to_string(p).unwrap().lines().map(String::from).collect();
         lines.sort();
         lines
     };
-    let (a, b) = (sorted(&direct_facts), sorted(&replay_facts));
-    assert_eq!(a.len(), 9);
-    assert!(a == b, "the measures written back differ");
+    let (normal, forced) = (direct(&normal_facts, false), direct(&forced_facts, true));
+    assert!(normal.contains("Silent"), "{normal}");
+    // The measures recorded with every detector replay both modes.
+    assert!(forced == replay(&forced_facts, &back_facts, true), "forced replay differs from the forced run");
+    assert!(sorted(&forced_facts) == sorted(&back_facts) && sorted(&forced_facts).len() == 9, "the measures written back differ");
+    assert!(normal == replay(&forced_facts, &back_normal_facts, false), "normal replay of forced measures differs from the normal run");
+    // Measures recorded without the slow searches replay the normal mode, and say so otherwise.
+    assert!(normal == replay(&normal_facts, &path_of("again.jsonl"), false), "normal replay differs from the normal run");
+    assert!(replay(&normal_facts, &path_of("refused.jsonl"), true).contains("recorded without the AAC and Opus searches"));
 }
 
 /// Tag and rename (tags, new names, .md5 and .sfv updated), then undo-tagging: every file

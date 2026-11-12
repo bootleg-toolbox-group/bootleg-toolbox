@@ -45,6 +45,16 @@ impl<T: Wire> Wire for Option<T> {
     }
 }
 
+impl<T: Wire> Wire for Vec<T> {
+    fn to_value(&self) -> Value {
+        Value::Array(self.iter().map(Wire::to_value).collect())
+    }
+
+    fn from_value(v: &Value) -> Option<Vec<T>> {
+        v.as_array()?.iter().map(T::from_value).collect()
+    }
+}
+
 impl<A: Wire, B: Wire> Wire for (A, B) {
     fn to_value(&self) -> Value {
         Value::Array(vec![self.0.to_value(), self.1.to_value()])
@@ -94,6 +104,8 @@ mod tests {
         pair: Option<(f64, f64)>,
         #[serde(with = "crate::wire")]
         triple: Option<(f64, f64, f64)>,
+        #[serde(with = "crate::wire")]
+        list: Vec<(f64, f64)>,
     }
 
     /// Every awkward value: the signs of zero, the ends of the range, subnormals, the last
@@ -140,7 +152,7 @@ mod tests {
     #[test]
     fn every_float_round_trips_exactly() {
         for x in awkward() {
-            let h = Holder { x, o: Some(x), pair: Some((x, -x)), triple: Some((x, 1.0, x)) };
+            let h = Holder { x, o: Some(x), pair: Some((x, -x)), triple: Some((x, 1.0, x)), list: vec![(x, -x), (0.5, x)] };
             let text = serde_json::to_string(&h).unwrap();
             let back: Holder = serde_json::from_str(&text).unwrap();
             assert!(same(h.x, back.x), "{x:e} -> {text}");
@@ -149,6 +161,7 @@ mod tests {
             assert!(same(x, p.0) && same(-x, p.1), "{x:e}");
             let t = back.triple.unwrap();
             assert!(same(x, t.0) && same(1.0, t.1) && same(x, t.2), "{x:e}");
+            assert!(back.list.len() == 2 && same(x, back.list[0].0) && same(-x, back.list[0].1) && same(x, back.list[1].1), "{x:e}");
             // And written again, the same text: nothing moved.
             assert_eq!(text, serde_json::to_string(&back).unwrap());
         }
@@ -156,12 +169,12 @@ mod tests {
 
     #[test]
     fn non_finite_values_are_words_not_null() {
-        let h = Holder { x: f64::NAN, o: Some(f64::INFINITY), pair: Some((f64::NEG_INFINITY, 0.5)), triple: None };
+        let h = Holder { x: f64::NAN, o: Some(f64::INFINITY), pair: Some((f64::NEG_INFINITY, 0.5)), triple: None, list: vec![(f64::NAN, 1.0)] };
         let text = serde_json::to_string(&h).unwrap();
         assert!(text.contains(r#""x":"NaN""#) && text.contains(r#""o":"inf""#) && text.contains(r#""-inf""#), "{text}");
         // None stays null, and a missing number is refused rather than read as NaN.
         let back: Holder = serde_json::from_str(&text).unwrap();
         assert!(back.triple.is_none() && back.x.is_nan());
-        assert!(serde_json::from_str::<Holder>(r#"{"x":null,"o":null,"pair":null,"triple":null}"#).is_err());
+        assert!(serde_json::from_str::<Holder>(r#"{"x":null,"o":null,"pair":null,"triple":null,"list":[]}"#).is_err());
     }
 }
