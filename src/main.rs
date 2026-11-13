@@ -3,6 +3,7 @@
 
 use bootleg_toolbox::*;
 
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{mpsc, Arc};
@@ -211,24 +212,64 @@ fn run_cli(args: &[String]) -> i32 {
     let (tx, rx) = mpsc::channel();
     ops::spawn(op, shows, all, opt, tx, Arc::new(AtomicBool::new(false)));
     let mut errors = 0;
+    // Lossless?: a show's verdict can change a track's after the fact, so only the last verdict
+    // of each file is printed, when the analysis ends (in the order the files were done); a
+    // terminal sees the progress on stderr.
+    let hold = matches!(command.as_str(), "lossless" | "replay");
+    let progress = std::io::stderr().is_terminal();
+    let mut order: Vec<PathBuf> = Vec::new();
+    let mut held: std::collections::HashMap<PathBuf, (Option<String>, Option<String>)> = std::collections::HashMap::new();
     for msg in rx {
         match msg {
+            // While verdicts are held, messages about a file (cannot read it, analysis failed) go
+            // to stderr at once, like the progress.
             Msg::Log(text, level) => {
+                if level == Level::Error {
+                    errors += 1;
+                }
+                if hold {
+                    eprintln!("{}{text}", prefix(level));
+                } else {
+                    println!("{}{text}", prefix(level));
+                }
+            }
+            Msg::VerdictLog(text, level) => {
                 if level == Level::Error {
                     errors += 1;
                 }
                 println!("{}{text}", prefix(level));
             }
-            Msg::Status { path, text, level, .. } => println!("  {}[{}] {text}", prefix(level), path.display()),
-            Msg::Source { path, text, level, tooltip, report } => {
-                println!("  {}[{}] Source: {text}", prefix(level), path.display());
-                if std::env::var_os("BT_REPORT").is_some() {
-                    println!("{}", report.to_text());
+            Msg::Status { path, text, level, .. } => {
+                let line = format!("  {}[{}] {text}", prefix(level), path.display());
+                if !hold {
+                    println!("{line}");
                     continue;
                 }
-                for line in tooltip.lines().skip(1).take_while(|l| !l.is_empty()) {
-                    println!("      {}: {line}", path.file_name().unwrap_or_default().to_string_lossy());
+                if !held.contains_key(&path) {
+                    order.push(path.clone());
                 }
+                held.entry(path).or_default().1 = Some(line);
+            }
+            Msg::Source { path, text, level, tooltip, report } => {
+                let mut block = format!("  {}[{}] Source: {text}", prefix(level), path.display());
+                if std::env::var_os("BT_REPORT").is_some() {
+                    block.push_str(&format!("\n{}", report.to_text()));
+                } else {
+                    for line in tooltip.lines().skip(1).take_while(|l| !l.is_empty()) {
+                        block.push_str(&format!("\n      {}: {line}", path.file_name().unwrap_or_default().to_string_lossy()));
+                    }
+                }
+                if !hold {
+                    println!("{block}");
+                    continue;
+                }
+                if !held.contains_key(&path) {
+                    if progress {
+                        eprintln!("  analysed: {}", path.display());
+                    }
+                    order.push(path.clone());
+                }
+                held.entry(path).or_default().0 = Some(block);
             }
             Msg::Speed { path, text, level, report, .. } => {
                 println!("  {}[{}] Speed: {text}", prefix(level), path.display());
@@ -255,6 +296,12 @@ fn run_cli(args: &[String]) -> i32 {
                 }
             }
             Msg::Finished { summary, .. } => {
+                for path in &order {
+                    let (source, status) = &held[path];
+                    for block in [source, status].into_iter().flatten() {
+                        println!("{block}");
+                    }
+                }
                 println!("{summary}");
                 break;
             }

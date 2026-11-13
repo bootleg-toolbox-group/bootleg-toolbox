@@ -2086,7 +2086,7 @@ impl App {
             let started = Instant::now();
             while let Ok(msg) = running.rx.try_recv() {
                 match msg {
-                    Msg::Log(text, level) => {
+                    Msg::Log(text, level) | Msg::VerdictLog(text, level) => {
                         if level == Level::Error {
                             self.opt.log_open = true;
                         }
@@ -2099,8 +2099,8 @@ impl App {
                             Level::Error => Some(2),
                             Level::Info => None,
                         };
-                        // A file counts once, with its last result (Verify completes its line as
-                        // each checksum file is read).
+                        // A file counts once, with its last result (a show's verdict can change a
+                        // track's, Verify completes its line).
                         if !running.updated.insert(path.clone()) {
                             if let Some(i) = self.status.get(&path).and_then(|s| slot(s.1)) {
                                 running.tally[i] = running.tally[i].saturating_sub(1);

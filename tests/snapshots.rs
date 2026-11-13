@@ -31,6 +31,16 @@ fn cli(dir: &Path, command: &str, paths: &[&str], env: &[(&str, &str)]) -> Strin
     normalise(&text, dir)
 }
 
+/// Lossless? prints only the final verdict of each file: one "Source:" line per path.
+fn single_verdicts(text: &str) -> String {
+    let mut seen = std::collections::HashSet::new();
+    for line in text.lines().filter(|l| l.contains("] Source: ")) {
+        let path = &line[..line.find("] Source: ").unwrap()];
+        assert!(seen.insert(path.to_string()), "verdict printed twice: {line}");
+    }
+    text.to_string()
+}
+
 /// Lines in a fixed order (files are processed in parallel), without the temporary folder
 /// nor the program's version, with "/" in paths;
 /// the growing "MD5 OK, ST5 OK" lines of Verify are reduced to their final state.
@@ -304,7 +314,7 @@ fn synthetic_shows() {
     snap("test", cli(dir, "test", &all, &[]));
     snap("create", cli(dir, "create", &[SHOW, HIRES], &[("BT_MD5", "1"), ("BT_SFV", "1")]));
     snap("verify", cli(dir, "verify", &[SHOW, HIRES], &[]));
-    snap("lossless", cli(dir, "lossless", &all, &[("BT_AAC", "1"), ("BT_REPORT", "1")]));
+    snap("lossless", single_verdicts(&cli(dir, "lossless", &all, &[("BT_AAC", "1"), ("BT_REPORT", "1")])));
     snap("speed", cli(dir, "speed", &[SHOW], &[]));
     snap("media_info", cli(dir, "media-info", &[SHOW], &[]));
     snap("tag_info", cli(dir, "tag-info", &[SHOW], &[("BT_DRY", "1")]));
@@ -339,7 +349,7 @@ fn replay_matches_direct() {
         if forced {
             env.push(("BT_AAC", "1"));
         }
-        cli(dir, "lossless", &all, &env)
+        single_verdicts(&cli(dir, "lossless", &all, &env))
     };
     let replay = |from: &str, to: &str, forced: bool| {
         let mut env = vec![("BT_REPORT", "1"), ("BT_FACTS", to)];
@@ -348,7 +358,7 @@ fn replay_matches_direct() {
         }
         let mut args = vec![from];
         args.extend(all);
-        cli(dir, "replay", &args, &env)
+        single_verdicts(&cli(dir, "replay", &args, &env))
     };
     let sorted = |p: &str| {
         let mut lines: Vec<String> = fs::read_to_string(p).unwrap().lines().map(String::from).collect();
@@ -421,7 +431,7 @@ fn testdata_shows() {
         snap("real_details", cli(dir, "details", &read, &[]));
         snap("real_test", cli(dir, "test", &read, &[]));
         snap("real_verify", cli(dir, "verify", &read, &[]));
-        snap("real_lossless", cli(dir, "lossless", &["flac"], &[("BT_AAC", "1"), ("BT_REPORT", "1")]));
+        snap("real_lossless", single_verdicts(&cli(dir, "lossless", &["flac"], &[("BT_AAC", "1"), ("BT_REPORT", "1")])));
         snap("real_media_info", cli(dir, "media-info", &["flac", "ape", "dvd"], &[]));
         let torrents: Vec<String> = fs::read_dir(dir.join("tcheck"))
             .unwrap()

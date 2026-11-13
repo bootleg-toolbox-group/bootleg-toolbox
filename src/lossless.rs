@@ -24,11 +24,13 @@ pub struct Verdict {
     pub(crate) doubt: bool,
     /// The measures the verdict was drawn from, as JSON (only with BT_FACTS).
     pub(crate) facts: Option<Facts>,
+    /// What the show's verdict needs (None for a silent file).
+    pub(crate) track: Option<crate::decision::TrackDecision>,
 }
 
 impl Verdict {
     pub(crate) fn new(label: impl Into<String>, sentence: impl Into<String>, level: Level, details: Vec<String>) -> Self {
-        Verdict { label: label.into(), sentence: sentence.into(), level, details, report: Report::default(), doubt: false, facts: None }
+        Verdict { label: label.into(), sentence: sentence.into(), level, details, report: Report::default(), doubt: false, facts: None, track: None }
     }
 }
 
@@ -95,6 +97,7 @@ pub fn analyse(path: &Path, info: &AudioInfo, aac: bool, cancel: &AtomicBool) ->
     };
     if info.lossy() {
         let name = info.name();
+        verdict.track = Some(crate::decision::TrackDecision::lossy_format());
         verdict.label = format!("Lossy ({name})");
         verdict.level = Level::Error;
         // The measured figures only ("cut 12.6 kHz, holes 4 dB"): the analysis's own doubts
@@ -194,6 +197,7 @@ pub fn load_replay(file: &Path) -> Result<usize, String> {
 pub fn by_format(path: &Path, info: &AudioInfo) -> Verdict {
     let name = info.name();
     let mut verdict = Verdict::new(format!("Lossy ({name})"), format!("{name} file: lossy by its format"), Level::Error, Vec::new());
+    verdict.track = Some(crate::decision::TrackDecision::lossy_format());
     let measured = if info.codec.is_some_and(|c| !c.decoded()) {
         "This version does not decode it, so nothing was measured."
     } else {

@@ -435,10 +435,11 @@ pub(crate) enum Reason {
     LowFloor,
     ShallowHoles,
     Treble,
+    /// Nothing in the track itself, but most of the show carries lossy evidence.
+    Show,
 }
 
 impl Reason {
-    #[allow(dead_code)] // The show's verdict (next step of the plan) counts these.
     pub(crate) fn chain(self) -> bool {
         matches!(self, Reason::Wall | Reason::CutHiss | Reason::LowFloor)
     }
@@ -851,6 +852,7 @@ fn wording(class: &Class, found: &[Finding], f: &Judged) -> (String, Level, Stri
                 Reason::ShallowHoles => format!(
                     "Cannot tell: holes of {holes:.0} dB below the {c} kHz lowpass, deeper than analog sources leave but too shallow to prove an encoder"
                 ),
+                Reason::Show => String::new(),
                 Reason::Treble => {
                     "Cannot tell: almost no content above 15 kHz (common with audience and analog-tape recordings), so encoder traces cannot be seen".into()
                 }
@@ -1026,6 +1028,7 @@ fn reasoning(class: &Class, found: &[Finding], f: &Judged) -> Vec<String> {
                 r.push(format!("{}.", text("S1c")));
                 r.push("No second clue: neither lossy nor lossless can be shown.".into());
             }
+            Reason::Show => {}
             Reason::Treble => {
                 r.push(format!("There is almost nothing above 15 kHz ({:.0} dB relative to 1-4 kHz).", f.hf.unwrap_or(0.0)));
                 r.push("Encoder traces live up there, so neither lossy nor lossless can be shown. Audience and cassette recordings often look like this; the spectrogram and the lineage are the best clues.".into());
@@ -1109,6 +1112,7 @@ pub(crate) fn decide(path: &Path, f: &Facts, aac_check: bool) -> Verdict {
     report.reasoning = reasoning(&class, &found, &j);
     report.confidence = Some(class.state.confidence());
     verdict.report = report;
+    verdict.track = Some(TrackDecision::of(&class, &found, f));
     if std::env::var_os("BT_FACTS").is_some() {
         verdict.facts = Some(f.clone());
     }
@@ -1131,12 +1135,69 @@ pub(crate) fn decide(path: &Path, f: &Facts, aac_check: bool) -> Verdict {
     verdict
 }
 
-/// One analysed file of a show.
-pub(crate) struct TrackResult<'a> {
+/// What the show's verdict needs of a file's decision.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TrackDecision {
+    pub(crate) state: State,
+    pub(crate) cutoff: Option<f64>,
+    /// Encoder holes of 15 dB and more (S1a): repeated at one cutoff, they prove an encoder.
+    pub(crate) deep_holes: bool,
+    /// Hiss above the cutoff (S4): "upstream" when the holes make it lossy.
+    pub(crate) hiss: bool,
+    /// A cap of digital processing (T1, T3, T4).
+    pub(crate) capped: bool,
+    /// A rate over the threshold at every grid position (C4).
+    pub(crate) uniform: bool,
+}
+
+impl TrackDecision {
+    /// A file lossy by its format (an MP3 in the show).
+    pub(crate) fn lossy_format() -> TrackDecision {
+        TrackDecision { state: State::R, cutoff: None, deep_holes: false, hiss: false, capped: false, uniform: false }
+    }
+
+    fn of(class: &Class, found: &[Finding], f: &Facts) -> TrackDecision {
+        let has = |code: &str| found.iter().any(|x| x.id.code() == code);
+        TrackDecision {
+            state: class.state,
+            cutoff: f.cutoff,
+            deep_holes: has("S1a"),
+            hiss: has("S4"),
+            capped: has("T1") || has("T3") || has("T4"),
+            uniform: has("C4"),
+        }
+    }
+
+    fn green(&self) -> bool {
+        matches!(self.state, State::L1 | State::L2)
+    }
+}
+
+/// One analysed file of a show: what is shown of it, which the show's verdict may change.
+pub(crate) struct TrackResult {
     /// Its path in the show, with "/".
     pub name: String,
-    pub label: &'a str,
-    pub report: &'a Report,
+    pub label: String,
+    pub level: Level,
+    pub sentence: String,
+    pub report: Report,
+    /// None for a silent file (not counted).
+    pub decision: Option<TrackDecision>,
+    /// Changed by the show's verdict: to be shown again.
+    pub changed: bool,
+}
+
+impl TrackResult {
+    fn set(&mut self, state: State, label: String, level: Level, sentence: String) {
+        if let Some(d) = self.decision.as_mut() {
+            d.state = state;
+        }
+        self.report.label = label.clone();
+        self.report.level = level;
+        self.report.sentence = sentence.clone();
+        self.report.confidence = Some(state.confidence());
+        (self.label, self.level, self.sentence, self.changed) = (label, level, sentence, true);
+    }
 }
 
 /// The verdict of a show.
@@ -1149,18 +1210,118 @@ pub(crate) struct ShowDecision {
     pub report: Report,
 }
 
-/// The verdict of a show from those of its files (None without any).
-pub(crate) fn aggregate(title: String, done: &[TrackResult]) -> Option<ShowDecision> {
+/// The tracks whose holes of 15 dB and more sit at one cutoff (within 500 Hz of their median),
+/// when there are at least 3 of them and a fifth of the show: the same encoder on every one.
+fn repeated_holes(tracks: &[TrackDecision]) -> Option<Vec<usize>> {
+    let deep: Vec<(usize, f64)> = tracks.iter().enumerate().filter(|(_, t)| t.deep_holes).filter_map(|(i, t)| t.cutoff.map(|c| (i, c))).collect();
+    let median = crate::dsp::median(&deep.iter().map(|d| d.1).collect::<Vec<_>>())?;
+    let same: Vec<usize> = deep.iter().filter(|d| (d.1 - median).abs() <= 500.0).map(|d| d.0).collect();
+    (same.len() >= 3 && same.len() * 5 >= tracks.len()).then_some(same)
+}
+
+/// The coherence pass over a show's tracks (§1.6): it never makes a track red from the context
+/// alone, except encoder holes repeated at one cutoff. (The promotion of candidate grids comes
+/// with them.) Returns the lines it adds to the show's reasoning.
+fn coherence(tracks: &mut [TrackResult]) -> Vec<String> {
+    let mut said = Vec::new();
+    let idx: Vec<usize> = (0..tracks.len()).filter(|&i| tracks[i].decision.is_some()).collect();
+    let decisions: Vec<TrackDecision> = idx.iter().filter_map(|&i| tracks[i].decision).collect();
+    let m = decisions.len();
+    if m == 0 {
+        return said;
+    }
+    // Encoder holes repeated on several tracks at the same cutoff: one encoder for the show.
+    if let Some(same) = repeated_holes(&decisions) {
+        let n = same.len();
+        for &k in &same {
+            let t = &mut tracks[idx[k]];
+            let d = decisions[k];
+            if d.state == State::R {
+                continue;
+            }
+            let c = d.cutoff.unwrap_or(0.0) / 1000.0;
+            let label = if d.hiss { format!("Lossy upstream {c:.1} kHz") } else { format!("Lossy {c:.1} kHz") };
+            let sentence = format!("Lossy source: encoder holes repeated on {n} tracks of the show at the same cutoff, which only an encoder leaves; this track: {}", lower(&t.sentence));
+            t.report.reasoning.push(format!("Encoder holes of 15 dB and more are repeated on {n} of the {m} tracks of the show at the same cutoff (within 500 Hz): one encoder for the show, so lossy."));
+            t.set(State::R, label, Level::Error, sentence);
+        }
+        said.push(format!("Encoder holes repeated on {n} of the {m} tracks at the same cutoff: those tracks are lossy."));
+    }
+    let now: Vec<TrackDecision> = idx.iter().filter_map(|&i| tracks[i].decision).collect();
+    // Most of the show carries lossy evidence: the tracks without any cannot be called lossless.
+    let lossy = now.iter().filter(|d| matches!(d.state, State::R | State::O)).count();
+    if lossy * 2 >= m {
+        let mut n = 0;
+        for &i in &idx {
+            let t = &mut tracks[i];
+            if t.decision.is_some_and(|d| d.green()) {
+                n += 1;
+                let sentence = format!(
+                    "Cannot tell: nothing in this track itself, but {lossy} of {m} tracks of the show carry lossy evidence; on its own it reads: {}",
+                    lower(&t.sentence)
+                );
+                t.report.reasoning.push(format!("{lossy} of the {m} tracks of the show carry lossy evidence: a track without any cannot be called lossless on its own."));
+                t.set(State::U(Reason::Show), "Unclear".into(), Level::Info, sentence);
+            }
+        }
+        if n > 0 {
+            said.push(format!("{lossy} of the {m} tracks carry lossy evidence: the {n} others are Unclear, not lossless."));
+        }
+    }
+    // Most of the show went through digital processing last: the same transfer chain for all.
+    let capped = now.iter().filter(|d| d.capped).count();
+    if capped * 2 >= m {
+        let mut n = 0;
+        for &i in &idx {
+            let t = &mut tracks[i];
+            if t.decision.is_some_and(|d| d.state == State::L1) {
+                let label = if matches!(t.label.as_str(), "Lossless" | "FM broadcast") { LIKELY_LOSSLESS.to_string() } else { t.label.clone() };
+                let sentence = format!(
+                    "Probably lossless: no lossy clue, but {capped} of {m} tracks of the show show digital processing after the last analog stage (the same transfer chain); on its own it reads: {}",
+                    lower(&t.sentence)
+                );
+                let level = t.level;
+                t.set(State::L2, label, level, sentence);
+                n += 1;
+            }
+        }
+        if n > 0 {
+            said.push(format!("{capped} of the {m} tracks show digital processing after the last analog stage: the other tracks are at best \"Likely lossless\"."));
+        }
+    }
+    // A rate over the threshold at every grid position on most tracks: said, nothing more.
+    let uniform = now.iter().filter(|d| d.uniform).count();
+    if uniform >= 5 && uniform * 2 >= m {
+        said.push(format!(
+            "On {uniform} of the {m} tracks more bands round onto the MP3 grid at every position than genuine audio shows: noise reduction, or a lossy stage whose grid was erased since (information only)."
+        ));
+    }
+    said
+}
+
+/// The verdict of a show from those of its files (None without any): the coherence pass, then
+/// the colour (§1.6): red with one lossy track, orange with one doubt, Unclear when half the
+/// tracks are or one is for a reason of the transfer chain, green otherwise.
+pub(crate) fn aggregate(title: String, done: &mut [TrackResult]) -> Option<ShowDecision> {
     if done.is_empty() {
         return None;
     }
+    let mut lines = coherence(done);
+    let states: Vec<State> = done.iter().filter_map(|t| t.decision.map(|d| d.state)).collect();
+    let m = states.len();
+    let count = |f: &dyn Fn(&State) -> bool| states.iter().filter(|s| f(s)).count();
+    let red = count(&|s| *s == State::R);
+    let doubt = count(&|s| *s == State::O);
+    let unclear = count(&|s| matches!(s, State::U(_)));
+    let chain = count(&|s| matches!(s, State::U(r) if r.chain()));
+    let green = count(&|s| matches!(s, State::L1 | State::L2));
     // Counts in order of first appearance, then sorted by count (as the reference).
     let mut counts: Vec<(String, usize)> = Vec::new();
-    for t in done {
+    for t in done.iter() {
         // "Lossy? upstream 16.1 kHz" counts as "Lossy? upstream": the frequency is dropped.
         let key = match t.label.strip_suffix(" kHz").and_then(|l| l.rsplit_once(' ')) {
             Some((head, _)) => head.to_string(),
-            None => t.label.to_string(),
+            None => t.label.clone(),
         };
         match counts.iter_mut().find(|(k, _)| *k == key) {
             Some(entry) => entry.1 += 1,
@@ -1169,23 +1330,40 @@ pub(crate) fn aggregate(title: String, done: &[TrackResult]) -> Option<ShowDecis
     }
     counts.sort_by_key(|a| std::cmp::Reverse(a.1));
     let text = counts.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", ");
-    let flagged: usize =
-        counts.iter().filter(|(k, _)| !["Lossless", LIKELY_LOSSLESS, "FM broadcast", "Unclear", "Silent"].contains(&k.as_str())).map(|(_, n)| n).sum();
-    // "Lossy" (encoder holes found) and the lossy formats or traces ("Lossy (MP3)",
-    // "Lossy (MP3 traces)") in red; "Lossy?" alone is only a doubt.
-    let level = if counts.iter().any(|(k, _)| k == "Lossy" || k.starts_with("Lossy (")) {
-        Level::Error
-    } else if flagged > 0 {
-        Level::Warn
+    let (level, mut shown, confidence) = if red > 0 {
+        // A few lossy tracks among lossless ones: a splice, or tracks from another source.
+        if red * 4 < m && green * 2 > m - red {
+            for t in done.iter_mut().filter(|t| t.decision.is_some_and(|d| d.state == State::R)) {
+                let sentence = format!("Isolated: {red} of {m} tracks of the show are lossy (a splice, or another source?); {}", lower(&t.sentence));
+                let (label, level) = (t.label.clone(), t.level);
+                t.set(State::R, label, level, sentence);
+            }
+            lines.push(format!("{red} lossy track(s) among {m}, the rest mostly lossless: a splice or mixed sources?"));
+            (Level::Error, format!("Mixed: {red} lossy of {m} (splice or mixed sources?)"), Confidence::High)
+        } else {
+            (Level::Error, text.clone(), Confidence::High)
+        }
+    } else if doubt > 0 {
+        (Level::Warn, text.clone(), Confidence::Medium)
+    } else if m > 0 && (unclear * 2 >= m || chain > 0) {
+        if chain > 0 && unclear * 2 < m {
+            lines.push(format!("{chain} track(s) Unclear for a reason of the transfer chain (a filter, an analog stage or a noise reducer that hides what came before): it is the show's chain, so the show is Unclear."));
+        }
+        (Level::Info, text.clone(), Confidence::Low)
     } else {
-        Level::Ok
+        let all = states.iter().all(|s| *s == State::L1);
+        (Level::Ok, if counts.len() == 1 && counts[0].0 == "Lossless" { "All lossless".into() } else { text.clone() }, if all { Confidence::High } else { Confidence::Medium })
     };
-    let all_lossless = counts.len() == 1 && counts[0].0 == "Lossless";
-    let shown = if all_lossless { "All lossless".to_string() } else { text.clone() };
+    // Origin labels of lossless tracks (16-bit in 24, no hi-res content) stay orange.
+    let level = if level == Level::Ok && done.iter().any(|t| t.level == Level::Warn) { Level::Warn } else { level };
+    if shown.is_empty() {
+        shown = text.clone();
+    }
     // Show report: every track, then the reasoning of the most common verdict.
     let main = &counts[0].0;
-    let example = done.iter().find(|t| t.label.starts_with(main.as_str())).map(|t| t.report);
+    let example = done.iter().find(|t| t.label.starts_with(main.as_str())).map(|t| &t.report);
     let mut reasoning = vec![format!("{} track(s) analysed: {text}.", done.len())];
+    reasoning.extend(lines);
     if let Some(r) = example {
         reasoning.push(format!("Most tracks read \"{main}\". Why, for {}:", r.title));
         reasoning.extend(r.reasoning.iter().map(|line| format!("    {line}")));
@@ -1197,12 +1375,10 @@ pub(crate) fn aggregate(title: String, done: &[TrackResult]) -> Option<ShowDecis
         level,
         sentence: example.map(|r| r.sentence.clone()).unwrap_or_default(),
         measures: Vec::new(),
-        tracks: done
-            .iter()
-            .map(|t| Measure { name: t.name.clone(), value: t.report.label.clone(), meaning: t.report.key_facts.clone(), level: t.report.level })
-            .collect(),
+        tracks: done.iter().map(|t| Measure { name: t.name.clone(), value: t.label.clone(), meaning: t.report.key_facts.clone(), level: t.level }).collect(),
         reasoning,
         key_facts: String::new(),
+        confidence: Some(confidence),
         ..Default::default()
     };
     Some(ShowDecision { label: shown, text, level, report })
@@ -1730,13 +1906,163 @@ mod tests {
         assert!(text.contains("Shape of the lowpass\n- [lossy, weak]"), "{text}");
     }
 
+    /// A track of a fabricated show: its state, cutoff, holes of 15 dB and more, hiss above, cap.
+    fn track(state: State, cutoff: Option<f64>, deep_holes: bool, hiss: bool, capped: bool) -> TrackResult {
+        let label = match state {
+            State::R => "Lossy 16.0 kHz",
+            State::O if hiss => "Lossy? upstream 16.0 kHz",
+            State::O => "Lossy? 16.0 kHz",
+            State::U(_) => "Unclear",
+            State::L2 => LIKELY_LOSSLESS,
+            State::L1 => "Lossless",
+        };
+        let level = match state {
+            State::R => Level::Error,
+            State::O => Level::Warn,
+            State::U(_) => Level::Info,
+            _ => Level::Ok,
+        };
+        TrackResult {
+            name: "t.flac".into(),
+            label: label.into(),
+            level,
+            sentence: "As measured".into(),
+            report: Report::default(),
+            decision: Some(TrackDecision { state, cutoff, deep_holes, hiss, capped, uniform: false }),
+            changed: false,
+        }
+    }
+
+    fn show(tracks: &mut [TrackResult]) -> ShowDecision {
+        aggregate("show".into(), tracks).unwrap()
+    }
+
+    fn lossless(n: usize) -> Vec<TrackResult> {
+        (0..n).map(|_| track(State::L1, None, false, false, false)).collect()
+    }
+
+    /// Anathema 2004: 21 Lossless and 2 walls at 20.9-21.1 kHz with digital silence (T3): one
+    /// Unclear track of the transfer chain is enough, the show is never green (rule 3).
     #[test]
-    fn rule_show_reads_new_labels() {
-        let report = Report::default();
-        let tracks = |labels: &[&'static str]| -> Vec<TrackResult<'_>> { labels.iter().map(|l| TrackResult { name: "t".into(), label: l, report: &report }).collect() };
-        let show = |labels: &[&'static str]| aggregate("s".into(), &tracks(labels)).unwrap().level;
-        assert_eq!(show(&["Lossy? upstream 16.1 kHz", "Lossless"]), Level::Warn);
-        assert_eq!(show(&["Lossy 16.1 kHz", "Lossless"]), Level::Error);
-        assert_eq!(show(&["Unclear", "Lossless"]), Level::Ok);
+    fn show_anathema_is_unclear() {
+        let mut t = lossless(21);
+        t.push(track(State::U(Reason::Wall), Some(20900.0), false, false, true));
+        t.push(track(State::U(Reason::Wall), Some(21100.0), false, false, true));
+        let s = show(&mut t);
+        assert_eq!(s.level, Level::Info);
+        assert_eq!(s.report.confidence, Some(Confidence::Low));
+        assert!(t.iter().all(|x| !x.changed));
+        // A track Unclear for its treble only is the music's: it counts only in the majority.
+        let mut t = lossless(21);
+        t.push(track(State::U(Reason::Treble), None, false, false, false));
+        assert_eq!(show(&mut t).level, Level::Ok);
+    }
+
+    /// Ace Frehley 1990: 13 Unclear (too little treble) of 17: Unclear by the majority.
+    #[test]
+    fn show_ace_frehley_majority_unclear() {
+        let mut t: Vec<TrackResult> = (0..13).map(|_| track(State::U(Reason::Treble), None, false, false, false)).collect();
+        t.extend((0..4).map(|_| track(State::L2, None, false, false, false)));
+        assert_eq!(show(&mut t).level, Level::Info);
+    }
+
+    /// One lossy track among lossless ones: red, said "Mixed", the track called isolated.
+    #[test]
+    fn show_isolated_red_track_is_mixed() {
+        let mut t = lossless(9);
+        t.push(track(State::R, Some(16000.0), true, false, false));
+        let s = show(&mut t);
+        assert_eq!((s.label.as_str(), s.level), ("Mixed: 1 lossy of 10 (splice or mixed sources?)", Level::Error));
+        assert!(t[9].changed && t[9].sentence.starts_with("Isolated: 1 of 10 tracks"), "{}", t[9].sentence);
+        assert!(t[..9].iter().all(|x| !x.changed && x.label == "Lossless"));
+        // A quarter or more lossy: red, without "Mixed".
+        let mut t = lossless(6);
+        t.extend((0..2).map(|_| track(State::R, Some(16000.0), true, false, false)));
+        assert!(!show(&mut t).label.starts_with("Mixed"));
+    }
+
+    /// Paul Di Anno 2001 (MiniDisc): holes of 15 dB and more with hiss above on 6 of 10 tracks at
+    /// 16.6-16.9 kHz: each alone is orange, repeated they prove an encoder, and the tracks
+    /// without any clue are no longer lossless.
+    #[test]
+    fn show_paul_di_anno_repeated_holes() {
+        let mut t: Vec<TrackResult> = [16900.0, 16900.0, 16800.0, 16600.0, 16600.0, 16900.0].iter().map(|&c| track(State::O, Some(c), true, true, false)).collect();
+        t.extend(lossless(3));
+        t.push(track(State::L2, None, false, false, false));
+        let s = show(&mut t);
+        assert_eq!(s.level, Level::Error);
+        assert!(t[..6].iter().all(|x| x.label.starts_with("Lossy upstream 16.") && x.level == Level::Error), "{:?}", t[0].label);
+        assert!(t[6..].iter().all(|x| x.label == "Unclear" && x.decision.is_some_and(|d| d.state == State::U(Reason::Show))));
+        assert!(t[6].sentence.contains("6 of 10 tracks of the show carry lossy evidence"), "{}", t[6].sentence);
+    }
+
+    /// Oasis 1997: one track with deep holes (14.7 kHz), one with 10-15 dB holes: no repetition,
+    /// the show stays orange.
+    #[test]
+    fn show_oasis_stays_orange() {
+        let mut t = vec![track(State::O, Some(14700.0), true, true, false), track(State::O, Some(14700.0), false, true, false)];
+        t.extend((0..9).map(|_| track(State::U(Reason::CutHiss), Some(15000.0), false, true, false)));
+        t.extend(lossless(4));
+        let s = show(&mut t);
+        assert_eq!(s.level, Level::Warn);
+        assert!(t.iter().all(|x| x.level != Level::Error));
+    }
+
+    /// Meat Loaf 1996 (DCC): holes of 15 dB and more on 3 of 18 tracks (16.7 %, under a fifth):
+    /// no repetition, orange. A fourth track (22 %) would make them red.
+    #[test]
+    fn show_meat_loaf_threshold() {
+        let make = |deep: usize| {
+            let mut t: Vec<TrackResult> = (0..deep).map(|_| track(State::O, Some(15900.0), true, true, false)).collect();
+            t.extend((0..7 - deep).map(|_| track(State::O, Some(15400.0), false, true, false)));
+            t.push(track(State::U(Reason::CutHiss), Some(15400.0), false, true, false));
+            t.extend(lossless(10));
+            t
+        };
+        let mut three = make(3);
+        assert_eq!(show(&mut three).level, Level::Warn);
+        assert!(three.iter().all(|x| !x.changed));
+        let mut four = make(4);
+        assert_eq!(show(&mut four).level, Level::Error);
+        assert_eq!(four.iter().filter(|x| x.level == Level::Error).count(), 4);
+        // Holes at cutoffs more than 500 Hz from their median do not repeat.
+        let mut apart: Vec<TrackResult> = [14000.0, 16000.0, 18000.0].iter().map(|&c| track(State::O, Some(c), true, false, false)).collect();
+        apart.extend(lossless(2));
+        assert_eq!(show(&mut apart).level, Level::Warn);
+    }
+
+    /// Half the show with a cap of digital processing: the other tracks are "Likely lossless".
+    #[test]
+    fn show_caps_by_transfer_chain() {
+        let mut t: Vec<TrackResult> = (0..13).map(|_| track(State::U(Reason::Wall), Some(20400.0), false, false, true)).collect();
+        t.push(track(State::L1, None, false, false, false));
+        let s = show(&mut t);
+        assert_eq!(s.level, Level::Info);
+        assert_eq!((t[13].label.as_str(), t[13].level), (LIKELY_LOSSLESS, Level::Ok));
+        // A rate over the threshold everywhere on most tracks: said, colour unchanged.
+        let mut t = lossless(6);
+        for x in &mut t {
+            x.decision.as_mut().unwrap().uniform = true;
+        }
+        let s = show(&mut t);
+        assert_eq!((s.label.as_str(), s.level), ("All lossless", Level::Ok));
+        assert!(s.report.reasoning.iter().any(|l| l.contains("round onto the MP3 grid at every position")));
+    }
+
+    /// The order of the show's colour: red, orange, Unclear, green; silent files not counted;
+    /// origin labels of lossless tracks keep the show orange.
+    #[test]
+    fn show_colour_order() {
+        let mut t = vec![track(State::O, Some(16000.0), false, false, false), track(State::R, Some(16000.0), false, false, false), track(State::L1, None, false, false, false)];
+        assert_eq!(show(&mut t).level, Level::Error);
+        let mut t = vec![track(State::O, Some(16000.0), false, false, false), track(State::U(Reason::Wall), Some(20400.0), false, false, true)];
+        assert_eq!(show(&mut t).level, Level::Warn);
+        let mut t = lossless(3);
+        t.push(TrackResult { decision: None, label: "Silent".into(), level: Level::Info, ..track(State::L1, None, false, false, false) });
+        assert_eq!(show(&mut t).level, Level::Ok);
+        let mut t = lossless(3);
+        t[0].label = LOSSLESS_PADDED.into();
+        t[0].level = Level::Warn;
+        assert_eq!(show(&mut t).level, Level::Warn);
     }
 }

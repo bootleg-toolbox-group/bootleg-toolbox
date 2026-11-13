@@ -41,7 +41,10 @@ impl Level {
 }
 
 pub enum Msg {
+    /// A message about a file or the task (cannot read it, analysis failed...): shown at once.
     Log(String, Level),
+    /// A file's final verdict repeated in the log (Lossless?: after the show's verdict).
+    VerdictLog(String, Level),
     Status { path: PathBuf, text: String, level: Level, tooltip: String },
     Info { path: PathBuf, info: AudioInfo },
     Progress { done: usize, total: usize },
@@ -387,6 +390,9 @@ pub struct Ctx {
 impl Ctx {
     pub fn log(&self, text: impl Into<String>, level: Level) {
         let _ = self.tx.send(Msg::Log(text.into(), level));
+    }
+    pub fn log_verdict(&self, text: impl Into<String>, level: Level) {
+        let _ = self.tx.send(Msg::VerdictLog(text.into(), level));
     }
     pub fn status(&self, path: &Path, text: impl Into<String>, level: Level, tooltip: impl Into<String>) {
         let _ = self.tx.send(Msg::Status {
@@ -1090,22 +1096,41 @@ pub fn op_lossless(ctx: &Ctx, shows: &[Show], files: &[PathBuf]) -> String {
         let tooltip = format!("{tooltip}\n\nClick to see the full analysis.");
         source(path, &verdict.label, verdict.level, &tooltip, verdict.report.clone());
         ctx.status(path, &verdict.sentence, verdict.level, &tooltip);
-        if matches!(verdict.level, Level::Warn | Level::Error) {
-            ctx.log(format!("{}: {}", file_name(path), verdict.sentence), verdict.level);
-        }
-        Ok((verdict.label, verdict.level, verdict.report))
+        Ok((verdict, tooltip))
     });
-    let by_path: HashMap<&PathBuf, (&String, &crate::lossless::Report)> =
-        files.iter().zip(results.iter()).filter_map(|(f, r)| r.as_ref().map(|(label, _, report)| (f, (label, report)))).collect();
+    let by_path: HashMap<&PathBuf, &(crate::lossless::Verdict, String)> =
+        files.iter().zip(results.iter()).filter_map(|(f, r)| r.as_ref().map(|v| (f, v))).collect();
+    // The final verdict of each file, once the show's verdict may have changed it.
+    let mut finals: HashMap<&PathBuf, (Level, String)> = by_path.iter().map(|(f, (v, _))| (*f, (v.level, v.sentence.clone()))).collect();
     for show in shows {
-        let done: Vec<crate::decision::TrackResult> = show
-            .files
+        let in_show: Vec<&PathBuf> = show.files.iter().filter(|f| by_path.contains_key(f)).collect();
+        let mut done: Vec<crate::decision::TrackResult> = in_show
             .iter()
-            .filter_map(|f| by_path.get(f).map(|(l, r)| crate::decision::TrackResult { name: rel_posix(f, &show.root), label: l.as_str(), report: r }))
+            .map(|f| {
+                let (v, _) = by_path[f];
+                crate::decision::TrackResult {
+                    name: rel_posix(f, &show.root),
+                    label: v.label.clone(),
+                    level: v.level,
+                    sentence: v.sentence.clone(),
+                    report: v.report.clone(),
+                    decision: v.track,
+                    changed: false,
+                }
+            })
             .collect();
-        let Some(decided) = crate::decision::aggregate(files::show_name(&show.root), &done) else {
+        let Some(decided) = crate::decision::aggregate(files::show_name(&show.root), &mut done) else {
             continue;
         };
+        // Tracks whose verdict the show changed are shown again.
+        for (f, t) in in_show.iter().zip(done) {
+            if t.changed {
+                finals.insert(f, (t.level, t.sentence.clone()));
+                let tooltip = &by_path[f].1;
+                source(f, &t.label, t.level, tooltip, t.report);
+                ctx.status(f, &t.sentence, t.level, tooltip);
+            }
+        }
         source(
             &show.root,
             &decided.label,
@@ -1115,10 +1140,15 @@ pub fn op_lossless(ctx: &Ctx, shows: &[Show], files: &[PathBuf]) -> String {
         );
     }
     // Lossy sources count as errors (the reference counted them as warnings).
-    let levels: Vec<Option<Level>> = results
+    for f in files {
+        if let Some((level, sentence)) = finals.get(f).filter(|(l, _)| matches!(l, Level::Warn | Level::Error)) {
+            ctx.log_verdict(format!("{}: {sentence}", file_name(f)), *level);
+        }
+    }
+    let levels: Vec<Option<Level>> = files
         .iter()
-        .flatten()
-        .map(|(_, level, _)| Some(if *level == Level::Info { Level::Warn } else { *level }))
+        .filter_map(|f| finals.get(f))
+        .map(|(level, _)| Some(if *level == Level::Info { Level::Warn } else { *level }))
         .collect();
     summarize(&levels, "file(s) checked for lossless origin")
 }
