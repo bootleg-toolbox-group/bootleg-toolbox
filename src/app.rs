@@ -942,6 +942,8 @@ enum Row {
     /// A disc's folder, by its first file.
     Disc(usize, usize),
     File(usize, usize),
+    /// A file a checksum file lists that is not on the disk (Verify), by show and position.
+    Missing(usize, usize),
 }
 
 enum Action {
@@ -992,8 +994,6 @@ struct Running {
     /// (the others show their former result faded).
     name: &'static str,
     updated: HashSet<PathBuf>,
-    /// Results so far: OK, to check, with an error.
-    tally: [usize; 3],
     /// Started without a word in the log (details read by themselves): no notification either.
     quiet: bool,
     /// The task writes files next to the shows.
@@ -1055,6 +1055,8 @@ pub struct App {
     shows: Vec<Show>,
     info: HashMap<PathBuf, AudioInfo>,
     status: HashMap<PathBuf, (String, Level, String)>,
+    /// By show folder, the files its checksum files list that were not found (Verify).
+    missing: HashMap<PathBuf, Vec<PathBuf>>,
     /// Lossless check verdicts (Source column).
     source: HashMap<PathBuf, (String, Level, String)>,
     collapsed: HashSet<PathBuf>,
@@ -1295,6 +1297,7 @@ impl App {
             shows: Vec::new(),
             info: HashMap::new(),
             status: HashMap::new(),
+            missing: HashMap::new(),
             source: HashMap::new(),
             collapsed: HashSet::new(),
             selected: HashSet::new(),
@@ -1671,7 +1674,8 @@ impl App {
         let mut rows = Vec::new();
         for (si, show) in self.shows.iter().enumerate() {
             let files: Vec<usize> = (0..show.files.len()).filter(|&fi| keep(&show.files[fi])).collect();
-            if self.filter.is_some() && files.is_empty() && !keep(&show.root) {
+            let missing = self.missing.get(&show.root).map(Vec::as_slice).unwrap_or_default();
+            if self.filter.is_some() && files.is_empty() && !missing.iter().any(keep) && !keep(&show.root) {
                 continue;
             }
             rows.push(Row::Show(si));
@@ -1688,6 +1692,11 @@ impl App {
                     disc = folder;
                 }
                 rows.push(Row::File(si, fi));
+            }
+            for (mi, path) in missing.iter().enumerate() {
+                if keep(path) {
+                    rows.push(Row::Missing(si, mi));
+                }
             }
         }
         rows
@@ -1734,19 +1743,17 @@ impl App {
     }
 
     /// Files with each result of the last task (while one runs: of that task so far): OK, to
-    /// check, with an error.
+    /// check, with an error. A file counts once, with its last result (a show's verdict can
+    /// change a track's, Verify completes its line); the shows themselves are not counted, and
+    /// a file Verify did not find is (it has a line, and shows under "Errors").
     fn tally(&self) -> [usize; 3] {
-        let mut tally = [0usize; 3];
-        let running = self.running.as_ref();
-        for f in self.shows.iter().flat_map(|s| &s.files).filter(|f| running.is_none_or(|r| r.updated.contains(*f))) {
-            match self.status.get(f).map(|s| s.1) {
-                Some(Level::Ok) => tally[0] += 1,
-                Some(Level::Warn) => tally[1] += 1,
-                Some(Level::Error) => tally[2] += 1,
-                _ => {}
-            }
-        }
-        tally
+        self.tally_of(self.running.as_ref().map(|r| &r.updated))
+    }
+
+    /// `tally` over the files in `updated` (all the files with a result when None).
+    fn tally_of(&self, updated: Option<&HashSet<PathBuf>>) -> [usize; 3] {
+        let files = self.shows.iter().flat_map(|s| &s.files).chain(self.missing.values().flatten());
+        tally_levels(files, &self.status, updated)
     }
 
     fn row_path(&self, row: Row) -> &Path {
@@ -1754,6 +1761,7 @@ impl App {
             Row::Show(si) => &self.shows[si].root,
             Row::Disc(si, fi) => self.shows[si].files[fi].parent().unwrap_or(&self.shows[si].root),
             Row::File(si, fi) => &self.shows[si].files[fi],
+            Row::Missing(si, mi) => self.missing.get(&self.shows[si].root).and_then(|l| l.get(mi)).map(|p| p.as_path()).unwrap_or(&self.shows[si].root),
         }
     }
 
@@ -1916,6 +1924,7 @@ impl App {
         if !quiet {
             self.banner = None;
         }
+        self.missing.clear();
         let without_files = match &op {
             Op::TorrentCheck(_) | Op::Rollback { .. } => true,
             Op::MediaInfo(dvds) => !dvds.is_empty(),
@@ -1964,7 +1973,6 @@ impl App {
             done_files: HashSet::new(),
             updated: HashSet::new(),
             roots,
-            tally: [0; 3],
             quiet,
             makes_files,
             started: Instant::now(),
@@ -2093,22 +2101,7 @@ impl App {
                         self.log.push((text, level));
                     }
                     Msg::Status { path, text, level, tooltip } => {
-                        let slot = |level: Level| match level {
-                            Level::Ok => Some(0),
-                            Level::Warn => Some(1),
-                            Level::Error => Some(2),
-                            Level::Info => None,
-                        };
-                        // A file counts once, with its last result (a show's verdict can change a
-                        // track's, Verify completes its line).
-                        if !running.updated.insert(path.clone()) {
-                            if let Some(i) = self.status.get(&path).and_then(|s| slot(s.1)) {
-                                running.tally[i] = running.tally[i].saturating_sub(1);
-                            }
-                        }
-                        if let Some(i) = slot(level) {
-                            running.tally[i] += 1;
-                        }
+                        running.updated.insert(path.clone());
                         running.done_files.insert(path.clone());
                         if !running.quiet {
                             self.fresh.insert(path.clone(), Instant::now());
@@ -2117,6 +2110,12 @@ impl App {
                             self.checked.entry(path.clone()).or_default()[slot] = Some(level);
                         }
                         self.status.insert(path, (text, level, tooltip));
+                    }
+                    Msg::Missing { root, path } => {
+                        let list = self.missing.entry(root).or_default();
+                        if !list.contains(&path) {
+                            list.push(path);
+                        }
                     }
                     Msg::Info { path, info } => {
                         self.info.insert(path, info);
@@ -2244,7 +2243,8 @@ impl App {
 
     /// The notification of a task that ended.
     fn notify(&mut self, running: &Running, summary: &str) {
-        let [_, warn, error] = running.tally;
+        let tally = self.tally_of(Some(&running.updated));
+        let [_, warn, error] = tally;
         let stopped = summary == "Stopped.";
         let (level, outcome, filter) = if stopped {
             (Level::Info, "Stopped".to_string(), None)
@@ -2258,7 +2258,7 @@ impl App {
         // A long task (the user may have walked away): a band above the list that stays.
         let took = running.started.elapsed();
         if took >= Duration::from_secs(60) && !stopped {
-            let files: usize = running.tally.iter().sum();
+            let files: usize = tally.iter().sum();
             let title = match (level, files) {
                 (Level::Ok, 0) => "Done".to_string(),
                 (Level::Ok, n) => {
@@ -3528,7 +3528,7 @@ impl App {
         let status_bar = egui::TopBottomPanel::bottom("statusbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if tally.iter().sum::<usize>() > 0 {
-                    let all: usize = self.shows.iter().map(|s| s.files.len()).sum();
+                    let all: usize = self.shows.iter().map(|s| s.files.len()).sum::<usize>() + self.missing.values().map(Vec::len).sum::<usize>();
                     // Which task the results come from: the running one (so far), or the last.
                     let (task, tip) = match (&self.running, self.results_of) {
                         (Some(r), _) => (r.name, format!("Results of {} so far; the former results of its files are faded until it gives theirs", r.name)),
@@ -4005,6 +4005,7 @@ impl App {
                                 Row::Show(si) => self.show_cells(&mut row, si, &cols, visible, &mut responses, actions),
                                 Row::Disc(si, fi) => self.disc_cells(&mut row, si, fi, &cols, visible, &mut responses),
                                 Row::File(si, fi) => self.file_cells(&mut row, (si, fi), &cols, visible, &mut responses, actions),
+                                Row::Missing(si, _) => self.missing_cells(&mut row, si, &path, &cols, &mut responses),
                             }
                             let Some(mut response) = responses.pop() else { return };
                             for other in responses {
@@ -4032,6 +4033,7 @@ impl App {
                                 Row::Show(si) => self.shows[si].root.clone(),
                                 Row::Disc(..) => path.clone(),
                                 Row::File(si, fi) => self.shows[si].files[fi].clone(),
+                                Row::Missing(si, _) => self.shows[si].root.clone(),
                             };
                             let busy = self.running.is_some();
                             let flac_level = self.opt.flac_level;
@@ -4262,6 +4264,22 @@ impl App {
     }
 
     /// A disc of a show: its folder name, number of tracks and length, under a rule.
+    /// A file listed in a checksum file but not on the disk: its name and the error.
+    fn missing_cells(&self, row: &mut egui_extras::TableRow, si: usize, path: &Path, cols: &[Col], responses: &mut Vec<egui::Response>) {
+        let show = &self.shows[si];
+        for &col in cols {
+            match col {
+                Col::Name => responses.push(row.col(|ui| {
+                    ui.add_space(22.0);
+                    ui.label(RichText::new(format!("{} (missing)", rel_posix(path, &show.root))).italics().color(Palette::now().weak))
+                        .on_hover_text(format!("Listed in a checksum file, not found: {}", path.display()));
+                }).1),
+                Col::Result => responses.push(row.col(|ui| { self.status_cell(ui, path); }).1),
+                _ => responses.push(row.col(|_| {}).1),
+            }
+        }
+    }
+
     fn disc_cells(&self, row: &mut egui_extras::TableRow, si: usize, fi: usize, cols: &[Col], band: egui::Rect, responses: &mut Vec<egui::Response>) {
         let p = Palette::now();
         let show = &self.shows[si];
@@ -5772,5 +5790,46 @@ impl eframe::App for App {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, "options", &self.opt);
+    }
+}
+
+/// How many of `files` have each result in `status`: OK, to check, with an error.
+fn tally_levels<'a>(files: impl Iterator<Item = &'a PathBuf>, status: &HashMap<PathBuf, (String, Level, String)>, updated: Option<&HashSet<PathBuf>>) -> [usize; 3] {
+    let mut tally = [0usize; 3];
+    for f in files.filter(|f| updated.is_none_or(|u| u.contains(*f))) {
+        match status.get(f).map(|s| s.1) {
+            Some(Level::Ok) => tally[0] += 1,
+            Some(Level::Warn) => tally[1] += 1,
+            Some(Level::Error) => tally[2] += 1,
+            _ => {}
+        }
+    }
+    tally
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The filter bar and the notification count the same things: the files of the shows and
+    /// the files Verify did not find, each once; never the show itself.
+    #[test]
+    fn tally_counts_missing_files_not_shows() {
+        let p = |name: &str| PathBuf::from(format!("/show/{name}"));
+        let result = |level| (String::new(), level, String::new());
+        let status: HashMap<_, _> = [
+            (p(""), result(Level::Error)),
+            (p("04.flac"), result(Level::Ok)),
+            (p("08.flac"), result(Level::Error)),
+            (p("10.flac"), result(Level::Ok)),
+            (p("05.flac"), result(Level::Error)),
+        ]
+        .into();
+        let files = [p("04.flac"), p("08.flac"), p("10.flac")];
+        let missing = [p("05.flac")];
+        assert_eq!(tally_levels(files.iter().chain(&missing), &status, None), [2, 0, 2]);
+        // Only what the running task has reached.
+        let updated: HashSet<PathBuf> = [p(""), p("08.flac"), p("05.flac")].into();
+        assert_eq!(tally_levels(files.iter().chain(&missing), &status, Some(&updated)), [0, 0, 2]);
     }
 }

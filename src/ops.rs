@@ -46,6 +46,8 @@ pub enum Msg {
     /// A file's final verdict repeated in the log (Lossless?: after the show's verdict).
     VerdictLog(String, Level),
     Status { path: PathBuf, text: String, level: Level, tooltip: String },
+    /// Verify: a file a checksum file lists that is not on the disk, to show on a line of its own.
+    Missing { root: PathBuf, path: PathBuf },
     Info { path: PathBuf, info: AudioInfo },
     Progress { done: usize, total: usize },
     Image { path: PathBuf, image: crate::spectrogram::Image },
@@ -839,6 +841,8 @@ struct VerifyJob {
     name: String,
     digest: String,
     target: Option<PathBuf>,
+    /// Where the listed file should be: the key of its line when it is not on the disk.
+    expected: PathBuf,
 }
 
 fn st5_digest(path: &Path, cancel: &AtomicBool) -> Result<String, String> {
@@ -856,7 +860,7 @@ fn st5_digest(path: &Path, cancel: &AtomicBool) -> Result<String, String> {
 }
 
 /// A verify result for one file: (checksum file, word, level).
-type Mark<'a> = (String, &'a str, Level);
+type Mark = (String, String, Level);
 
 pub fn op_verify(ctx: &Ctx, shows: &[Show]) -> String {
     let mut jobs = Vec::new();
@@ -888,7 +892,11 @@ pub fn op_verify(ctx: &Ctx, shows: &[Show]) -> String {
                 if let Some(t) = &target {
                     covered.insert(t.clone());
                 }
-                jobs.push(VerifyJob { root: show.root.clone(), checksum_file: cs.clone(), kind: kind.clone(), name, digest, target });
+                let expected = base.join(name.replace('\\', "/"));
+                if target.is_none() {
+                    let _ = ctx.tx.send(Msg::Missing { root: show.root.clone(), path: expected.clone() });
+                }
+                jobs.push(VerifyJob { root: show.root.clone(), checksum_file: cs.clone(), kind: kind.clone(), name, digest, target, expected });
             }
         }
         for f in &show.files {
@@ -899,8 +907,10 @@ pub fn op_verify(ctx: &Ctx, shows: &[Show]) -> String {
     }
     ctx.add_total(jobs.len());
     let marks: Mutex<HashMap<PathBuf, Vec<Mark>>> = Mutex::new(HashMap::new());
-    let record = |job: &VerifyJob, word: &'static str, level: Level| {
-        let Some(target) = &job.target else { return };
+    // Every result of a file, whatever its order of arrival, is kept in its line, which shows
+    // the worst level: an error is never hidden by a later OK.
+    let record = |job: &VerifyJob, word: String, level: Level| {
+        let target = job.target.as_ref().unwrap_or(&job.expected);
         let mut marks = marks.lock().unwrap();
         let entry = marks.entry(target.clone()).or_default();
         entry.push((job.kind.to_uppercase(), word, level));
@@ -908,8 +918,9 @@ pub fn op_verify(ctx: &Ctx, shows: &[Show]) -> String {
         let worst = entry.iter().map(|e| e.2).max_by_key(|l| l.rank()).unwrap_or(Level::Info);
         ctx.status(target, text, worst, "");
     };
-    let results = par_map(ctx, &jobs, |j| j.target.clone().unwrap_or(j.checksum_file.clone()), |job| {
+    let check = |job: &VerifyJob| -> Result<Level, String> {
         let Some(target) = &job.target else {
+            record(job, "missing".into(), Level::Error);
             ctx.log(format!("{}: {} - file not found", file_name(&job.checksum_file), job.name), Level::Error);
             return Ok(Level::Error);
         };
@@ -917,7 +928,7 @@ pub fn op_verify(ctx: &Ctx, shows: &[Show]) -> String {
             let info = audio::probe(target)?;
             let md5 = info.md5.unwrap_or(ZERO_MD5);
             if md5 == ZERO_MD5 {
-                record(job, "no MD5 in header", Level::Warn);
+                record(job, "no MD5 in header".into(), Level::Warn);
                 return Ok(Level::Warn);
             }
             hex(&md5)
@@ -929,12 +940,22 @@ pub fn op_verify(ctx: &Ctx, shows: &[Show]) -> String {
             hex(&audio::file_md5(target, &ctx.cancel)?)
         };
         if actual == job.digest {
-            record(job, "OK", Level::Ok);
+            record(job, "OK".into(), Level::Ok);
             Ok(Level::Ok)
         } else {
-            record(job, "MISMATCH", Level::Error);
+            record(job, "MISMATCH".into(), Level::Error);
             ctx.log(format!("{}: {} - checksum MISMATCH", file_name(&job.checksum_file), job.name), Level::Error);
             Ok(Level::Error)
+        }
+    };
+    let results = par_map(ctx, &jobs, |j| j.target.clone().unwrap_or(j.checksum_file.clone()), |job| {
+        match catch_panic(|| check(job)) {
+            Err(e) if !ctx.cancelled() => {
+                record(job, format!("ERROR: {e}"), Level::Error);
+                ctx.log(format!("{}: {e}", job.target.as_deref().map(file_name).unwrap_or_default()), Level::Error);
+                Ok(Level::Error)
+            }
+            other => other,
         }
     });
     for show in shows {
@@ -2822,5 +2843,56 @@ mod tests {
     fn piece_length() {
         assert_eq!(auto_piece_length(1000), 1 << 15);
         assert_eq!(auto_piece_length(500 << 20), 512 << 10);
+    }
+
+    /// Runs Verify on a show whose notes.txt is listed by an ST5 (unreadable as audio: an
+    /// error) and by an MD5 (right sum), and whose gone.wav is listed but absent. Returns the
+    /// last status of each path, the messages of the show, and the summary.
+    fn verify_show(tag: &str, st5_name: &str, md5_name: &str) -> (HashMap<PathBuf, (String, Level)>, Vec<Msg>, String) {
+        let dir = std::env::temp_dir().join(format!("bt-verify-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let notes = dir.join("notes.txt");
+        std::fs::write(&notes, "hello").unwrap();
+        let sum = hex(&audio::file_md5(&notes, &AtomicBool::new(false)).unwrap());
+        std::fs::write(dir.join(st5_name), format!("{sum}  [shntool]  notes.txt\n")).unwrap();
+        std::fs::write(dir.join(md5_name), format!("{sum}  notes.txt\n{sum}  gone.wav\n")).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let opt = Options { jobs: 1, ..Options::default() }; // the checksum files are read in order
+        let ctx = Ctx { tx, cancel: Arc::new(AtomicBool::new(false)), opt, done: AtomicUsize::new(0), total: AtomicUsize::new(0), rescan: AtomicBool::new(false) };
+        let show = Show { root: dir.clone(), files: vec![notes] };
+        let summary = op_verify(&ctx, &[show]);
+        drop(ctx);
+        let messages: Vec<Msg> = rx.try_iter().collect();
+        let mut last = HashMap::new();
+        for m in &messages {
+            if let Msg::Status { path, text, level, .. } = m {
+                last.insert(path.strip_prefix(&dir).map(|p| p.to_path_buf()).unwrap_or_else(|_| path.clone()), (text.clone(), *level));
+            }
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+        (last, messages, summary)
+    }
+
+    /// An error is never hidden by the OK of another checksum file, whatever comes first.
+    #[test]
+    fn verify_error_is_not_hidden_by_a_later_ok() {
+        for (tag, st5, md5) in [("first", "a.st5", "b.md5"), ("last", "b.st5", "a.md5")] {
+            let (last, _, _) = verify_show(tag, st5, md5);
+            let (text, level) = &last[Path::new("notes.txt")];
+            assert_eq!(*level, Level::Error, "{tag}: {text}");
+            assert!(text.contains("MD5 OK") && text.contains("ST5 ERROR: not an audio file"), "{tag}: {text}");
+        }
+    }
+
+    /// A file listed by a checksum file but absent has a line of its own, in error, and counts.
+    #[test]
+    fn verify_missing_file_has_its_own_line() {
+        let (last, messages, summary) = verify_show("missing", "a.st5", "b.md5");
+        let (text, level) = &last[Path::new("gone.wav")];
+        assert_eq!((text.as_str(), *level), ("MD5 missing", Level::Error));
+        assert!(messages.iter().any(|m| matches!(m, Msg::Missing { path, .. } if path.ends_with("gone.wav"))));
+        // 3 checksums: the ST5 error, the missing file, the MD5 that matches.
+        assert!(summary.starts_with("3 checksum(s) verified: 1 OK, 2 error(s)"), "{summary}");
     }
 }
