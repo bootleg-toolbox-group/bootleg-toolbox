@@ -1692,6 +1692,40 @@ mod tests {
         assert_eq!(verdict(&fm).label, "Lossy (MP3 traces)");
     }
 
+    /// Histograms measured on real lossyWAV 1.4.2 files (8 lossless excerpts at the extreme,
+    /// standard, portable and extraportable presets), on the excerpts themselves and on
+    /// reduced-resolution files (13 bits, with a gain, 12 bits): see tests/data and
+    /// notes/REFONTE-E5.md.
+    #[test]
+    fn lossywav_measured_on_real_files() {
+        // lossyWAV removed almost nothing from these noisy sources (0.01 to 0.31 of the
+        // blocks changed): practically the original, "Lossless" is not misleading. Kept so
+        // that a change of the thresholds shows.
+        const BARELY_TOUCHED: [&str; 5] = ["aud-cassette-E", "fm-glasgow-E", "fm-glasgow-S", "fm-glasgow-P", "fm-honeymoon-E"];
+        let (mut found, mut total) = (0, 0);
+        for line in include_str!("../tests/data/lossywav-histograms.tsv").lines().filter(|l| !l.starts_with('#')) {
+            let [class, id, hist] = line.split('\t').collect::<Vec<_>>()[..] else { panic!("{line}") };
+            let mut wasted = vec![0u32; 33];
+            for pair in hist.split(',') {
+                let (bits, blocks) = pair.split_once(':').unwrap();
+                wasted[bits.parse::<usize>().unwrap()] = blocks.parse().unwrap();
+            }
+            let detected = wasted_bits(&wasted).as_ref().is_some_and(is_lossywav);
+            let label = verdict(&Facts { rate: 44100.0, frames: 100, wasted, ..Default::default() }).label;
+            assert_eq!(label == "Lossy (lossyWAV)", detected, "{id}");
+            match class {
+                // A source, or a file cut to fewer bits: never lossyWAV.
+                "lossless" | "reduced" => assert!(!detected, "{id}"),
+                _ => {
+                    total += 1;
+                    found += detected as usize;
+                    assert_eq!(detected, !BARELY_TOUCHED.contains(&id), "{id}");
+                }
+            }
+        }
+        assert_eq!((found, total), (27, 32));
+    }
+
     #[test]
     fn rule_lossywav_is_red() {
         let mut wasted = vec![0u32; 33];
