@@ -437,6 +437,9 @@ pub(crate) struct Finding {
     pub(crate) side: Side,
     pub(crate) strength: Strength,
     pub(crate) text: String,
+    /// Holes (S1a, S1b) under a cut whose digital silence above does not follow a fixed lowpass
+    /// (amendment 15): a clue on their own, in no pair and in no repetition across a show.
+    pub(crate) loose: bool,
 }
 
 /// Why a file is "Unclear". The first three are the transfer chain's (a filter, an analog stage
@@ -501,7 +504,7 @@ const PAIRS: [(&[&str], &[&str]); 5] = [
 
 /// The state from the clues alone (§1.3, steps 3 to 7).
 pub(crate) fn classify(found: &[Finding]) -> Class {
-    let find = |codes: &[&str]| found.iter().find(|f| codes.contains(&f.id.code())).map(|f| f.id);
+    let find = |codes: &[&str]| found.iter().find(|f| codes.contains(&f.id.code()) && !f.loose).map(|f| f.id);
     let has = |code: &str| find(&[code]).is_some();
     let class = |state| Class { state, pair: None };
     if has("C1") || has("C2") {
@@ -536,11 +539,25 @@ pub(crate) fn classify(found: &[Finding]) -> Class {
     }
 }
 
+/// The digital silence above a cutoff starts at it in at most this share of the frames: it does
+/// not follow a fixed lowpass. The most fixed noise reducer of nrbank that made a file red
+/// (pantera-sox0.3, 70 of 968 frames) plus one frame (§2.1, amendment 15).
+const LOOSE_FRONTIER: f64 = 71.0 / 968.0;
+
+/// Holes under a cut that a noise reducer can leave too: the digital silence above it, found in
+/// half of the frames at least (else its place tells nothing), seldom starts at the cutoff.
+fn loose_cut(f: &Facts) -> bool {
+    f.edge_track.is_some_and(|e| e.frontier_share >= 0.5 && e.frontier_at_cut.is_some_and(|x| x <= LOOSE_FRONTIER))
+}
+
 /// The clues of a file, family by family.
 pub(crate) fn findings(f: &Judged) -> Vec<Finding> {
     let khz = |c: f64| format!("{:.1} kHz", c / 1000.0);
     let mut out = Vec::new();
-    let mut add = |id: Id, side: Side, strength: Strength, text: String| out.push(Finding { id, side, strength, text });
+    let loose = loose_cut(f);
+    let mut add = |id: Id, side: Side, strength: Strength, text: String| {
+        out.push(Finding { id, side, strength, text, loose: loose && matches!(id, Id::S1a | Id::S1b) })
+    };
 
     // C: coding.
     let mp3 = f.mp3_trace.filter(|t| t.found());
@@ -609,14 +626,17 @@ pub(crate) fn findings(f: &Judged) -> Vec<Finding> {
     let hiss = f.above_floor.is_some_and(|a| a >= 10.0) && f.high_floor.is_none_or(|h| h >= 10.0);
     if let Some(c) = f.cutoff {
         let h = f.holes.unwrap_or(0.0);
+        let holes = if loose {
+            format!(
+                "Encoder-like holes of {h:.0} dB under the {} treble cut, but the silence above does not follow a fixed lowpass: a noise reducer can leave this too",
+                khz(c)
+            )
+        } else {
+            format!("Encoder holes of {h:.0} dB below the {} lowpass", khz(c))
+        };
         match h {
-            h if h >= 15.0 => add(Id::S1a, Side::Lossy, Strength::Moderate, format!("Encoder holes of {h:.0} dB below the {} lowpass", khz(c))),
-            h if h >= 10.0 => add(
-                Id::S1b,
-                Side::Lossy,
-                Strength::Moderate,
-                format!("Encoder holes of {h:.0} dB below the {} lowpass (shallower than 15 dB: weaker on their own)", khz(c)),
-            ),
+            h if h >= 15.0 => add(Id::S1a, Side::Lossy, Strength::Moderate, holes),
+            h if h >= 10.0 => add(Id::S1b, Side::Lossy, Strength::Moderate, format!("{holes} (shallower than 15 dB: weaker on their own)")),
             h if h >= 8.0 => add(
                 Id::S1c,
                 Side::Lossy,
@@ -786,9 +806,14 @@ fn wording(class: &Class, found: &[Finding], f: &Judged) -> (String, Level, Stri
     let pilot = has("O1");
     let hiss = f.above_floor.is_some_and(|a| a >= 10.0) && f.high_floor.is_none_or(|h| h >= 10.0);
     let upstream = (has("S1a") || has("S1b")) && found.iter().any(|x| matches!(x.id, Id::S4 { .. }));
+    let loose = found.iter().any(|x| x.loose);
     // The clues, said as part of a sentence.
     let clue = |id: Id| -> String {
         match id {
+            Id::S1a | Id::S1b if loose => format!(
+                "encoder-like holes of {holes:.0} dB under a {} kHz treble cut, but the silence above does not follow a fixed lowpass: a noise reducer can leave this too",
+                khz(cut)
+            ),
             Id::S1a | Id::S1b => format!("encoder holes of {holes:.0} dB below the {} kHz lowpass", khz(cut)),
             Id::S2a => "digital silence above it".into(),
             Id::S2b if f.cutoff.is_some_and(|c| c < 19500.0) && !f.silent_above && !hiss => {
@@ -852,7 +877,8 @@ fn wording(class: &Class, found: &[Finding], f: &Judged) -> (String, Level, Stri
                     clue(moderate[0])
                 )
             } else {
-                let said = moderate.iter().map(|&id| clue(id)).collect::<Vec<_>>().join(", and ");
+                // Loose holes already say what lies above the cut.
+                let said = moderate.iter().filter(|id| !(loose && matches!(id, Id::S2a | Id::S2b))).map(|&id| clue(id)).collect::<Vec<_>>().join(", and ");
                 let single = moderate.len() == 1;
                 if has("S1a") || has("S1b") {
                     format!("Possibly lossy: {said}; {}", if single { "one family of clues only, so not proven" } else { "not a pair of clues that proves it" })
@@ -1034,6 +1060,12 @@ fn reasoning(class: &Class, found: &[Finding], f: &Judged) -> Vec<String> {
             if has("S1a") || has("S1b") {
                 r.push("Encoder holes are the fingerprint of a perceptual encoder (MP3, MP2, AAC switch the top bands off and on); FM and analog recordings stay under about 5 dB.".into());
             }
+            if let Some(share) = f.edge_track.and_then(|e| e.frontier_at_cut).filter(|_| found.iter().any(|x| x.loose)) {
+                r.push(format!(
+                    "But a noise reducer opens and closes the top bands with the music too. After an encoder's lowpass the digital silence above starts at the cutoff, frame after frame; here that holds in {:.0} % of the frames, so these holes are not paired with any other clue.",
+                    share * 100.0
+                ));
+            }
             if found.iter().any(|x| matches!(x.id, Id::S4 { .. })) && (has("S1a") || has("S1b")) {
                 r.push(format!("Yet steady hiss ({above:+.0} dB over digital silence) fills the band above the cutoff. An encoder removes everything above its lowpass, so this hiss was added afterwards, by an analog stage (tuner, sound card) or as dither: the content itself may have been lossy-coded upstream."));
                 if let Some(s) = f.stereo.filter(|s| *s < -18.0) {
@@ -1207,7 +1239,7 @@ impl TrackDecision {
         TrackDecision {
             state: class.state,
             cutoff: f.cutoff,
-            deep_holes: has("S1a"),
+            deep_holes: found.iter().any(|x| x.id == Id::S1a && !x.loose),
             hiss: has("S4"),
             capped: has("T1") || has("T3") || has("T4"),
             uniform: has("C4"),
@@ -1516,7 +1548,7 @@ pub(crate) fn aggregate(title: String, done: &mut [TrackResult]) -> Option<ShowD
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lossless::{comb_stats, intensity_stats, masked_bands, CombStats, Hires};
+    use crate::lossless::{comb_stats, intensity_stats, masked_bands, CombStats, EdgeTrack, Hires};
     use crate::mp3trace::Trace;
 
     /// A lowpass at 16.5 kHz without holes and with hiss above: doubtful, so "analog" when the
@@ -1772,7 +1804,7 @@ mod tests {
             Id::C3(_) => Strength::Weak,
             _ => Strength::Moderate,
         };
-        Finding { id, side: Side::Lossy, strength, text: String::new() }
+        Finding { id, side: Side::Lossy, strength, text: String::new(), loose: false }
     }
 
     /// Opus's intensity stereo in a fifth of the loud frames.
@@ -1885,6 +1917,59 @@ mod tests {
         let v = verdict(&cut(20300.0, 20.0, 15.0, 15.0));
         assert_eq!((v.label.as_str(), v.level), ("Lossy? upstream 20.3 kHz", Level::Warn));
         assert_eq!(state(&Facts { above_floor: None, ..cut(21000.0, 18.0, 0.0, 30.0) }), State::O);
+    }
+
+    /// The border of digital silence above the cut: found in `share` of the frames, at the cut
+    /// in `at_cut` of those.
+    fn border(f: &Facts, share: f64, at_cut: Option<f64>) -> Facts {
+        let e = EdgeTrack {
+            strong: 484,
+            mode: 17000.0,
+            mode_share: 0.5,
+            edge_at_cut: Some(0.5),
+            level_corr: 0.0,
+            frontier_share: share,
+            frontier_at_cut: at_cut,
+            frontier: None,
+            frontier_corr: None,
+            gated_share: 0.5,
+            gated_rel: 0.0,
+        };
+        Facts { edge_track: Some(e), ..f.clone() }
+    }
+
+    #[test]
+    fn rule_holes_under_a_loose_cut_pair_with_nothing() {
+        // Holes and digital silence above: red, as long as the silence starts at the cut.
+        let holes = cut(17100.0, 23.0, 0.0, 0.0);
+        assert_eq!(state(&holes), State::R);
+        assert_eq!(state(&border(&holes, 1.0, Some(0.9))), State::R);
+        assert_eq!(state(&border(&holes, 1.0, Some(72.0 / 968.0))), State::R);
+        // A noise reducer's border moves with the music (amendment 15): the holes stay a doubt,
+        // and they no longer count toward a show's repeated holes.
+        let loose = border(&holes, 1.0, Some(70.0 / 968.0));
+        assert_eq!(state(&loose), State::O);
+        let v = verdict(&loose);
+        assert_eq!((v.label.as_str(), v.level), ("Lossy? 17.1 kHz", Level::Warn));
+        assert!(
+            v.sentence.starts_with(
+                "Possibly lossy: encoder-like holes of 23 dB under a 17.1 kHz treble cut, but the silence above does not follow a fixed lowpass: a noise reducer can leave this too; not a pair"
+            ),
+            "{}",
+            v.sentence
+        );
+        assert!(verdict(&holes).track.is_some_and(|t| t.deep_holes));
+        assert!(v.track.is_some_and(|t| !t.deep_holes));
+        // Shallower holes say so too.
+        let shallow = findings(&Judged::new(&border(&cut(17100.0, 12.0, 0.0, 0.0), 1.0, Some(0.0)), false));
+        assert!(shallow.iter().any(|x| x.id == Id::S1b && x.loose && x.text.ends_with("can leave this too (shallower than 15 dB: weaker on their own)")));
+        assert_eq!(state(&border(&cut(17100.0, 12.0, 0.0, 0.0), 1.0, Some(0.0))), State::O);
+        // A border found in under half of the frames, or none to place: its place tells nothing,
+        // the holes keep their status.
+        assert_eq!(state(&border(&holes, 0.49, Some(0.0))), State::R);
+        assert_eq!(state(&border(&holes, 1.0, None)), State::R);
+        // A coding proof is not touched.
+        assert_eq!(verdict(&Facts { mp3_trace: Some(grid(0.2, 30.0)), ..loose }).label, "Lossy (MP3 traces)");
     }
 
     #[test]

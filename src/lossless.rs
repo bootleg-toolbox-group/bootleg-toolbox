@@ -111,6 +111,8 @@ pub fn analyse(path: &Path, info: &AudioInfo, aac: bool, cancel: &AtomicBool) ->
         verdict.report.label = verdict.label.clone();
         verdict.report.level = Level::Error;
         verdict.report.sentence = verdict.sentence.clone();
+        // The format is a proof: certain, whatever the clues of the spectrum make of it.
+        verdict.report.confidence = Some(crate::report::Confidence::High);
         verdict.report.evidence.insert(
             0,
             crate::report::Evidence {
@@ -213,6 +215,7 @@ pub fn by_format(path: &Path, info: &AudioInfo) -> Verdict {
             "The file is an {name}: this format always discards part of the sound when it is made, so it is lossy whatever \
              its spectrum shows. {measured}"
         )],
+        confidence: Some(crate::report::Confidence::High),
         ..Default::default()
     };
     verdict
@@ -229,10 +232,13 @@ struct Shape {
     kept_hi: usize,
     bin_hz: f64,
     intensity_check: bool,
+    /// The bins of 1-4 kHz: the level of the music in a kept block.
+    level_bins: std::ops::Range<usize>,
 }
 
-/// One block's power spectrum, and when kept: its 7-22 kHz bands, intensity stereo and width.
-type BlockMeasures = (Vec<f64>, Vec<f32>, Option<(f64, f64, f64)>, Option<f64>);
+/// One block's power spectrum, and when kept: its 7-22 kHz bands, intensity stereo, width and
+/// mean power at 1-4 kHz.
+type BlockMeasures = (Vec<f64>, Vec<f32>, Option<(f64, f64, f64)>, Option<f64>, Option<f32>);
 
 /// The spectra added up over the track, and the measures of the kept blocks.
 struct Spectra {
@@ -243,6 +249,8 @@ struct Spectra {
     intensity: Vec<(f64, f64, f64)>,
     /// Stereo width: the difference channel against the sum, 5-10 kHz, in dB.
     side_vs_mid: Vec<f64>,
+    /// Per kept block, the mean power at 1-4 kHz.
+    level: Vec<f32>,
 }
 
 impl Spectra {
@@ -262,8 +270,10 @@ impl Spectra {
                     let mut frame_power = vec![0f64; s.bins];
                     s.fft.power(&block, re, im, &mut frame_power);
                     let mut kept = Vec::new();
-                    let (mut intensity, mut width) = (None, None);
+                    let (mut intensity, mut width, mut level) = (None, None, None);
                     if keep {
+                        let bins = &frame_power[s.level_bins.clone()];
+                        level = Some((bins.iter().sum::<f64>() / bins.len().max(1) as f64) as f32);
                         for b in s.kept_lo..s.kept_hi {
                             kept.push((frame_power[b * s.band..(b + 1) * s.band].iter().sum::<f64>() / s.band as f64) as f32);
                         }
@@ -285,17 +295,18 @@ impl Spectra {
                             }
                         }
                     }
-                    (frame_power, kept, intensity, width)
+                    (frame_power, kept, intensity, width, level)
                 },
             )
             .collect();
-        for (frame_power, kept, intensity, width) in measured {
+        for (frame_power, kept, intensity, width, level) in measured {
             for (p, f) in self.power.iter_mut().zip(&frame_power) {
                 *p += f;
             }
             self.kept.extend(kept);
             self.intensity.extend(intensity);
             self.side_vs_mid.extend(width);
+            self.level.extend(level);
         }
     }
 }
@@ -317,6 +328,7 @@ struct Measured {
     kept: Vec<f32>,
     intensity: Vec<(f64, f64, f64)>,
     side_vs_mid: Vec<f64>,
+    level: Vec<f32>,
     check_low: bool,
     low_bits: bool,
     wasted: [u32; 33],
@@ -362,8 +374,9 @@ fn measure(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<Measure
     let intensity_check = channels == 2 && rate >= 44100.0;
     // The spectra of blocks of frames are computed in parallel, then added in order.
     const BATCH: usize = 64;
-    let shape = Shape { fft, window, bins, band, kept_lo, kept_hi, bin_hz, intensity_check };
-    let mut spectra = Spectra { power: vec![0f64; bins], kept: Vec::new(), intensity: Vec::new(), side_vs_mid: Vec::new() };
+    let level_bins = libm::ceil(1000.0 / bin_hz) as usize..((4000.0 / bin_hz) as usize + 1).min(bins);
+    let shape = Shape { fft, window, bins, band, kept_lo, kept_hi, bin_hz, intensity_check, level_bins };
+    let mut spectra = Spectra { power: vec![0f64; bins], kept: Vec::new(), intensity: Vec::new(), side_vs_mid: Vec::new(), level: Vec::new() };
     let mut pending: Vec<(Vec<f64>, Option<Vec<f64>>, bool)> = Vec::with_capacity(BATCH);
     // lossyWAV zeroes the lowest bits of whole blocks: the common trailing zero bits of
     // every block of 128 sample frames (silent blocks left out).
@@ -437,7 +450,7 @@ fn measure(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<Measure
         }
     })?;
     spectra.add(pending, &shape);
-    let Spectra { power, kept, intensity, side_vs_mid } = spectra;
+    let Spectra { power, kept, intensity, side_vs_mid, level } = spectra;
     let mp3_trace = mp3.and_then(|m| m.detect(info.rate));
     Ok(Measured {
         samples: info.samples,
@@ -453,6 +466,7 @@ fn measure(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<Measure
         kept,
         intensity,
         side_vs_mid,
+        level,
         check_low,
         low_bits,
         wasted,
@@ -671,6 +685,7 @@ fn facts(info: &AudioInfo, m: &Measured, aac_check: bool, all: bool) -> Facts {
     });
     let masked_bands = masked_bands(kept, kept_bands, &|b| band_freq(kept_lo + b), &|f| (18900.0..19100.0).contains(&f) || in_tone(f), lsb);
     let roll = cutoff.and_then(|c| rolloff(kept, kept_bands, &|b| band_freq(kept_lo + b), &|f| (18900.0..19100.0).contains(&f) || in_tone(f), c));
+    let edge_track = edge_track(kept, kept_bands, &m.level, &|b| band_freq(kept_lo + b), &|f| (18900.0..19100.0).contains(&f) || in_tone(f), lsb, nyquist, cutoff);
     let hf = median_between(15000.0, 19500.0);
     let hires = (rate >= 88200.0)
         .then(|| {
@@ -702,11 +717,158 @@ fn facts(info: &AudioInfo, m: &Measured, aac_check: bool, all: bool) -> Facts {
         wasted: wasted.to_vec(),
         intensity: intensity_stats(intensity),
         masked_bands,
+        edge_track,
         mp3_trace,
         aac_trace,
         opus_trace,
         searched: aac_check,
     }
+}
+
+/// The upper edge of the music frame by frame (§2.1 of the plan, T2): an encoder's or a
+/// filter's lowpass stays put, a noise reducer's edge moves with the level and switches cells
+/// off. On the kept frames (`kept`: their bands from 7 kHz up, `level`: their power at
+/// 1-4 kHz); `skip`: bands of the pilot and of tones; `lsb`: 16-bit digital silence per bin.
+/// Only the bands under the converter's filter count (up to 22 kHz and 1 kHz under Nyquist).
+#[allow(clippy::too_many_arguments)]
+fn edge_track(
+    kept: &[f32],
+    kept_bands: usize,
+    level: &[f32],
+    freq: &dyn Fn(usize) -> f64,
+    skip: &dyn Fn(f64) -> bool,
+    lsb: f64,
+    nyquist: f64,
+    cutoff: Option<f64>,
+) -> Option<EdgeTrack> {
+    if kept_bands == 0 || kept.len() / kept_bands < 100 || level.len() != kept.len() / kept_bands {
+        return None;
+    }
+    let db = |p: f32| 10.0 * libm::log10(p as f64 + 1e-30);
+    let frames: Vec<&[f32]> = kept.chunks_exact(kept_bands).collect();
+    let top = 22000.0f64.min(nyquist - 1000.0);
+    let bands: Vec<usize> = (0..kept_bands).filter(|&b| !skip(freq(b)) && freq(b) < top).collect();
+    let last = *bands.last()?;
+    // Where the edge sits can be told only when the cutoff and 300 Hz above it are usable bands.
+    let measurable = cutoff.filter(|&c| c + 300.0 <= freq(last));
+    // A band is on when it stands 6 dB over its own floor (10th percentile over the frames)
+    // and over digital silence.
+    let on: Vec<f64> = (0..kept_bands)
+        .map(|b| {
+            let values: Vec<f64> = frames.iter().map(|f| db(f[b])).collect();
+            dsp::percentile(&values, 10.0).unwrap_or(f64::NEG_INFINITY).max(lsb) + 6.0
+        })
+        .collect();
+    let levels: Vec<f64> = level.iter().map(|&p| db(p)).collect();
+    let median = dsp::median(&levels)?;
+    let corr = |pairs: &[(f64, f64)]| {
+        let n = pairs.len() as f64;
+        let (mx, my) = (pairs.iter().map(|p| p.0).sum::<f64>() / n, pairs.iter().map(|p| p.1).sum::<f64>() / n);
+        let cov: f64 = pairs.iter().map(|(x, y)| (x - mx) * (y - my)).sum();
+        let (vx, vy): (f64, f64) = (pairs.iter().map(|(x, _)| (x - mx).powi(2)).sum(), pairs.iter().map(|(_, y)| (y - my).powi(2)).sum());
+        if vx > 0.0 && vy > 0.0 { cov / (vx * vy).sqrt() } else { 0.0 }
+    };
+    // The edge, under the cutoff (300 Hz of slack), in the louder half of the frames by the
+    // music at 1-4 kHz.
+    let limit = cutoff.map_or(top, |c| c + 300.0);
+    let under: Vec<usize> = bands.iter().copied().filter(|&b| freq(b) <= limit).collect();
+    let strong: Vec<(f64, f64)> = frames
+        .iter()
+        .zip(&levels)
+        .filter(|(_, l)| **l >= median)
+        .map(|(f, l)| (under.iter().rev().find(|&&b| db(f[b]) > on[b]).map_or(freq(0), |&b| freq(b)), *l))
+        .collect();
+    if strong.len() < 50 {
+        return None;
+    }
+    let n = strong.len() as f64;
+    let (mode, within) = under
+        .iter()
+        .map(|&b| (freq(b), strong.iter().filter(|(e, _)| (e - freq(b)).abs() <= 300.0).count()))
+        .fold((freq(0), 0), |best, x| if x.1 > best.1 { x } else { best });
+    let edge_at_cut = measurable.map(|c| strong.iter().filter(|(e, _)| (e - c).abs() <= 300.0).count() as f64 / n);
+    // The border of digital silence above the cutoff, frame by frame: the lowest usable band
+    // from 3 kHz under the cutoff up that is at silence, with 90 % of the usable bands above it.
+    let silent = |f: &[f32], b: usize| db(f[b]) <= lsb + 6.0;
+    let from = cutoff.map_or(12000.0, |c| (c - 3000.0).max(7000.0));
+    let span: Vec<usize> = bands.iter().copied().filter(|&b| freq(b) >= from).collect();
+    let mut border: Vec<(f64, f64)> = Vec::new();
+    for (f, l) in frames.iter().zip(&levels) {
+        let (mut count, mut quiet, mut lowest) = (0usize, 0usize, None);
+        for &b in span.iter().rev() {
+            count += 1;
+            if silent(f, b) {
+                quiet += 1;
+                if quiet * 10 >= count * 9 {
+                    lowest = Some(freq(b));
+                }
+            }
+        }
+        if let Some(x) = lowest {
+            border.push((x, *l));
+        }
+    }
+    let frontier_share = border.len() as f64 / frames.len() as f64;
+    let positions: Vec<f64> = border.iter().map(|b| b.0).collect();
+    let frontier = (!positions.is_empty())
+        .then(|| Some((dsp::percentile(&positions, 10.0)?, dsp::percentile(&positions, 50.0)?, dsp::percentile(&positions, 90.0)?)))
+        .flatten();
+    let frontier_at_cut = measurable.filter(|_| !border.is_empty()).map(|c| border.iter().filter(|b| (b.0 - c).abs() <= 300.0).count() as f64 / border.len() as f64);
+    // Cells of 12-20 kHz: at digital silence, or 6 dB and more under the band's own floor
+    // (24-bit files have no digital silence to fall to).
+    let treble: Vec<usize> = bands.iter().copied().filter(|&b| freq(b) >= 12000.0 && freq(b) < 20000.0).collect();
+    let cells = (treble.len() * frames.len()).max(1) as f64;
+    let gated = treble.iter().map(|&b| frames.iter().filter(|f| silent(f, b)).count()).sum::<usize>() as f64 / cells;
+    let low = treble.iter().map(|&b| frames.iter().filter(|f| db(f[b]) < on[b] - 12.0).count()).sum::<usize>() as f64 / cells;
+    Some(EdgeTrack {
+        strong: strong.len(),
+        mode,
+        mode_share: within as f64 / n,
+        edge_at_cut,
+        level_corr: corr(&strong),
+        frontier_share,
+        frontier_at_cut,
+        frontier,
+        frontier_corr: (border.len() >= 50).then(|| corr(&border)),
+        gated_share: gated,
+        gated_rel: low,
+    })
+}
+
+/// The upper edge of the music and the border of digital silence, frame by frame (see `edge_track`).
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct EdgeTrack {
+    /// Frames of the louder half.
+    pub(crate) strong: usize,
+    /// The most common edge under the cutoff (Hz), and the share of the louder frames within 300 Hz of it.
+    #[serde(with = "crate::wire")]
+    pub(crate) mode: f64,
+    #[serde(with = "crate::wire")]
+    pub(crate) mode_share: f64,
+    /// Share of the louder frames whose edge is within 300 Hz of the cutoff (None: no cutoff, or
+    /// too close to the top of the usable bands to tell).
+    #[serde(with = "crate::wire")]
+    pub(crate) edge_at_cut: Option<f64>,
+    /// Correlation of the edge with the level at 1-4 kHz.
+    #[serde(with = "crate::wire")]
+    pub(crate) level_corr: f64,
+    /// Share of the frames with a border of digital silence, the share of those whose border is
+    /// within 300 Hz of the cutoff (None as `edge_at_cut`, or no border), its 10th, 50th and 90th
+    /// percentiles (Hz), and its correlation with the level (None under 50 frames).
+    #[serde(with = "crate::wire")]
+    pub(crate) frontier_share: f64,
+    #[serde(with = "crate::wire")]
+    pub(crate) frontier_at_cut: Option<f64>,
+    #[serde(with = "crate::wire")]
+    pub(crate) frontier: Option<(f64, f64, f64)>,
+    #[serde(with = "crate::wire")]
+    pub(crate) frontier_corr: Option<f64>,
+    /// Share of the 12-20 kHz cells (frame x band) at 16-bit digital silence (6 dB over it at most).
+    #[serde(with = "crate::wire")]
+    pub(crate) gated_share: f64,
+    /// Share of the 12-20 kHz cells 6 dB and more under the band's own floor (its 10th percentile).
+    #[serde(with = "crate::wire")]
+    pub(crate) gated_rel: f64,
 }
 
 /// The 19 kHz peak counts as the FM pilot when it stands this far (dB) above its surroundings.
@@ -921,6 +1083,10 @@ pub(crate) struct Facts {
     /// floor in dB, that floor over digital silence in dB). Empty without enough frames.
     #[serde(with = "crate::wire")]
     pub(crate) masked_bands: Vec<(f64, f64, f64)>,
+    /// The upper edge of the music frame by frame, and the treble cells switched off (None in
+    /// measures recorded before it was kept, and without enough frames).
+    #[serde(default)]
+    pub(crate) edge_track: Option<EdgeTrack>,
     /// The MP3 encoder's rounding pattern, looked for in its own filter bank.
     pub(crate) mp3_trace: Option<crate::mp3trace::Trace>,
     /// The same with AAC's and Opus's transforms. With BT_FACTS every detector is run whether or
@@ -1293,6 +1459,49 @@ fn trace_none(likelihood: f64, threshold: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file lossy by its format is certain, whatever its spectrum's clues make of it.
+    #[test]
+    fn lossy_format_is_certain() {
+        let info = AudioInfo { format: crate::audio::Format::Mka, rate: 48000, bits: 16, channels: 2, samples: 0, md5: None, float: false, codec: Some(crate::audio::Codec::Ac3) };
+        let v = by_format(Path::new("x.mka"), &info);
+        assert_eq!((v.label.as_str(), v.report.confidence), ("Lossy (AC-3)", Some(crate::report::Confidence::High)));
+    }
+
+    /// The border of digital silence above a cut, frame by frame: fixed after an encoder's
+    /// lowpass, moving with the music after a noise reducer that gates the treble.
+    #[test]
+    fn edge_track_fixed_and_moving_border() {
+        let freq = |b: usize| 7050.0 + b as f64 * 100.0;
+        let (bands, frames) = (150, 400);
+        let track = |top: &dyn Fn(f64) -> f64, cutoff: f64| {
+            let (mut kept, mut level) = (Vec::new(), Vec::new());
+            for i in 0..frames {
+                let loudness = ((i * 37) % 31) as f64;
+                level.push((1e-4 * libm::pow(10.0, loudness / 10.0)) as f32);
+                for b in 0..bands {
+                    let hz = freq(b);
+                    // Music falling 2 dB per kHz, digital silence above the border.
+                    kept.push(if hz < top(loudness) { (1e-7 * libm::pow(10.0, (loudness - (hz - 7000.0) / 500.0) / 10.0)) as f32 } else { 1e-14 });
+                }
+            }
+            edge_track(&kept, bands, &level, &freq, &|_| false, -120.0, 22050.0, Some(cutoff)).unwrap()
+        };
+        // An encoder: silence from 16 kHz up in every frame.
+        let fixed = track(&|_| 16000.0, 16000.0);
+        assert_eq!(fixed.frontier_share, 1.0);
+        assert_eq!(fixed.frontier_at_cut, Some(1.0));
+        assert_eq!(fixed.edge_at_cut, Some(1.0));
+        assert_eq!(fixed.frontier.map(|f| f.1), Some(16050.0));
+        // A noise reducer: the louder the music, the higher the silence starts (8 to 17 kHz).
+        let moving = track(&|loudness| 8000.0 + 300.0 * loudness, 17000.0);
+        assert_eq!(moving.frontier_share, 1.0);
+        assert!(moving.frontier_at_cut.is_some_and(|x| x < 0.07), "{moving:?}");
+        assert!(moving.frontier_corr.is_some_and(|c| c > 0.5), "{moving:?}");
+        // A cut too close to the top of the usable bands (21 kHz) cannot be placed.
+        let high = track(&|_| 20900.0, 20900.0);
+        assert_eq!((high.edge_at_cut, high.frontier_at_cut), (None, None));
+    }
 
     /// Music up to 16 kHz over a steady floor; above it the floor alone, rising toward
     /// 19 kHz (noise-shaped dither) or flat (FM hiss).

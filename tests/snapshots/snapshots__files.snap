@@ -6,7 +6,6 @@ expression: text
 37cceb1be477cad76aa69b7a5a78998f  Wav Band 2002-04-04/WAV-cleaned/01 - Extra chunk.wav
 3d642d5d1060edb43738cb8998d53216  Synthetic Band 1990-01-01/Synthetic Band 1990-01-01.st5
 435e9aef7ab555e0842ede8ebda52056  Synthetic Band 1990-01-01 [DIME].torrent
-4be125039a9890deb3f45e4c92bde995  Muffled Band 2001-03-03/01 - Muffled.flac
 4ff3eb4b2435a26050ab3d5a118eb9a4  Synthetic Band 1990-01-01/CD1/02 - Second Song.flac
 5019acbff75631889fb305b2a0282bb1  Wav Band 2002-04-04/01 - Extra chunk.wav
 516b552587e8737357494a3521b252fa  Hires Band 2000-02-02/Hires Band 2000-02-02.ffp
@@ -25,4 +24,6 @@ f3167de021fc5fa63c58a3ef604a9aed  Synthetic Band 1990-01-01 [TTD].torrent
 f44392a6b86c13f5dcedcd236b9773f7  Synthetic Band 1990-01-01/CD2/01 - Encore.flac
 f60a1369d73814ec9c2b094871984e94  Synthetic Band 1990-01-01/SBE-fixed/CD1/02 - Second Song.flac
 f615aba56333c8c0c755afb1d76e0f04  Wav Band 2002-04-04/02 - Plain.wav
+f646f5424def30126b9102ffd0a83820  Muffled Band 2001-03-03/01 - Muffled.flac
+fe920470feb3fb372cf1dc39acbdcaa3  Hushed Band 2002-02-02/01 - Hushed.wav
 ff9f9e51d765de47404f0cc1df968190  Synthetic Band 1990-01-01/CD1/01 - Opening.flac

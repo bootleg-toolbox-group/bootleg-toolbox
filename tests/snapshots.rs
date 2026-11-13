@@ -197,6 +197,65 @@ fn signal(frames: usize, rate: u32, seed: u64, hiss: bool) -> Vec<[f64; 2]> {
         .collect()
 }
 
+/// Treble tones every 50 Hz from 9 kHz up to `top` (excluded), each at the gain `gain(hz, k, t)`.
+fn treble(frames: usize, seed: u64, top: usize, gain: &dyn Fn(f64, usize, f64) -> f64) -> Vec<f64> {
+    let mut noise = Noise(seed);
+    let tones: Vec<(f64, f64, f64)> =
+        (9000..top).step_by(50).map(|hz| (hz as f64, 0.0015 * (0.6 + 0.4 * noise.next().abs()), std::f64::consts::PI * noise.next())).collect();
+    (0..frames)
+        .map(|n| {
+            let t = n as f64 / 44100.0;
+            tones.iter().enumerate().map(|(k, &(hz, a, phase))| a * gain(hz, k, t) * libm::sin(std::f64::consts::TAU * hz * t + phase)).sum()
+        })
+        .collect()
+}
+
+/// The chord of `signal` without hiss, and the treble on top (a little narrower on the right).
+fn with_treble(frames: usize, treble: &[f64]) -> Vec<[f64; 2]> {
+    signal(frames, 44100, 6, false).iter().zip(treble).map(|(s, x)| [s[0] + x, s[1] + 0.8 * x]).collect()
+}
+
+/// A lossy file converted back: a fixed lowpass at 16 kHz with digital silence above it, and
+/// the bands just below it (15.2-15.9 kHz) switched off now and then (encoder holes).
+fn muffled(frames: usize) -> Vec<[f64; 2]> {
+    let gain = |hz: f64, k: usize, t: f64| {
+        if (15200.0..15900.0).contains(&hz) {
+            // Off about once every 3.3 s, smoothly (no splatter above the lowpass).
+            let b = 0.5 + 0.5 * libm::sin(std::f64::consts::TAU * 0.3 * t);
+            let b4 = (b * b) * (b * b);
+            1.0 - b4 * b4
+        } else {
+            0.7 + 0.3 * libm::sin(0.5 * t + k as f64)
+        }
+    };
+    with_treble(frames, &treble(frames, 16, 16000, &gain))
+}
+
+/// A noise reducer: the treble kept under a border that moves with the music (9.5-12.5 kHz);
+/// above it, one tone in two let through now and then, in blocks of 0.2 s cross-faded (musical
+/// noise), up to 16 kHz. Holes and digital silence above, but no fixed lowpass.
+fn hushed(frames: usize) -> Vec<[f64; 2]> {
+    let block = 0.2;
+    let blocks = (frames as f64 / 44100.0 / block) as usize + 2;
+    let on: Vec<Vec<f64>> = (0..140)
+        .map(|k: usize| {
+            let share = if k.is_multiple_of(2) { 0.0 } else if 9000 + 50 * k < 14700 { 0.024 } else { 0.012 };
+            let mut noise = Noise(1000 + k as u64);
+            (0..blocks).map(|_| if (noise.next() + 1.0) / 2.0 < share { 1.0 } else { 0.0 }).collect()
+        })
+        .collect();
+    let gain = |hz: f64, k: usize, t: f64| {
+        let border = 9500.0 + 3000.0 * (0.5 + 0.5 * libm::sin(std::f64::consts::TAU * 0.23 * t));
+        let kept = ((border - hz) / 300.0).clamp(0.0, 1.0);
+        let x = t / block;
+        let j = libm::floor(x) as usize;
+        let fade = 0.5 - 0.5 * libm::cos(std::f64::consts::PI * (x - j as f64));
+        let burst = on[k][j] * (1.0 - fade) + on[k][j + 1] * fade;
+        kept * (0.7 + 0.3 * libm::sin(0.5 * t + k as f64)) + (1.0 - kept) * burst
+    };
+    with_treble(frames, &treble(frames, 17, 16000, &gain))
+}
+
 /// A PCM WAV file, with an extra LIST chunk when `extra` is set.
 fn write_wav(path: &Path, samples: &[[f64; 2]], rate: u32, bits: u16, extra: bool) {
     let width = bits as usize / 8;
@@ -232,6 +291,7 @@ fn write_wav(path: &Path, samples: &[[f64; 2]], rate: u32, bits: u16, extra: boo
 const SHOW: &str = "Synthetic Band 1990-01-01";
 const HIRES: &str = "Hires Band 2000-02-02";
 const MUFFLED: &str = "Muffled Band 2001-03-03";
+const HUSHED: &str = "Hushed Band 2002-02-02";
 const WAVS: &str = "Wav Band 2002-04-04";
 
 /// The shows: a two-disc CD show with sector boundary errors and an info file, a 24/96
@@ -248,7 +308,8 @@ fn make_shows(dir: &Path) {
     )
     .unwrap();
     write_wav(&dir.join(HIRES).join("01 - Hires.wav"), &signal(480_000, 96000, 5, true), 96000, 24, false);
-    write_wav(&dir.join(MUFFLED).join("01 - Muffled.wav"), &signal(441_000, 44100, 6, false), 44100, 16, false);
+    write_wav(&dir.join(MUFFLED).join("01 - Muffled.wav"), &muffled(441_000), 44100, 16, false);
+    write_wav(&dir.join(HUSHED).join("01 - Hushed.wav"), &hushed(441_000), 44100, 16, false);
     write_wav(&dir.join(WAVS).join("01 - Extra chunk.wav"), &signal(220_500, 44100, 7, true), 44100, 16, true);
     write_wav(&dir.join(WAVS).join("02 - Plain.wav"), &signal(220_500, 44100, 8, true), 44100, 16, false);
 }
@@ -290,6 +351,8 @@ fn signals() {
         sum(480_000, 96000, 5, true),
         sum(441_000, 44100, 6, false),
     ];
+    let raw = |name: &str, s: Vec<[f64; 2]>| format!("{}  {name}", hex(&Md5::digest(s.iter().flatten().flat_map(|v| v.to_bits().to_le_bytes()).collect::<Vec<u8>>())));
+    let lines: Vec<String> = lines.into_iter().chain([raw("muffled", muffled(441_000)), raw("hushed", hushed(441_000))]).collect();
     insta::assert_snapshot!("signals", lines.join("\n"));
 }
 
@@ -314,7 +377,7 @@ fn synthetic_shows() {
     snap("test", cli(dir, "test", &all, &[]));
     snap("create", cli(dir, "create", &[SHOW, HIRES], &[("BT_MD5", "1"), ("BT_SFV", "1")]));
     snap("verify", cli(dir, "verify", &[SHOW, HIRES], &[]));
-    snap("lossless", single_verdicts(&cli(dir, "lossless", &all, &[("BT_AAC", "1"), ("BT_REPORT", "1")])));
+    snap("lossless", single_verdicts(&cli(dir, "lossless", &[SHOW, HIRES, MUFFLED, HUSHED, WAVS], &[("BT_AAC", "1"), ("BT_REPORT", "1")])));
     snap("speed", cli(dir, "speed", &[SHOW], &[]));
     snap("media_info", cli(dir, "media-info", &[SHOW], &[]));
     snap("tag_info", cli(dir, "tag-info", &[SHOW], &[("BT_DRY", "1")]));
@@ -340,7 +403,7 @@ fn replay_matches_direct() {
     make_shows(dir);
     // A silent file takes its own way through the decision.
     write_wav(&dir.join("Silent Band 2003-03-03").join("01 - Silence.wav"), &vec![[0.0, 0.0]; 44100], 44100, 16, false);
-    let all = [SHOW, HIRES, MUFFLED, WAVS, "Silent Band 2003-03-03"];
+    let all = [SHOW, HIRES, MUFFLED, HUSHED, WAVS, "Silent Band 2003-03-03"];
     let path_of = |name: &str| dir.join(name).to_str().unwrap().to_string();
     let (normal_facts, forced_facts, back_facts, back_normal_facts) =
         (path_of("normal.jsonl"), path_of("forced.jsonl"), path_of("back.jsonl"), path_of("back-normal.jsonl"));
@@ -369,7 +432,7 @@ fn replay_matches_direct() {
     assert!(normal.contains("Silent"), "{normal}");
     // The measures recorded with every detector replay both modes.
     assert!(forced == replay(&forced_facts, &back_facts, true), "forced replay differs from the forced run");
-    assert!(sorted(&forced_facts) == sorted(&back_facts) && sorted(&forced_facts).len() == 9, "the measures written back differ");
+    assert!(sorted(&forced_facts) == sorted(&back_facts) && sorted(&forced_facts).len() == 10, "the measures written back differ");
     assert!(normal == replay(&forced_facts, &back_normal_facts, false), "normal replay of forced measures differs from the normal run");
     // Measures recorded without the slow searches replay the normal mode, and say so otherwise.
     assert!(normal == replay(&normal_facts, &path_of("again.jsonl"), false), "normal replay differs from the normal run");
