@@ -323,14 +323,24 @@ fn details(f: &Judged) -> Vec<String> {
     details
 }
 
+/// A candidate MP3 grid (C3): the rate over the detector's threshold and a position that stands
+/// out from the others by more than this many robust standard deviations, without reaching the
+/// detector's own (`mp3trace::MIN_CONTRAST`). Set from the contrast of the tracks of known
+/// truth: lossless 7.9 at most (1 054 tracks of the tuning group, Officiels, rolloffbank,
+/// Iron Maiden V10), notes/REFONTE-E7.md.
+pub(crate) const C3_CONTRAST: f64 = 8.5;
+
+pub(crate) fn is_candidate(t: &crate::mp3trace::Trace) -> bool {
+    t.likelihood > crate::mp3trace::THRESHOLD && t.contrast > C3_CONTRAST && !t.found()
+}
+
 /// A clue, by its name in the plan of the decision (notes/PLAN-refonte-decision.md, §1.2).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Id {
-    /// Coding: a grid found (C1), lossyWAV (C2), a candidate grid (C3, not looked for yet), a
+    /// Coding: a grid found (C1), lossyWAV (C2), a candidate grid (C3, §2.3), a
     /// rate over the threshold at every position (C4), a search that found nothing (C5).
     C1(Codec),
     C2,
-    #[allow(dead_code)] // Looked for at a later step of the plan (weak grids).
     C3(Codec),
     C4,
     C5(Codec),
@@ -539,6 +549,23 @@ pub(crate) fn findings(f: &Judged) -> Vec<Finding> {
     let share = |t: &crate::mp3trace::Trace| format!("{:.1} % of the bands, {:.0} standard deviations above chance", t.likelihood * 100.0, t.contrast);
     if let Some(t) = mp3 {
         add(Id::C1(Codec::Mp3), Side::Lossy, Strength::Strong, format!("MP3 coding traces: the sound falls back onto an MP3 encoder's rounding grid ({})", share(&t)));
+    }
+    // A candidate: the rate is over the threshold and the best position stands out, though not
+    // enough to be found. Weak, and never alone: only in an admitted pair, or promoted by the
+    // show (a track whose grid continues another's).
+    if let Some(t) = f.mp3_trace.filter(is_candidate) {
+        add(
+            Id::C3(Codec::Mp3),
+            Side::Lossy,
+            Strength::Weak,
+            format!(
+                "A weak MP3 grid at position {}: {:.1} % of the bands round onto it, {:.1} standard deviations above chance (a grid counts as found from {:.0})",
+                t.offset,
+                t.likelihood * 100.0,
+                t.contrast,
+                crate::mp3trace::MIN_CONTRAST
+            ),
+        );
     }
     if let Some(t) = aac {
         add(Id::C1(Codec::Aac), Side::Lossy, Strength::Strong, format!("AAC coding traces: the sound falls back onto an AAC encoder's rounding grid ({})", share(&t)));
@@ -799,7 +826,11 @@ fn wording(class: &Class, found: &[Finding], f: &Judged) -> (String, Level, Stri
                 (format!("Lossy ({name} traces)"), format!("Decoded from {source}: {detail}"))
             } else {
                 let (a, b) = class.pair.unwrap_or((Id::S1a, Id::S2a));
-                let label = if cut > 0.0 { format!("Lossy {} kHz", khz(cut)) } else { "Lossy (joint-stereo treble)".into() };
+                let label = match (cut > 0.0, upstream) {
+                    (true, true) => format!("Lossy upstream {} kHz", khz(cut)),
+                    (true, false) => format!("Lossy {} kHz", khz(cut)),
+                    _ => "Lossy (joint-stereo treble)".into(),
+                };
                 let head = if pilot { "FM capture of a lossy-coded program" } else { "Lossy source" };
                 (label, format!("{head}: {} and {}, two independent clues that a lossy encoder leaves together", clue(a), clue(b)))
             }
@@ -1151,12 +1182,24 @@ pub(crate) struct TrackDecision {
     pub(crate) capped: bool,
     /// A rate over the threshold at every grid position (C4).
     pub(crate) uniform: bool,
+    /// The MP3 grid of the track when it is found or a candidate, to follow it from one track of
+    /// the show to the next.
+    pub(crate) grid: Option<Grid>,
+}
+
+/// An MP3 grid of one track: where its granules start, how long the track is, and whether the
+/// grid is found (C1) or a candidate (C3).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Grid {
+    pub(crate) offset: usize,
+    pub(crate) samples: u64,
+    pub(crate) found: bool,
 }
 
 impl TrackDecision {
     /// A file lossy by its format (an MP3 in the show).
     pub(crate) fn lossy_format() -> TrackDecision {
-        TrackDecision { state: State::R, cutoff: None, deep_holes: false, hiss: false, capped: false, uniform: false }
+        TrackDecision { state: State::R, cutoff: None, deep_holes: false, hiss: false, capped: false, uniform: false, grid: None }
     }
 
     fn of(class: &Class, found: &[Finding], f: &Facts) -> TrackDecision {
@@ -1168,6 +1211,7 @@ impl TrackDecision {
             hiss: has("S4"),
             capped: has("T1") || has("T3") || has("T4"),
             uniform: has("C4"),
+            grid: f.mp3_trace.filter(|t| t.found() || is_candidate(t)).map(|t| Grid { offset: t.offset, samples: f.samples, found: t.found() }),
         }
     }
 
@@ -1222,6 +1266,70 @@ fn repeated_holes(tracks: &[TrackDecision]) -> Option<Vec<usize>> {
     (same.len() >= 3 && same.len() * 5 >= tracks.len()).then_some(same)
 }
 
+/// Why a candidate grid was promoted.
+#[derive(Clone, Copy)]
+enum Promotion {
+    Continuity,
+    Repeated,
+}
+
+/// The distance on the circle of the 576 positions of an MP3 granule.
+fn grid_distance(a: usize, b: i64) -> i64 {
+    let d = (a as i64 - b).rem_euclid(576);
+    d.min(576 - d)
+}
+
+/// The candidate grids (C3) of a show that are promoted to found (§2.3), as indexes into
+/// `decisions`:
+/// (b) continuity: a track cut from a stream encoded in one piece has its granules where the
+/// previous track's continue: position(next) = position(previous) - length(previous), modulo
+/// 576, within 2. Consecutive tracks linked this way make a run; the candidates of a run are
+/// promoted when it holds a grid found or three candidates (a chance link is 5 in 576);
+/// (c) repetition: half the tracks of the show or more have a grid found.
+/// The persistence of a grid across the windows of a track, which the plan listed as (a),
+/// was measured and abandoned (notes/REFONTE-E7.md).
+fn promoted_grids(tracks: &[TrackResult], idx: &[usize], decisions: &[TrackDecision]) -> Vec<(usize, Promotion)> {
+    let m = decisions.len();
+    let mut out: Vec<(usize, Promotion)> = Vec::new();
+    // The tracks in the order of the show.
+    let mut order: Vec<usize> = (0..m).collect();
+    order.sort_by(|&a, &b| crate::files::natural_cmp(&tracks[idx[a]].name, &tracks[idx[b]].name));
+    let mut run: Vec<usize> = Vec::new();
+    let close = |run: &mut Vec<usize>, out: &mut Vec<(usize, Promotion)>| {
+        let found = run.iter().filter(|&&k| decisions[k].grid.is_some_and(|g| g.found)).count();
+        let candidates: Vec<usize> = run.iter().copied().filter(|&k| decisions[k].grid.is_some_and(|g| !g.found)).collect();
+        if !candidates.is_empty() && (found >= 1 || candidates.len() >= 3) {
+            out.extend(candidates.into_iter().map(|k| (k, Promotion::Continuity)));
+        }
+        run.clear();
+    };
+    for &k in &order {
+        let Some(g) = decisions[k].grid.filter(|g| g.samples > 0) else {
+            close(&mut run, &mut out);
+            continue;
+        };
+        if let Some(&prev) = run.last() {
+            let p = decisions[prev].grid.unwrap();
+            if grid_distance(g.offset, p.offset as i64 - p.samples as i64) > 2 {
+                close(&mut run, &mut out);
+            }
+        }
+        run.push(k);
+    }
+    close(&mut run, &mut out);
+    // (c) half the show has a grid found: its candidates are promoted too.
+    let found = decisions.iter().filter(|d| d.grid.is_some_and(|g| g.found)).count();
+    if found > 0 && found * 2 >= m {
+        for (k, d) in decisions.iter().enumerate() {
+            if d.grid.is_some_and(|g| !g.found) && !out.iter().any(|o| o.0 == k) {
+                out.push((k, Promotion::Repeated));
+            }
+        }
+    }
+    out.sort_by_key(|o| o.0);
+    out
+}
+
 /// The coherence pass over a show's tracks (§1.6): it never makes a track red from the context
 /// alone, except encoder holes repeated at one cutoff. (The promotion of candidate grids comes
 /// with them.) Returns the lines it adds to the show's reasoning.
@@ -1233,6 +1341,24 @@ fn coherence(tracks: &mut [TrackResult]) -> Vec<String> {
     if m == 0 {
         return said;
     }
+    // Candidate grids that the show confirms (§2.3): by the continuity of the grid from one track
+    // to the next (b), or because half the show has a grid found (c).
+    let promoted = promoted_grids(tracks, &idx, &decisions);
+    if !promoted.is_empty() {
+        let found = decisions.iter().filter(|d| d.grid.is_some_and(|g| g.found)).count();
+        for &(k, why) in &promoted {
+            let t = &mut tracks[idx[k]];
+            let reason = match why {
+                Promotion::Continuity => "its MP3 grid continues, from the previous track to the next, the grid of the tracks around it: the show was encoded in one piece".to_string(),
+                Promotion::Repeated => format!("{found} of the {m} tracks of the show have an MP3 grid found, and this one has a weak grid"),
+            };
+            let sentence = format!("Decoded from an MP3: a weak grid, confirmed by the show ({reason})");
+            t.report.reasoning.push(format!("Weak MP3 grid confirmed by the show: {reason}."));
+            t.set(State::R, "Lossy (MP3 traces)".into(), Level::Error, sentence);
+        }
+        said.push(format!("{} track(s) with a weak MP3 grid are confirmed as lossy by the show.", promoted.len()));
+    }
+    let decisions: Vec<TrackDecision> = idx.iter().filter_map(|&i| tracks[i].decision).collect();
     // Encoder holes repeated on several tracks at the same cutoff: one encoder for the show.
     if let Some(same) = repeated_holes(&decisions) {
         let n = same.len();
@@ -1412,7 +1538,7 @@ mod tests {
     }
 
     fn grid(likelihood: f64, contrast: f64) -> Trace {
-        Trace { likelihood, contrast, offset: 100, mid_side: false, median: 0.01, sigma: 0.002, second: 0.02 }
+        Trace { likelihood, contrast, offset: 100, mid_side: false, median: 0.01, sigma: 0.002, second: 0.02, ..Default::default() }
     }
 
     /// The shape of the lowpass (family F) never decides: a gradual roll-off and a wall over the
@@ -1441,7 +1567,7 @@ mod tests {
         f.wasted = vec![0, 50, u32::MAX];
         f.intensity = IntensityStats { frames: 300, loud: 150, mid_mean: f64::NAN, locked: vec![1, 2, 3] };
         f.masked_bands = vec![(13050.0, 2.5, 29.999999999999996), (13150.0, f64::INFINITY, -0.0)];
-        f.mp3_trace = Some(Trace { likelihood: 0.025000000000000005, offset: 358, mid_side: true, contrast: 9.999999999999998, median: 0.1, sigma: 1e-4, second: 0.3 });
+        f.mp3_trace = Some(Trace { likelihood: 0.025000000000000005, offset: 358, mid_side: true, contrast: 9.999999999999998, median: 0.1, sigma: 1e-4, second: 0.3, ..Default::default() });
         f.searched = true;
         let text = serde_json::to_string(&f).unwrap();
         assert!(text.contains(r#""drop":"NaN""#) && text.contains(r#""holes":"inf""#) && !text.contains(r#""drop":null"#), "{text}");
@@ -1981,9 +2107,156 @@ mod tests {
             level,
             sentence: "As measured".into(),
             report: Report::default(),
-            decision: Some(TrackDecision { state, cutoff, deep_holes, hiss, capped, uniform: false }),
+            decision: Some(TrackDecision { state, cutoff, deep_holes, hiss, capped, uniform: false, grid: None }),
             changed: false,
         }
+    }
+
+    /// A track of a show cut from a stream: named by its number, with the MP3 grid it shows
+    /// (position of the granules, length of the track, found or only a candidate).
+    fn grid_track(number: usize, state: State, grid: Option<(usize, u64, bool)>) -> TrackResult {
+        let mut t = track(state, None, false, false, false);
+        t.name = format!("{number:02}.flac");
+        if let Some((offset, samples, found)) = grid {
+            t.decision.as_mut().unwrap().grid = Some(Grid { offset, samples, found });
+        }
+        t
+    }
+
+    /// The tracks of a show that was encoded in one piece and cut again: each track's granules
+    /// start where the previous track's continue, so position(next) = position(previous) -
+    /// length(previous) modulo 576. `found[i]`: whether the grid of track i is found, or only a
+    /// candidate; None: no grid. Lengths are not multiples of 576.
+    fn stream(found: &[Option<bool>]) -> Vec<TrackResult> {
+        let lengths = [3_000_001u64, 2_900_117, 3_100_333, 2_800_059, 3_200_747, 2_700_911];
+        let mut offset = 528i64;
+        found
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                let t = match f {
+                    Some(found) => grid_track(i + 1, if *found { State::R } else { State::L1 }, Some((offset as usize, lengths[i % 6], *found))),
+                    None => grid_track(i + 1, State::L1, None),
+                };
+                offset = (offset - lengths[i % 6] as i64).rem_euclid(576);
+                t
+            })
+            .collect()
+    }
+
+    fn promoted(tracks: &[TrackResult]) -> Vec<usize> {
+        tracks.iter().enumerate().filter(|(_, t)| t.changed && t.label == "Lossy (MP3 traces)").map(|(i, _)| i).collect()
+    }
+
+    /// (b) A candidate grid that continues a grid found on the next or previous track is the
+    /// same encoder's: promoted. A candidate whose position does not follow is not.
+    #[test]
+    fn grid_continuity_promotes_a_candidate_next_to_a_found_grid() {
+        let mut t = stream(&[Some(true), Some(false), None, None]);
+        show(&mut t);
+        assert_eq!(promoted(&t), [1]);
+        assert!(t[1].sentence.contains("continues"), "{}", t[1].sentence);
+        // The same candidate, 40 positions off: not linked, nothing promoted (a quarter of the
+        // show has a grid found, under half).
+        let mut t = stream(&[Some(true), Some(false), None, None]);
+        let g = t[1].decision.as_mut().unwrap().grid.as_mut().unwrap();
+        g.offset = (g.offset + 40) % 576;
+        show(&mut t);
+        assert!(promoted(&t).is_empty());
+        // Within 2 positions: still the same grid.
+        let mut t = stream(&[Some(true), Some(false), None, None]);
+        let g = t[1].decision.as_mut().unwrap().grid.as_mut().unwrap();
+        g.offset = (g.offset + 2) % 576;
+        show(&mut t);
+        assert_eq!(promoted(&t), [1]);
+        // Tracks are taken in the order of the show, not in the order they finished.
+        let mut t = stream(&[Some(true), Some(false), None, None]);
+        t.swap(0, 3);
+        show(&mut t);
+        assert_eq!(promoted(&t).len(), 1);
+    }
+
+    /// A real case, generated/splitmp3/pantera-320-ffmpeg (9 tracks of a lossless concert encoded
+    /// in one piece at 320 kbps with LAME, decoded with ffmpeg, cut at the original boundaries):
+    /// 4 grids found, 4 candidates, 1 track without; the position law holds on every pair, and
+    /// the 4 candidates are promoted (three after the first track, one after the eighth).
+    #[test]
+    fn grid_continuity_on_a_real_stream() {
+        let measured = [
+            (528, 3391448, Some(true)),
+            (568, 3399367, Some(false)),
+            (177, 3407286, Some(false)),
+            (507, 3415205, Some(false)),
+            (406, 3423124, Some(true)),
+            (450, 3431043, Some(true)),
+            (63, 3438962, None),
+            (397, 3446881, Some(true)),
+            (300, 3454800, Some(false)),
+        ];
+        let mut t: Vec<TrackResult> = measured
+            .iter()
+            .enumerate()
+            .map(|(i, &(offset, samples, found))| match found {
+                Some(found) => grid_track(i + 1, if found { State::R } else { State::L1 }, Some((offset, samples, found))),
+                None => grid_track(i + 1, State::L1, None),
+            })
+            .collect();
+        show(&mut t);
+        assert_eq!(promoted(&t), [1, 2, 3, 8]);
+        // The track without a grid is not lossless either, the rest of the show being lossy.
+        assert_eq!(t[6].label, "Unclear");
+    }
+
+    /// (b) Three candidates that follow one another are promoted without any grid found; two are
+    /// not (a chance link between two positions of 576 is 5 in 576).
+    #[test]
+    fn grid_continuity_of_three_candidates() {
+        let mut t = stream(&[Some(false), Some(false), Some(false), None, None, None]);
+        show(&mut t);
+        assert_eq!(promoted(&t), [0, 1, 2]);
+        let mut t = stream(&[Some(false), Some(false), None, None, None, None]);
+        show(&mut t);
+        assert!(promoted(&t).is_empty());
+        // A track without a grid between breaks the chain.
+        let mut t = stream(&[Some(false), Some(false), None, Some(false), None, None]);
+        show(&mut t);
+        assert!(promoted(&t).is_empty());
+    }
+
+    /// (c) Half the show has a grid found: the candidates of the show are promoted, linked or
+    /// not; under half, not.
+    #[test]
+    fn grid_repetition_promotes_the_candidates_of_the_show() {
+        let mut t = stream(&[Some(true), Some(true), Some(false), None]);
+        t[2].decision.as_mut().unwrap().grid.as_mut().unwrap().offset = 7;
+        show(&mut t);
+        assert_eq!(promoted(&t), [2]);
+        assert!(t[2].sentence.contains("2 of the 4 tracks"), "{}", t[2].sentence);
+        let mut t = stream(&[Some(true), None, Some(false), None, None]);
+        t[2].decision.as_mut().unwrap().grid.as_mut().unwrap().offset = 7;
+        show(&mut t);
+        assert!(promoted(&t).is_empty());
+    }
+
+    /// A candidate grid is a weak clue: alone it changes nothing; with encoder holes it is the
+    /// admitted pair.
+    #[test]
+    fn candidate_grid_is_weak_and_alone_changes_nothing() {
+        let candidate = Trace { likelihood: 0.026, contrast: 9.3, offset: 528, median: 0.014, sigma: 0.0012, second: 0.018, ..Default::default() };
+        assert!(is_candidate(&candidate));
+        // Found (10 and more), or not enough contrast (8.5 and less), or a rate under the threshold: not.
+        assert!(!is_candidate(&Trace { contrast: 10.0, ..candidate }));
+        assert!(!is_candidate(&Trace { contrast: 8.5, ..candidate }));
+        assert!(!is_candidate(&Trace { likelihood: 0.025, ..candidate }));
+        let base = Facts { rate: 44100.0, frames: 100, ..Default::default() };
+        let with = Facts { mp3_trace: Some(candidate), ..base.clone() };
+        let (plain, candidate_only) = (verdict(&base), verdict(&with));
+        assert_eq!((candidate_only.label.as_str(), candidate_only.level), (plain.label.as_str(), plain.level));
+        assert!(candidate_only.report.to_text().contains("A weak MP3 grid at position 528"), "{}", candidate_only.report.to_text());
+        // With encoder holes under a lowpass: a pair, lossy.
+        let holes = Facts { cutoff: Some(16000.0), holes: Some(16.0), above_floor: Some(30.0), high_floor: Some(30.0), ..with.clone() };
+        let v = verdict(&holes);
+        assert_eq!((v.label.as_str(), v.level), ("Lossy upstream 16.0 kHz", Level::Error), "{}", v.sentence);
     }
 
     fn show(tracks: &mut [TrackResult]) -> ShowDecision {

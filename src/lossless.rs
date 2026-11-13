@@ -303,6 +303,8 @@ impl Spectra {
 /// What one reading of the file measured (the AAC and Opus windows are collected in any
 /// case: a doubtful verdict is then drawn again with them, without reading the file again).
 struct Measured {
+    /// Length of the file in sample frames, from its header.
+    samples: u64,
     rate: f64,
     bins: usize,
     band: usize,
@@ -438,6 +440,7 @@ fn measure(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<Measure
     let Spectra { power, kept, intensity, side_vs_mid } = spectra;
     let mp3_trace = mp3.and_then(|m| m.detect(info.rate));
     Ok(Measured {
+        samples: info.samples,
         rate,
         bins,
         band,
@@ -465,7 +468,7 @@ fn measure(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<Measure
 /// `all`: whichever of them is made covers every detector, even where the decision would not
 /// look at the result (BT_FACTS records everything, so that a replay can gate as it chooses).
 fn facts(info: &AudioInfo, m: &Measured, aac_check: bool, all: bool) -> Facts {
-    let Measured { rate, bins, band, bin_hz, kept_lo, kept_hi, frames, check_low, low_bits, comb_check, mp3_trace, .. } = *m;
+    let Measured { samples, rate, bins, band, bin_hz, kept_lo, kept_hi, frames, check_low, low_bits, comb_check, mp3_trace, .. } = *m;
     let (window, kept, intensity, side_vs_mid, wasted, histogram) = (&m.window, &m.kept, &m.intensity, &m.side_vs_mid, &m.wasted, &m.histogram);
     let band_freq = |b: usize| (b * band) as f64 * bin_hz + (band - 1) as f64 * bin_hz / 2.0;
     let mut power = m.power.clone();
@@ -475,7 +478,7 @@ fn facts(info: &AudioInfo, m: &Measured, aac_check: bool, all: bool) -> Facts {
     let aac_found = aac_trace.is_some_and(|t| crate::aactrace::found(&t));
     let opus_trace = if !aac_check || ((mp3_found || aac_found) && !all) { None } else { m.opus.clone().and_then(|o| o.detect()) };
     if frames == 0 {
-        return Facts { rate, frames: 0, mp3_trace, searched: aac_check, ..Default::default() };
+        return Facts { rate, samples, frames: 0, mp3_trace, searched: aac_check, ..Default::default() };
     }
 
     for p in power.iter_mut() {
@@ -678,6 +681,7 @@ fn facts(info: &AudioInfo, m: &Measured, aac_check: bool, all: bool) -> Facts {
         .flatten();
     Facts {
         rate,
+        samples,
         frames,
         cutoff,
         drop: best_drop,
@@ -859,6 +863,9 @@ fn rolloff(kept: &[f32], kept_bands: usize, freq: &dyn Fn(usize) -> f64, skip: &
 pub(crate) struct Facts {
     #[serde(with = "crate::wire")]
     pub(crate) rate: f64,
+    /// Length of the file in sample frames (0 in measures recorded before this was kept).
+    #[serde(default)]
+    pub(crate) samples: u64,
     /// Blocks analysed (0: digital silence only).
     pub(crate) frames: usize,
     /// The steepest drop above 10 kHz, when it is a lowpass (a wall of 20 dB and more with the

@@ -48,6 +48,13 @@ pub struct Trace {
     pub sigma: f64,
     #[serde(with = "crate::wire")]
     pub second: f64,
+    /// The windows analysed (the loudest of the file, 16 at most) and, for each, the position
+    /// (0-575) where its own rate is highest: a real grid comes first in many of them. Zero
+    /// windows in measures recorded before this was kept, and for the AAC search.
+    #[serde(default)]
+    pub windows: u8,
+    #[serde(default)]
+    pub window_best: [u16; WINDOWS],
 }
 
 impl Trace {
@@ -177,28 +184,36 @@ impl Collector {
             })
             .collect();
         // Every position on its own (in parallel), then taken in order as before.
-        let likelihoods: Vec<Vec<f64>> = (0..GRANULE)
+        // Per position: the rate of each channel mode over all windows, and the best rate of any
+        // mode in each window on its own.
+        let rates: Vec<(Vec<f64>, Vec<f64>)> = (0..GRANULE)
             .into_par_iter()
             .map(|offset| {
-                slots
+                let mut per_window = vec![0f64; segments.len()];
+                let pooled = slots
                     .chunks(segments.len())
                     .map(|per_segment| {
                         let (mut hits, mut total) = (0usize, 0usize);
-                        for seg_slots in per_segment {
+                        for (w, seg_slots) in per_segment.iter().enumerate() {
                             // granule1 starts at `offset` in the segment (granules 1 to 3 then follow).
                             let (h, t) = tables.window(&seg_slots[offset..]);
                             hits += h;
                             total += t;
+                            if t > 0 {
+                                per_window[w] = per_window[w].max(h as f64 / t as f64);
+                            }
                         }
                         if total > 0 { hits as f64 / total as f64 } else { 0.0 }
                     })
-                    .collect()
+                    .collect();
+                (pooled, per_window)
             })
             .collect();
+        let likelihoods: Vec<&Vec<f64>> = rates.iter().map(|r| &r.0).collect();
         let mut best = Trace::default();
         let mut per_offset = vec![0f64; GRANULE];
         for (offset, row) in likelihoods.iter().enumerate() {
-            for (&(mid_side, _), &likelihood) in modes.iter().zip(row) {
+            for (&(mid_side, _), &likelihood) in modes.iter().zip(row.iter()) {
                 per_offset[offset] = per_offset[offset].max(likelihood);
                 if likelihood > best.likelihood {
                     best = Trace { likelihood, offset, mid_side, ..Default::default() };
@@ -214,6 +229,17 @@ impl Collector {
         let sigma = (1.4826 * dev[dev.len() / 2]).max(1e-4);
         best.contrast = (best.likelihood - median) / sigma;
         (best.median, best.sigma, best.second) = (median, sigma, others[others.len() - 1]);
+        best.windows = segments.len().min(WINDOWS) as u8;
+        for w in 0..best.windows as usize {
+            // The first position with the window's highest rate.
+            let mut top = (0usize, f64::NEG_INFINITY);
+            for (offset, r) in rates.iter().enumerate() {
+                if r.1[w] > top.1 {
+                    top = (offset, r.1[w]);
+                }
+            }
+            best.window_best[w] = top.0 as u16;
+        }
         Some(best)
     }
 }
