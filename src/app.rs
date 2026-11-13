@@ -2093,14 +2093,23 @@ impl App {
                         self.log.push((text, level));
                     }
                     Msg::Status { path, text, level, tooltip } => {
-                        match level {
-                            Level::Ok => running.tally[0] += 1,
-                            Level::Warn => running.tally[1] += 1,
-                            Level::Error => running.tally[2] += 1,
-                            Level::Info => {}
+                        let slot = |level: Level| match level {
+                            Level::Ok => Some(0),
+                            Level::Warn => Some(1),
+                            Level::Error => Some(2),
+                            Level::Info => None,
+                        };
+                        // A file counts once, with its last result (Verify completes its line as
+                        // each checksum file is read).
+                        if !running.updated.insert(path.clone()) {
+                            if let Some(i) = self.status.get(&path).and_then(|s| slot(s.1)) {
+                                running.tally[i] = running.tally[i].saturating_sub(1);
+                            }
+                        }
+                        if let Some(i) = slot(level) {
+                            running.tally[i] += 1;
                         }
                         running.done_files.insert(path.clone());
-                        running.updated.insert(path.clone());
                         if !running.quiet {
                             self.fresh.insert(path.clone(), Instant::now());
                         }
