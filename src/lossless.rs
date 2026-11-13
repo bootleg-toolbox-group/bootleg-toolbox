@@ -765,6 +765,7 @@ pub(crate) fn no_hires(cutoff: Option<f64>, origin: Option<f64>) -> String {
             c / 1000.0,
             crate::audio::trim_float(r / 1000.0)
         ),
+        (Some(c), None) => format!("no content above {:.1} kHz: upsampled, or an analog source transferred at a high rate", c / 1000.0),
         _ => "no content above 22-24 kHz: upsampled, or an analog source transferred at a high rate".into(),
     }
 }

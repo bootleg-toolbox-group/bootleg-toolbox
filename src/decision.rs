@@ -199,8 +199,11 @@ impl<'a> Judged<'a> {
         // A wall where a lower sample rate's band ends (a resampler's filter), even when clipped
         // inter-sample peaks put some noise above it: the rate the file was upsampled from.
         let origin = f.cutoff.filter(|_| f.rate >= 88200.0).and_then(source_rate).filter(|&r| r * 1.5 < f.rate);
-        // Real content stops around 20-24 kHz in a hi-res file.
-        let upsampled = f.hires.is_some_and(|h| h.low - h.high >= 40.0 && h.tail.unwrap_or(f64::INFINITY) <= h.high + 15.0) || origin.is_some();
+        // Real content stops around 20-24 kHz in a hi-res file. A wall below 30 kHz followed by an
+        // empty floor counts as well, whatever the resampler's images do just above it (ffmpeg's
+        // leave a tail 15 dB under the music at 25.7 kHz).
+        let walled = f.rate >= 88200.0 && f.cutoff.is_some_and(|c| c < 30000.0) && f.hires.is_some_and(|h| h.low - h.high >= 40.0);
+        let upsampled = f.hires.is_some_and(|h| h.low - h.high >= 40.0 && h.tail.unwrap_or(f64::INFINITY) <= h.high + 15.0) || origin.is_some() || walled;
         // A 48 kHz file whose content stops dead at the top of a 44.1 kHz band, with digital
         // silence above: possibly upsampled from 44.1 kHz (a 48 kHz converter's own filter may cut
         // there too, so only said).
@@ -1485,6 +1488,22 @@ mod tests {
         assert!(judge(Hires { low: -60.0, high: -110.0, tail: Some(-100.0) }));
         assert!(!judge(Hires { low: -60.0, high: -110.0, tail: Some(-90.0) }));
         assert!(!judge(Hires { low: -60.0, high: -90.0, tail: Some(-100.0) }));
+        // ffmpeg's 88.2 kHz files (fakehires s06-s08): a wall at 25.7 kHz, an empty floor above,
+        // and a tail of the resampler's images only 16 dB over it: upsampled all the same, said
+        // with the measured edge and both causes.
+        let walled = |rate: f64, cutoff: Option<f64>, h: Hires| Judged::new(&Facts { rate, cutoff, hires: Some(h), ..Default::default() }, false).upsampled;
+        let images = Hires { low: -8.6, high: -97.3, tail: Some(-81.2) };
+        assert!(walled(88200.0, Some(25721.0), images));
+        assert!(walled(96000.0, Some(25781.0), images));
+        // No wall found (an authentic hi-res file), a wall at 30 kHz or more, a floor that is
+        // not empty, or a lower rate: not decided by this rule.
+        assert!(!walled(88200.0, None, images));
+        assert!(!walled(88200.0, Some(31000.0), images));
+        assert!(!walled(88200.0, Some(25721.0), Hires { low: -8.6, high: -40.0, tail: Some(-35.0) }));
+        assert!(!walled(48000.0, Some(25721.0), images));
+        let message = no_hires(Some(25721.0), None);
+        assert_eq!(message, "no content above 25.7 kHz: upsampled, or an analog source transferred at a high rate");
+        assert!(!message.contains("22-24"));
     }
 
     /// Music up to 16 kHz over a steady floor; above it the floor alone, rising toward
