@@ -83,6 +83,11 @@ pub struct Collector {
     kept: Vec<(f64, Vec<[f32; 2]>)>,
     /// The kept windows still being filled.
     filling: Vec<usize>,
+    /// Windows kept at most (the loudest).
+    keep: usize,
+    /// The first frame is a partial one (the collector starts in the middle of a frame of the
+    /// file): it is skipped, so that the frames keep the file's own alignment.
+    partial: bool,
 }
 
 impl Collector {
@@ -92,7 +97,25 @@ impl Collector {
     }
 
     pub(crate) fn with(channels: usize, frame: usize, frames: usize) -> Self {
-        Collector { channels: channels.min(2), frame, frames, ring: vec![[0.0; 2]; 2 * frame], head: 0, energy: [0.0; 2], frame_len: 0, count: 0, kept: Vec::new(), filling: Vec::new() }
+        Collector { channels: channels.min(2), frame, frames, ring: vec![[0.0; 2]; 2 * frame], head: 0, energy: [0.0; 2], frame_len: 0, count: 0, kept: Vec::new(), filling: Vec::new(), keep: WINDOWS, partial: false }
+    }
+
+    /// A collector that keeps only the `keep` loudest windows (the segments of a file, E9).
+    /// `phase`: the samples of the file already read in the frame it starts in (its position
+    /// modulo the frame size), so that the windows start where the codec's frames do.
+    pub(crate) fn with_keep(channels: usize, frame: usize, frames: usize, keep: usize, phase: usize) -> Self {
+        Collector { keep, frame_len: phase % frame, partial: !phase.is_multiple_of(frame), ..Self::with(channels, frame, frames) }
+    }
+
+    /// The windows that could be completed, with their energy (the loudest first is not promised).
+    pub(crate) fn into_windows(self) -> Vec<(f64, Vec<[f32; 2]>)> {
+        let full = self.frames * self.frame;
+        self.kept.into_iter().filter(|(e, s)| *e > 0.0 && s.len() == full).collect()
+    }
+
+    /// A collector holding the given windows (what `detect` runs on).
+    pub(crate) fn from_windows(channels: usize, frame: usize, frames: usize, windows: Vec<(f64, Vec<[f32; 2]>)>) -> Self {
+        Collector { kept: windows, ..Self::with(channels, frame, frames) }
     }
 
     /// One sample frame (one value per channel, -1.0..1.0).
@@ -112,7 +135,9 @@ impl Collector {
         self.head = (self.head + 1) % (2 * self.frame);
         self.energy[1] += mid * mid;
         self.frame_len += 1;
-        if self.frame_len == self.frame {
+        if self.frame_len == self.frame && self.partial {
+            (self.partial, self.frame_len, self.energy) = (false, 0, [0.0; 2]);
+        } else if self.frame_len == self.frame {
             self.count += 1;
             // A window of the last 2 frames is complete: keep it if it is among the loudest.
             if self.count >= 2 {
@@ -124,7 +149,7 @@ impl Collector {
                     seg
                 };
                 let weakest = self.kept.iter().enumerate().min_by(|a, b| a.1 .0.total_cmp(&b.1 .0)).map(|(i, k)| (i, k.0));
-                let replaced = if self.kept.len() < WINDOWS {
+                let replaced = if self.kept.len() < self.keep {
                     self.kept.push((e, snapshot()));
                     Some(self.kept.len() - 1)
                 } else if let Some((i, _)) = weakest.filter(|(_, low)| e > *low) {
@@ -242,6 +267,51 @@ impl Collector {
         }
         Some(best)
     }
+}
+
+/// The rounding-error hits of one window at the given grid positions, for each of the two channel
+/// modes of a class (left and right, or mid and side): (hits, bands tried) per position and mode.
+/// The detector's own test at a few positions instead of all 576 (E9: a segment of the file
+/// against the grid found in the whole file). None at a rate MP3 does not use.
+pub(crate) fn probe(window: &[[f32; 2]], channels: usize, rate: u32, mid_side: bool, offsets: &[usize]) -> Option<Vec<[(usize, usize); 2]>> {
+    thread_local! {
+        static TABLES: std::cell::RefCell<Option<(u32, std::rc::Rc<Tables>)>> = const { std::cell::RefCell::new(None) };
+    }
+    let tables = TABLES.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        if let Some((r, t)) = cell.as_ref() {
+            if *r == rate {
+                return Some(t.clone());
+            }
+        }
+        let t = std::rc::Rc::new(Tables::new(&Bands::for_rate(rate)?));
+        *cell = Some((rate, t.clone()));
+        Some(t)
+    })?;
+    let takes: [fn([f32; 2]) -> f64; 2] = match (channels == 2, mid_side) {
+        (false, _) => [|f| f[0] as f64, |f| f[0] as f64],
+        (true, false) => [|f| f[0] as f64, |f| f[1] as f64],
+        (true, true) => [|f| (f[0] as f64 + f[1] as f64) / 2.0, |f| (f[0] as f64 - f[1] as f64) / 2.0],
+    };
+    if window.len() < FIRST_SLOT + (GRANULE - 1) + 35 * 32 + 512 {
+        return None;
+    }
+    let mut slots = vec![[0f64; 32]; 1 + 35 * 32];
+    let out = offsets
+        .iter()
+        .map(|&offset| {
+            let mut row = [(0usize, 0usize); 2];
+            for (m, take) in takes.iter().enumerate() {
+                let x: Vec<f64> = window[FIRST_SLOT + offset..FIRST_SLOT + offset + 35 * 32 + 512].iter().map(|f| take(*f)).collect();
+                for k in 0..36 {
+                    slots[32 * k] = tables.slot(&x[32 * k..32 * k + 512]);
+                }
+                row[m] = tables.window(&slots);
+            }
+            row
+        })
+        .collect();
+    Some(out)
 }
 
 /// A channel to analyse: whether it is a mid/side one, and how to take it from (L, R).

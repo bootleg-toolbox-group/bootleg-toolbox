@@ -1172,13 +1172,28 @@ pub(crate) fn decide(path: &Path, f: &Facts, aac_check: bool) -> Verdict {
     let found = findings(&j);
     let class = classify(&found);
     let (label, level, sentence) = wording(&class, &found, &j);
+    let part = part_call(f, class.state, aac_check);
+    let (label, level, sentence) = match &part {
+        Some(p) => (p.label.clone(), p.level, p.sentence.clone()),
+        None => (label, level, sentence),
+    };
     let mut verdict = Verdict::new(label, sentence, level, details);
     let mut report = build_report(crate::files::file_name(path), &verdict, &j);
     report.evidence = found.iter().map(|x| Evidence { family: x.id.family(), side: x.side, strength: x.strength, text: x.text.clone() }).collect();
     report.reasoning = reasoning(&class, &found, &j);
     report.confidence = Some(class.state.confidence());
+    let mut track = TrackDecision::of(&class, &found, f);
+    if let Some(p) = part {
+        report.reasoning.insert(0, p.reasoning);
+        report.evidence.splice(0..0, p.evidence);
+        report.confidence = Some(p.state.confidence());
+        track.state = p.state;
+    }
     verdict.report = report;
-    verdict.track = Some(TrackDecision::of(&class, &found, f));
+    verdict.track = Some(track);
+    if !f.segments.is_empty() {
+        write_parts(path, f, &verdict.label, class.state, aac_check);
+    }
     if std::env::var_os("BT_FACTS").is_some() {
         verdict.facts = Some(f.clone());
     }
@@ -1199,6 +1214,141 @@ pub(crate) fn decide(path: &Path, f: &Facts, aac_check: bool) -> Verdict {
         || (found.iter().any(|x| x.id == Id::O1) && stream_lowpass)
         || found.iter().any(|x| matches!(x.id, Id::C3(_)));
     verdict
+}
+
+/// Whether hiss goes on above the cutoff of these measures (S4): an analog stage came after the
+/// last coding, and no coding grid survives one (amendment 6 and 16).
+pub(crate) fn hiss_above_cutoff(f: &Facts) -> bool {
+    let j = Judged::new(f, false);
+    findings(&j).iter().any(|x| matches!(x.id, Id::S4 { .. }))
+}
+
+/// The slices of the variant that decides (§1.5, E9): 10 s, each starting 5 s after the last.
+const PART_SIZE: f64 = 10.0;
+/// A part counts from this many slices.
+const PART_SLICES: u32 = 2;
+
+/// "mm:ss" (minutes go past 59 for a long file).
+fn mmss(t: f64) -> String {
+    let s = libm::round(t) as u64;
+    format!("{:02}:{:02}", s / 60, s % 60)
+}
+
+/// What a lossy part of a file that is not lossy as a whole turns the track into (§1.5).
+struct PartCall {
+    state: State,
+    label: String,
+    level: Level,
+    sentence: String,
+    reasoning: String,
+    evidence: Vec<Evidence>,
+}
+
+/// A part of at least 2 slices (10 s, 50 % overlap) that is red or orange when measured as a file
+/// of its own, in a file that is neither: the track takes the state of the part, named by its
+/// time span. The worst part, the longest of equals.
+fn part_call(f: &Facts, whole: State, aac_check: bool) -> Option<PartCall> {
+    if matches!(whole, State::R | State::O) {
+        return None;
+    }
+    type Chosen<'a> = (u8, f64, &'a crate::lossless::segments::Part, Class, Vec<Finding>, (String, Level, String));
+    let mut best: Option<Chosen> = None;
+    for p in f.segments.iter().filter(|p| p.size == PART_SIZE && p.overlap && p.slices >= PART_SLICES && p.facts.frames > 0) {
+        let j = Judged::new(&p.facts, aac_check);
+        let found = findings(&j);
+        let class = classify(&found);
+        // A part is judged on 10 to 30 s, with statistics more fragile than a whole file's: it is red
+        // only with a coding trace of its own (C1 or C2); a pair of spectral clues makes it orange.
+        let coded = found.iter().any(|x| matches!(x.id, Id::C1(_) | Id::C2));
+        let class = match class.state {
+            State::R if !coded => Class { state: State::O, ..class },
+            _ => class,
+        };
+        let rank = match class.state {
+            State::R => 2,
+            State::O => 1,
+            _ => continue,
+        };
+        let length = p.t1 - p.t0;
+        if best.as_ref().is_none_or(|b| (rank, length) > (b.0, b.1)) {
+            let words = wording(&class, &found, &j);
+            best = Some((rank, length, p, class, found, words));
+        }
+    }
+    let (_, _, p, class, found, (_, level, sentence)) = best?;
+    let span = format!("{}–{}", mmss(p.t0), mmss(p.t1));
+    let (name, what) = if class.state == State::R { ("Lossy part", "is lossy") } else { ("Lossy? part", "may be lossy") };
+    Some(PartCall {
+        state: class.state,
+        label: format!("{name} {span}"),
+        level,
+        sentence: format!("From {} to {} the sound {what}: {sentence}; the rest of the file does not show it", mmss(p.t0), mmss(p.t1)),
+        reasoning: format!(
+            "Measured on its own, the part from {} to {} ({} slices of 10 s) {what}; the whole file does not. A lossy stretch spliced into a lossless file, or a track with one lossy source, looks like this. A part is red only with a coding trace of its own: on 10 to 30 s the spectral clues alone are less sure than on a whole file.",
+            mmss(p.t0),
+            mmss(p.t1),
+            p.slices
+        ),
+        evidence: found.iter().map(|x| Evidence { family: x.id.family(), side: x.side, strength: x.strength, text: format!("Part {span}: {}", x.text) }).collect(),
+    })
+}
+
+/// The state of one part of a file (a run of slices measured as a whole, E9).
+pub(crate) struct PartVerdict {
+    pub(crate) size: f64,
+    pub(crate) overlap: bool,
+    pub(crate) t0: f64,
+    pub(crate) t1: f64,
+    pub(crate) slices: u32,
+    pub(crate) state: State,
+    pub(crate) label: String,
+}
+
+/// The state of every part of the file, from the measures of the part alone: the clues are the
+/// ones of the whole file, with the same rules.
+pub(crate) fn part_verdicts(f: &Facts, aac_check: bool) -> Vec<PartVerdict> {
+    f.segments
+        .iter()
+        .filter(|p| p.facts.frames > 0)
+        .map(|p| {
+            let facts: &Facts = &p.facts;
+            let j = Judged::new(facts, aac_check);
+            let found = findings(&j);
+            let class = classify(&found);
+            let (label, _, _) = wording(&class, &found, &j);
+            let coded = found.iter().any(|x| matches!(x.id, Id::C1(_) | Id::C2));
+            let class = if class.state == State::R && !coded { Class { state: State::O, ..class } } else { class };
+            PartVerdict { size: p.size, overlap: p.overlap, t0: p.t0, t1: p.t1, slices: p.slices, state: class.state, label }
+        })
+        .collect()
+}
+
+/// BT_SEGMENTS=<file>: one JSON line per decided file with the state of each of its parts (to
+/// choose the size of the slices, E9).
+fn write_parts(path: &Path, f: &Facts, label: &str, state: State, aac_check: bool) {
+    use std::io::Write;
+    static OUT: std::sync::OnceLock<Option<std::sync::Mutex<std::fs::File>>> = std::sync::OnceLock::new();
+    let Some(out) = OUT.get_or_init(|| {
+        let name = std::env::var_os("BT_SEGMENTS")?;
+        std::fs::OpenOptions::new().create(true).append(true).open(name).ok().map(std::sync::Mutex::new)
+    }) else {
+        return;
+    };
+    let code = |s: State| match s {
+        State::R => "R",
+        State::O => "O",
+        State::U(_) => "U",
+        State::L2 => "L2",
+        State::L1 => "L1",
+    };
+    let parts: Vec<serde_json::Value> = part_verdicts(f, aac_check)
+        .into_iter()
+        .map(|p| serde_json::json!({ "size": p.size, "overlap": p.overlap, "t0": p.t0, "t1": p.t1, "slices": p.slices, "state": code(p.state), "label": p.label }))
+        .collect();
+    let line = serde_json::json!({ "path": path.to_string_lossy(), "label": label, "state": code(state), "seconds": f.samples as f64 / f.rate.max(1.0), "parts": parts });
+    if let Ok(mut file) = out.lock() {
+        let _ = writeln!(file, "{line}");
+    }
 }
 
 /// What the show's verdict needs of a file's decision.
@@ -2475,5 +2625,78 @@ mod tests {
         t[0].label = LOSSLESS_PADDED.into();
         t[0].level = Level::Warn;
         assert_eq!(show(&mut t).level, Level::Warn);
+    }
+
+    /// §1.5: a part of the file that is lossy by itself names the track by its span.
+    fn spliced(part: Facts, slices: u32, size: f64, overlap: bool, whole_trace: Option<Trace>) -> Facts {
+        let base = Facts { rate: 44100.0, samples: 44100 * 200, frames: 2000, hf: Some(-30.0), mp3_trace: whole_trace, ..Default::default() };
+        let part = crate::lossless::segments::Part { size, overlap, t0: 40.0, t1: 70.0, slices, facts: Box::new(Facts { frames: 300, ..part }) };
+        Facts { segments: vec![part], ..base }
+    }
+
+    fn found_grid() -> Trace {
+        grid(0.3, 50.0)
+    }
+
+    fn part_facts(trace: Option<Trace>) -> Facts {
+        Facts { rate: 44100.0, samples: 44100 * 30, frames: 300, hf: Some(-30.0), mp3_trace: trace, ..Default::default() }
+    }
+
+    #[test]
+    fn rule_lossy_part_names_its_span() {
+        let f = spliced(part_facts(Some(found_grid())), 5, 10.0, true, None);
+        let v = decide(Path::new("a.flac"), &f, false);
+        assert_eq!(v.label, "Lossy part 00:40–01:10");
+        assert_eq!(v.level, Level::Error);
+        assert_eq!(v.track.map(|t| t.state), Some(State::R));
+        assert!(v.sentence.starts_with("From 00:40 to 01:10 the sound is lossy"));
+        assert_eq!(v.report.confidence, Some(Confidence::High));
+        assert!(v.report.evidence.iter().any(|e| e.text.starts_with("Part 00:40–01:10: ")));
+    }
+
+    #[test]
+    fn rule_lossy_part_by_a_pair_alone_is_orange() {
+        // Holes and digital silence above a lowpass make a file red; in a part, without a coding trace, orange.
+        let pair = Facts { cutoff: Some(13500.0), holes: Some(16.0), above_floor: Some(1.0), ..part_facts(None) };
+        assert_eq!(decide(Path::new("p.flac"), &pair, false).level, Level::Error);
+        let v = decide(Path::new("a.flac"), &spliced(pair, 4, 10.0, true, None), false);
+        assert_eq!(v.label, "Lossy? part 00:40–01:10");
+        assert_eq!(v.level, Level::Warn);
+        assert_eq!(v.track.map(|t| t.state), Some(State::O));
+        assert_eq!(v.report.confidence, Some(Confidence::Medium));
+    }
+
+    #[test]
+    fn rule_lossy_part_orange_when_one_family() {
+        // Encoder holes under a cutoff, nothing else: one family, orange.
+        let part = Facts { cutoff: Some(16000.0), holes: Some(20.0), above_floor: Some(12.0), hiss: Some((12.0, 12.0, 0.0)), ..part_facts(None) };
+        let v = decide(Path::new("a.flac"), &spliced(part, 3, 10.0, true, None), false);
+        assert_eq!(v.label, "Lossy? part 00:40–01:10");
+        assert_eq!(v.level, Level::Warn);
+        assert_eq!(v.track.map(|t| t.state), Some(State::O));
+    }
+
+    #[test]
+    fn rule_lossy_part_needs_two_slices_the_decisive_variant_and_a_file_that_is_not_lossy() {
+        let plain = decide(Path::new("a.flac"), &Facts { segments: Vec::new(), ..spliced(part_facts(Some(found_grid())), 5, 10.0, true, None) }, false).label;
+        // One slice, 15 s slices, no overlap: the track keeps the verdict of the whole file.
+        for (slices, size, overlap) in [(1, 10.0, true), (5, 15.0, true), (5, 10.0, false)] {
+            let v = decide(Path::new("a.flac"), &spliced(part_facts(Some(found_grid())), slices, size, overlap, None), false);
+            assert_eq!(v.label, plain, "{slices} {size} {overlap}");
+        }
+        // A file lossy as a whole keeps its own verdict and its own label.
+        let f = spliced(part_facts(Some(found_grid())), 5, 10.0, true, Some(found_grid()));
+        let v = decide(Path::new("a.flac"), &f, false);
+        assert!(!v.label.contains("part"), "{}", v.label);
+    }
+
+    #[test]
+    fn rule_lossy_part_takes_the_worst_then_the_longest() {
+        let orange = Facts { cutoff: Some(16000.0), holes: Some(20.0), above_floor: Some(12.0), hiss: Some((12.0, 12.0, 0.0)), ..part_facts(None) };
+        let mut f = spliced(orange, 6, 10.0, true, None);
+        f.segments.push(crate::lossless::segments::Part { size: 10.0, overlap: true, t0: 100.0, t1: 120.0, slices: 3, facts: Box::new(part_facts(Some(found_grid()))) });
+        let v = decide(Path::new("a.flac"), &f, false);
+        // Red beats orange, whatever their lengths.
+        assert_eq!(v.label, "Lossy part 01:40–02:00");
     }
 }

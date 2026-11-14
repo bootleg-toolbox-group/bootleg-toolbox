@@ -87,13 +87,21 @@ pub fn analyse(path: &Path, info: &AudioInfo, aac: bool, cancel: &AtomicBool) ->
         }
     } else {
         let measured = measure(path, info, cancel).inspect_err(|e| write_line(path, serde_json::json!({ "error": e })))?;
-        let mut verdict = crate::decision::decide(path, &facts(info, &measured, aac, record), aac);
+        let mut f = facts(info, &measured, aac, record);
+        let mut aac_done = aac;
+        let verdict = crate::decision::decide(path, &f, aac);
         // The AAC search is slow, so an option; a doubt is worth it anyway: the verdict is drawn
         // again with it, and an AAC converted straight back turns the doubt into a certainty.
         if !aac && verdict.doubt && !cancel.load(std::sync::atomic::Ordering::Relaxed) {
-            verdict = crate::decision::decide(path, &facts(info, &measured, true, record), true);
+            f = facts(info, &measured, true, record);
+            aac_done = true;
         }
-        verdict
+        // The parts of the file (10 s slices, 50 % overlap): measured once the searches are
+        // settled (BT_FACTS has them already, with every variant).
+        if !record && !cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            (f.slices, f.segments) = segments::measure(info, &measured, &f, aac_done, Some((10.0, true)));
+        }
+        crate::decision::decide(path, &f, aac_done)
     };
     if info.lossy() {
         let name = info.name();
@@ -251,6 +259,10 @@ struct Spectra {
     side_vs_mid: Vec<f64>,
     /// Per kept block, the mean power at 1-4 kHz.
     level: Vec<f32>,
+    /// The index (among the kept blocks) of each `intensity` and each `side_vs_mid` value: not every
+    /// kept block has them (mono, silent difference channel).
+    intensity_at: Vec<u32>,
+    width_at: Vec<u32>,
 }
 
 impl Spectra {
@@ -303,6 +315,13 @@ impl Spectra {
             for (p, f) in self.power.iter_mut().zip(&frame_power) {
                 *p += f;
             }
+            let at = self.level.len() as u32;
+            if intensity.is_some() {
+                self.intensity_at.push(at);
+            }
+            if width.is_some() {
+                self.width_at.push(at);
+            }
             self.kept.extend(kept);
             self.intensity.extend(intensity);
             self.side_vs_mid.extend(width);
@@ -311,9 +330,11 @@ impl Spectra {
     }
 }
 
+pub(crate) mod segments;
+
 /// What one reading of the file measured (the AAC and Opus windows are collected in any
 /// case: a doubtful verdict is then drawn again with them, without reading the file again).
-struct Measured {
+pub(crate) struct Measured {
     /// Length of the file in sample frames, from its header.
     samples: u64,
     rate: f64,
@@ -322,13 +343,25 @@ struct Measured {
     bin_hz: f64,
     kept_lo: usize,
     kept_hi: usize,
-    window: Vec<f64>,
+    window: std::sync::Arc<Vec<f64>>,
     frames: usize,
     power: Vec<f64>,
     kept: Vec<f32>,
     intensity: Vec<(f64, f64, f64)>,
     side_vs_mid: Vec<f64>,
     level: Vec<f32>,
+    /// Per kept block: its index among all the blocks read (silent ones included), so its time
+    /// in the file; and the indexes of the `intensity` and `side_vs_mid` values (E9, segments).
+    kept_block: Vec<u32>,
+    intensity_at: Vec<u32>,
+    width_at: Vec<u32>,
+    /// Samples per block.
+    block: usize,
+    /// The loudest windows of every stretch of the file (`ATOM` seconds), for the MP3 and AAC
+    /// grids of its parts.
+    atoms_mp3: Vec<Atom>,
+    atoms_aac: Vec<Atom>,
+    atoms_channels: usize,
     check_low: bool,
     low_bits: bool,
     wasted: [u32; 33],
@@ -337,6 +370,63 @@ struct Measured {
     mp3_trace: Option<crate::mp3trace::Trace>,
     aac: Option<crate::mp3trace::Collector>,
     opus: Option<crate::opustrace::Collector>,
+}
+
+/// The stretch of the file whose loudest window the grid searches of its parts are fed with.
+pub(crate) const ATOM_SECONDS: f64 = 2.5;
+
+/// The loudest window (2 codec frames and what the analysis needs after them) of one stretch.
+pub(crate) struct Atom {
+    pub(crate) index: u32,
+    pub(crate) energy: f64,
+    pub(crate) window: Vec<[f32; 2]>,
+}
+
+/// The windows of a file by stretch of `ATOM_SECONDS`: collectors of one loudest window, renewed
+/// at every stretch.
+struct AtomCollector {
+    mp3: crate::mp3trace::Collector,
+    aac: crate::mp3trace::Collector,
+    channels: usize,
+    /// Samples of an atom.
+    atom: u64,
+    mp3_atoms: Vec<Atom>,
+    aac_atoms: Vec<Atom>,
+}
+
+impl AtomCollector {
+    fn new(channels: usize, atom: u64) -> Self {
+        let (mp3, aac) = Self::fresh(channels, 0);
+        AtomCollector { mp3, aac, channels, atom, mp3_atoms: Vec::new(), aac_atoms: Vec::new() }
+    }
+
+    /// Collectors for the stretch starting at sample `start` of the file: their frames are the
+    /// file's frames (MP3 576, AAC 1024 samples from its start), so a grid position means the
+    /// same thing in every stretch.
+    fn fresh(channels: usize, start: u64) -> (crate::mp3trace::Collector, crate::mp3trace::Collector) {
+        (
+            crate::mp3trace::Collector::with_keep(channels, 576, 4, 1, (start % 576) as usize),
+            crate::mp3trace::Collector::with_keep(channels, 1024, 3, 1, (start % 1024) as usize),
+        )
+    }
+
+    fn push(&mut self, values: &[f64]) {
+        self.mp3.push(values);
+        self.aac.push(values);
+    }
+
+    /// The stretch `index` is over: its window is kept, the collectors start again.
+    fn close(&mut self, index: u32) {
+        let (mp3, aac) = Self::fresh(self.channels, (index as u64 + 1) * self.atom);
+        let (mp3, aac) = (std::mem::replace(&mut self.mp3, mp3), std::mem::replace(&mut self.aac, aac));
+        self.mp3_atoms.extend(mp3.into_windows().into_iter().map(|(energy, window)| Atom { index, energy, window }));
+        self.aac_atoms.extend(aac.into_windows().into_iter().map(|(energy, window)| Atom { index, energy, window }));
+    }
+}
+
+/// The rates MP3 and AAC use, at most two channels, a file that is not lossy by its format.
+fn codec_rates_for(info: &AudioInfo, channels: usize) -> bool {
+    matches!(info.rate, 32000 | 44100 | 48000) && channels <= 2 && !info.lossy()
 }
 
 fn measure(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<Measured, String> {
@@ -376,7 +466,21 @@ fn measure(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<Measure
     const BATCH: usize = 64;
     let level_bins = libm::ceil(1000.0 / bin_hz) as usize..((4000.0 / bin_hz) as usize + 1).min(bins);
     let shape = Shape { fft, window, bins, band, kept_lo, kept_hi, bin_hz, intensity_check, level_bins };
-    let mut spectra = Spectra { power: vec![0f64; bins], kept: Vec::new(), intensity: Vec::new(), side_vs_mid: Vec::new(), level: Vec::new() };
+    let mut spectra = Spectra {
+        power: vec![0f64; bins],
+        kept: Vec::new(),
+        intensity: Vec::new(),
+        side_vs_mid: Vec::new(),
+        level: Vec::new(),
+        intensity_at: Vec::new(),
+        width_at: Vec::new(),
+    };
+    // Which block of the file each kept block is, and the loudest windows of every stretch.
+    let mut blocks = 0u32;
+    let mut kept_block: Vec<u32> = Vec::new();
+    let atom_samples = libm::round(ATOM_SECONDS * rate) as u64;
+    let mut atoms = codec_rates_for(info, channels).then(|| AtomCollector::new(channels, atom_samples));
+    let (mut position, mut atom_index) = (0u64, 0u32);
     let mut pending: Vec<(Vec<f64>, Option<Vec<f64>>, bool)> = Vec::with_capacity(BATCH);
     // lossyWAV zeroes the lowest bits of whole blocks: the common trailing zero bits of
     // every block of 128 sample frames (silent blocks left out).
@@ -388,7 +492,7 @@ fn measure(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<Measure
     // (a comb); the values around zero are counted.
     let comb_check = info.bits == 24 && integer;
     // MP3 traces in the encoder's own filter bank (MP3 sample rates only).
-    let codec_rates = matches!(info.rate, 32000 | 44100 | 48000) && channels <= 2 && !info.lossy();
+    let codec_rates = codec_rates_for(info, channels);
     let mut mp3 = codec_rates.then(|| crate::mp3trace::Collector::new(channels));
     let mut aac = codec_rates.then(|| crate::aactrace::collector(channels));
     // Opus traces, with the AAC search (Opus is 48 kHz; 44.1 to 96 kHz are resampled to it).
@@ -425,6 +529,14 @@ fn measure(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<Measure
         if let Some(o) = opus.as_mut() {
             o.push(values);
         }
+        if let Some(a) = atoms.as_mut() {
+            a.push(values);
+            position += 1;
+            if position.is_multiple_of(atom_samples) {
+                a.close(atom_index);
+                atom_index += 1;
+            }
+        }
         let mono = values.iter().sum::<f64>() / channels as f64;
         if mono != 0.0 {
             silent = false;
@@ -435,8 +547,12 @@ fn measure(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<Measure
         }
         if block.len() == nfft {
             // Blocks of digital silence are skipped.
+            blocks += 1;
             if !silent {
                 let keep = frames.is_multiple_of(stride);
+                if keep {
+                    kept_block.push(blocks - 1);
+                }
                 let side = (keep && channels == 2).then(|| std::mem::replace(&mut side_block, Vec::with_capacity(nfft)));
                 pending.push((std::mem::replace(&mut block, Vec::with_capacity(nfft)), side, keep));
                 frames += 1;
@@ -450,7 +566,8 @@ fn measure(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<Measure
         }
     })?;
     spectra.add(pending, &shape);
-    let Spectra { power, kept, intensity, side_vs_mid, level } = spectra;
+    let Spectra { power, kept, intensity, side_vs_mid, level, intensity_at, width_at } = spectra;
+    let (atoms_mp3, atoms_aac) = atoms.map(|a| (a.mp3_atoms, a.aac_atoms)).unwrap_or_default();
     let mp3_trace = mp3.and_then(|m| m.detect(info.rate));
     Ok(Measured {
         samples: info.samples,
@@ -460,13 +577,20 @@ fn measure(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<Measure
         bin_hz,
         kept_lo,
         kept_hi,
-        window: shape.window,
+        window: std::sync::Arc::new(shape.window),
         frames,
         power,
         kept,
         intensity,
         side_vs_mid,
         level,
+        kept_block,
+        intensity_at,
+        width_at,
+        block: nfft,
+        atoms_mp3,
+        atoms_aac,
+        atoms_channels: channels,
         check_low,
         low_bits,
         wasted,
@@ -482,6 +606,19 @@ fn measure(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<Measure
 /// `all`: whichever of them is made covers every detector, even where the decision would not
 /// look at the result (BT_FACTS records everything, so that a replay can gate as it chooses).
 fn facts(info: &AudioInfo, m: &Measured, aac_check: bool, all: bool) -> Facts {
+    let mut whole = facts_of(info, m, aac_check, all, None);
+    // BT_FACTS records every variant of the slices (to choose among them and to replay); a run
+    // measures the one that decides (`analyse`).
+    if all {
+        (whole.slices, whole.segments) = segments::measure(info, m, &whole, aac_check, None);
+    }
+    whole
+}
+
+/// The measures of the file, or of a part of it: `whole`, the measures of the file, then gives what
+/// only the whole spectrum tells (the pilot tone and the tones around it), `m` being the kept
+/// frames of the part and a spectrum made of their bands (see `segments`).
+fn facts_of(info: &AudioInfo, m: &Measured, aac_check: bool, all: bool, whole: Option<&Facts>) -> Facts {
     let Measured { samples, rate, bins, band, bin_hz, kept_lo, kept_hi, frames, check_low, low_bits, comb_check, mp3_trace, .. } = *m;
     let (window, kept, intensity, side_vs_mid, wasted, histogram) = (&m.window, &m.kept, &m.intensity, &m.side_vs_mid, &m.wasted, &m.histogram);
     let band_freq = |b: usize| (b * band) as f64 * bin_hz + (band - 1) as f64 * bin_hz / 2.0;
@@ -513,21 +650,25 @@ fn facts(info: &AudioInfo, m: &Measured, aac_check: bool, all: bool) -> Facts {
         (0..bins).filter(|&k| freq(k) >= lo && freq(k) <= hi).map(|k| (prominence(k), freq(k))).max_by(|a, b| a.0.total_cmp(&b.0))
     };
     // 19 kHz stereo pilot tone left over from an FM broadcast (test of the reference)...
-    let near: Vec<f64> = (0..bins).filter(|&k| freq(k) > 18000.0 && freq(k) < 20000.0).map(|k| raw[k]).collect();
-    let peak = (0..bins).filter(|&k| freq(k) > 18950.0 && freq(k) < 19050.0).map(|k| raw[k]).fold(f64::NEG_INFINITY, f64::max);
-    let pilot_prominence = (!near.is_empty() && peak.is_finite()).then(|| peak - median(&near));
-    let pilot_on_19k = pilot_found(pilot_prominence);
-    // ...or shifted by a tape running too fast or too slow (it is 19 000 Hz exactly on air),
-    // which then measures the speed error; a stricter threshold away from 19 kHz.
-    let shifted_candidate = if rate / 2.0 < 20500.0 {
-        None
+    let (pilot_prominence, shifted_candidate, line_candidate) = if let Some(w) = whole {
+        (w.pilot_prominence, w.shifted_candidate, w.line_candidate)
     } else {
-        let span = 19000.0 * crate::speed::PILOT_SPAN;
-        strongest(19000.0 - span, 19000.0 + span)
+        let near: Vec<f64> = (0..bins).filter(|&k| freq(k) > 18000.0 && freq(k) < 20000.0).map(|k| raw[k]).collect();
+        let peak = (0..bins).filter(|&k| freq(k) > 18950.0 && freq(k) < 19050.0).map(|k| raw[k]).fold(f64::NEG_INFINITY, f64::max);
+        let pilot_prominence = (!near.is_empty() && peak.is_finite()).then(|| peak - median(&near));
+        // ...or shifted by a tape running too fast or too slow (it is 19 000 Hz exactly on air),
+        // which then measures the speed error; a stricter threshold away from 19 kHz.
+        let shifted_candidate = if rate / 2.0 < 20500.0 {
+            None
+        } else {
+            let span = 19000.0 * crate::speed::PILOT_SPAN;
+            strongest(19000.0 - span, 19000.0 + span)
+        };
+        // TV line frequency (15 625 Hz in Europe, 15 734 Hz in America): TV simulcast or a TV set nearby.
+        (pilot_prominence, shifted_candidate, strongest(15560.0, 15800.0))
     };
+    let pilot_on_19k = pilot_found(pilot_prominence);
     let shifted_pilot = shifted_pilot_of(shifted_candidate, pilot_on_19k);
-    // TV line frequency (15 625 Hz in Europe, 15 734 Hz in America): TV simulcast or a TV set nearby.
-    let line_candidate = strongest(15560.0, 15800.0);
     let line_whistle = line_whistle_of(line_candidate);
     let mut tones: Vec<f64> = line_whistle.into_iter().collect();
     if pilot_on_19k {
@@ -722,6 +863,8 @@ fn facts(info: &AudioInfo, m: &Measured, aac_check: bool, all: bool) -> Facts {
         aac_trace,
         opus_trace,
         searched: aac_check,
+        slices: Vec::new(),
+        segments: Vec::new(),
     }
 }
 
@@ -1096,6 +1239,13 @@ pub(crate) struct Facts {
     pub(crate) opus_trace: Option<crate::opustrace::Trace>,
     /// The AAC and Opus searches were made (the option, or a doubt that asked for them).
     pub(crate) searched: bool,
+    /// Measures by slice of the file, in sizes of 10, 15 and 30 s a half-size apart, and the parts
+    /// of the file (runs of slices that look alike) measured as a whole (E9; only in measures
+    /// recorded with BT_FACTS).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) slices: Vec<segments::Series>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) segments: Vec<segments::Part>,
 }
 
 /// The levels that tell a file upsampled to a high rate: median at 18.5-20.5 kHz, median at

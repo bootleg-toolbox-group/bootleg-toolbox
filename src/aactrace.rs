@@ -103,6 +103,58 @@ pub fn detect(collector: Collector, rate: u32) -> Option<Trace> {
     Some(best)
 }
 
+/// The rounding-error hits of each window at the given grid positions (0-1023), on the channel
+/// the detector would analyse: the louder of left and right, or of mid and side, over all the
+/// windows given. (hits, bands tried) per window and position (E9: a segment of the file against
+/// the grid found in the whole file). None at a rate AAC's tables do not cover.
+pub(crate) fn probe(windows: &[&[[f32; 2]]], channels: usize, rate: u32, mid_side: bool, offsets: &[usize]) -> Option<Vec<Vec<(usize, usize)>>> {
+    let long_starts: &[usize] = match rate {
+        32000 => &[
+            1, 5, 9, 13, 17, 21, 25, 29, 33, 37, 41, 49, 57, 65, 73, 81, 89, 97, 109, 121, 133, 145, 161, 177, 197, 217, 241, 265, 293, 321,
+            353, 385, 417, 449, 481, 513, 545, 577, 609, 641, 673, 705, 737, 769, 801, 833, 865, 897, 929, 961, 993,
+        ],
+        44100 | 48000 => &[
+            1, 5, 9, 13, 17, 21, 25, 29, 33, 37, 41, 49, 57, 65, 73, 81, 89, 97, 109, 121, 133, 145, 161, 177, 197, 217, 241, 265, 293, 321,
+            353, 385, 417, 449, 481, 513, 545, 577, 609, 641, 673, 705, 737, 769, 801, 833, 865, 897, 929,
+        ],
+        _ => return None,
+    };
+    let short_starts: &[usize] = &[1, 5, 9, 13, 17, 21, 29, 37, 45, 57, 69, 81, 97, 113];
+    let tables = Tables::new(long_starts, short_starts);
+    let left: fn([f32; 2]) -> f64 = |f| f[0] as f64;
+    let right: fn([f32; 2]) -> f64 = |f| f[1] as f64;
+    let mid: fn([f32; 2]) -> f64 = |f| f[0] as f64 + f[1] as f64;
+    let side: fn([f32; 2]) -> f64 = |f| f[0] as f64 - f[1] as f64;
+    let energy = |f: fn([f32; 2]) -> f64| windows.iter().map(|s| s[..2 * FRAME].iter().map(|x| f(*x).powi(2)).sum::<f64>()).sum::<f64>();
+    let take = if channels != 2 {
+        left
+    } else if mid_side {
+        if energy(mid) >= energy(side) { mid } else { side }
+    } else if energy(left) >= energy(right) {
+        left
+    } else {
+        right
+    };
+    let mut work = Work::new();
+    let mut buf = vec![0f64; 2 * FRAME];
+    Some(
+        windows
+            .iter()
+            .map(|seg| {
+                offsets
+                    .iter()
+                    .map(|&offset| {
+                        for (i, f) in seg[offset..offset + 2 * FRAME].iter().enumerate() {
+                            buf[i] = take(*f);
+                        }
+                        tables.window(&buf, &mut work)
+                    })
+                    .collect()
+            })
+            .collect(),
+    )
+}
+
 /// A channel to analyse: whether it is a mid/side one, and how to take it from (L, R).
 type Mode = (bool, fn([f32; 2]) -> f64);
 
