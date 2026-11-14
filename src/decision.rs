@@ -1183,8 +1183,8 @@ pub(crate) fn decide(path: &Path, f: &Facts, aac_check: bool) -> Verdict {
     let (label, level, sentence) = wording(&class, &found, &j);
     let part = part_call(f, class.state, aac_check);
     let (label, level, sentence) = match &part {
-        Some(p) => (p.label.clone(), p.level, p.sentence.clone()),
-        None => (label, level, sentence),
+        Some(p) if !p.uneven => (p.label.clone(), p.level, p.sentence.clone()),
+        _ => (label, level, sentence),
     };
     let mut verdict = Verdict::new(label, sentence, level, details);
     let mut report = build_report(crate::files::file_name(path), &verdict, &j);
@@ -1193,10 +1193,20 @@ pub(crate) fn decide(path: &Path, f: &Facts, aac_check: bool) -> Verdict {
     report.confidence = Some(class.state.confidence());
     let mut track = TrackDecision::of(&class, &found, f);
     if let Some(p) = part {
-        report.reasoning.insert(0, p.reasoning);
-        report.evidence.splice(0..0, p.evidence);
-        report.confidence = Some(p.state.confidence());
-        track.state = p.state;
+        if p.uneven {
+            // Said, not counted: no change to the colour, the state or the show.
+            report.measures.push(crate::report::Measure {
+                name: "Uneven passage".into(),
+                value: p.span.clone(),
+                meaning: p.reasoning.clone(),
+                level: Level::Info,
+            });
+        } else {
+            report.reasoning.insert(0, p.reasoning);
+            report.evidence.splice(0..0, p.evidence);
+            report.confidence = Some(p.state.confidence());
+            track.state = p.state;
+        }
     }
     verdict.report = report;
     verdict.track = Some(track);
@@ -1243,8 +1253,33 @@ fn mmss(t: f64) -> String {
     format!("{:02}:{:02}", s / 60, s % 60)
 }
 
+/// What a part of a file says when measured as a file of its own (§1.5): red only with a coding
+/// trace of its own (C1 or C2, amendment 20); orange only with an admitted pair of clues or a grid
+/// (a part judged on 10 to 30 s is less sure than a whole file); one clue alone is an uneven
+/// passage, said and not counted.
+#[derive(Clone, Copy, PartialEq)]
+enum PartRank {
+    Nothing,
+    Uneven,
+    Orange,
+    Red,
+}
+
+fn part_rank(class: &Class, found: &[Finding]) -> PartRank {
+    let coded = found.iter().any(|x| matches!(x.id, Id::C1(_) | Id::C2));
+    match class.state {
+        State::R if coded => PartRank::Red,
+        State::R => PartRank::Orange,
+        State::O => PartRank::Uneven,
+        _ => PartRank::Nothing,
+    }
+}
+
 /// What a lossy part of a file that is not lossy as a whole turns the track into (§1.5).
 struct PartCall {
+    /// An uneven passage: the verdict of the file stays, a line says where.
+    uneven: bool,
+    span: String,
     state: State,
     label: String,
     level: Level,
@@ -1260,40 +1295,57 @@ fn part_call(f: &Facts, whole: State, aac_check: bool) -> Option<PartCall> {
     if matches!(whole, State::R | State::O) {
         return None;
     }
-    type Chosen<'a> = (u8, f64, &'a crate::lossless::segments::Part, Class, Vec<Finding>, (String, Level, String));
+    type Chosen<'a> = (PartRank, f64, &'a crate::lossless::segments::Part, Class, Vec<Finding>, (String, Level, String));
     let mut best: Option<Chosen> = None;
     for p in f.segments.iter().filter(|p| p.size == PART_SIZE && p.overlap && p.slices >= PART_SLICES && p.facts.frames > 0) {
         let j = Judged::new(&p.facts, aac_check);
         let found = findings(&j);
         let class = classify(&found);
-        // A part is judged on 10 to 30 s, with statistics more fragile than a whole file's: it is red
-        // only with a coding trace of its own (C1 or C2); a pair of spectral clues makes it orange.
-        let coded = found.iter().any(|x| matches!(x.id, Id::C1(_) | Id::C2));
-        let class = match class.state {
-            State::R if !coded => Class { state: State::O, ..class },
-            _ => class,
-        };
-        let rank = match class.state {
-            State::R => 2,
-            State::O => 1,
-            _ => continue,
-        };
+        let rank = part_rank(&class, &found);
+        if rank == PartRank::Nothing {
+            continue;
+        }
+        let class = if rank == PartRank::Orange { Class { state: State::O, ..class } } else { class };
         let length = p.t1 - p.t0;
-        if best.as_ref().is_none_or(|b| (rank, length) > (b.0, b.1)) {
+        let key = |r: PartRank| match r {
+            PartRank::Red => 3,
+            PartRank::Orange => 2,
+            _ => 1,
+        };
+        if best.as_ref().is_none_or(|b| (key(rank), length) > (key(b.0), b.1)) {
             let words = wording(&class, &found, &j);
             best = Some((rank, length, p, class, found, words));
         }
     }
-    let (_, _, p, class, found, (_, level, sentence)) = best?;
+    let (rank, _, p, class, found, (_, level, sentence)) = best?;
     let span = format!("{}–{}", mmss(p.t0), mmss(p.t1));
+    if rank == PartRank::Uneven {
+        return Some(PartCall {
+            uneven: true,
+            span,
+            state: whole,
+            label: String::new(),
+            level,
+            sentence,
+            reasoning: format!(
+                "From {} to {} the sound, measured on its own, shows one clue of lossy coding ({} slices of 10 s); one clue alone on 10 to 30 s is not enough to name the track, so its verdict stays the file's.",
+                mmss(p.t0),
+                mmss(p.t1),
+                p.slices
+            ),
+            evidence: Vec::new(),
+        });
+    }
     let (name, what) = if class.state == State::R { ("Lossy part", "is lossy") } else { ("Lossy? part", "may be lossy") };
     Some(PartCall {
+        uneven: false,
+        span: span.clone(),
         state: class.state,
         label: format!("{name} {span}"),
         level,
         sentence: format!("From {} to {} the sound {what}: {sentence}; the rest of the file does not show it", mmss(p.t0), mmss(p.t1)),
         reasoning: format!(
-            "Measured on its own, the part from {} to {} ({} slices of 10 s) {what}; the whole file does not. A lossy stretch spliced into a lossless file, or a track with one lossy source, looks like this. A part is red only with a coding trace of its own: on 10 to 30 s the spectral clues alone are less sure than on a whole file.",
+            "Measured on its own, the part from {} to {} ({} slices of 10 s) {what}; the whole file does not. A lossy stretch spliced into a lossless file, or a track with one lossy source, looks like this. A part is red only with a coding trace of its own, and orange only with an admitted pair of clues or a grid: on 10 to 30 s the spectral clues are less sure than on a whole file.",
             mmss(p.t0),
             mmss(p.t1),
             p.slices
@@ -1325,8 +1377,12 @@ pub(crate) fn part_verdicts(f: &Facts, aac_check: bool) -> Vec<PartVerdict> {
             let found = findings(&j);
             let class = classify(&found);
             let (label, _, _) = wording(&class, &found, &j);
-            let coded = found.iter().any(|x| matches!(x.id, Id::C1(_) | Id::C2));
-            let class = if class.state == State::R && !coded { Class { state: State::O, ..class } } else { class };
+            // Red only with a coding trace, orange with an admitted pair or a grid; one clue is an uneven passage.
+            let class = match part_rank(&class, &found) {
+                PartRank::Orange => Class { state: State::O, ..class },
+                PartRank::Uneven => Class { state: State::L2, ..class },
+                _ => class,
+            };
             PartVerdict { size: p.size, overlap: p.overlap, t0: p.t0, t1: p.t1, slices: p.slices, state: class.state, label }
         })
         .collect()
@@ -2676,13 +2732,16 @@ mod tests {
     }
 
     #[test]
-    fn rule_lossy_part_orange_when_one_family() {
-        // Encoder holes under a cutoff, nothing else: one family, orange.
+    fn rule_one_clue_in_a_part_is_an_uneven_passage() {
+        // Encoder holes under a cutoff, nothing else: one clue. The track keeps the file's verdict; a line says where.
         let part = Facts { cutoff: Some(16000.0), holes: Some(20.0), above_floor: Some(12.0), hiss: Some((12.0, 12.0, 0.0)), ..part_facts(None) };
-        let v = decide(Path::new("a.flac"), &spliced(part, 3, 10.0, true, None), false);
-        assert_eq!(v.label, "Lossy? part 00:40–01:10");
-        assert_eq!(v.level, Level::Warn);
-        assert_eq!(v.track.map(|t| t.state), Some(State::O));
+        let f = spliced(part, 3, 10.0, true, None);
+        let whole = decide(Path::new("a.flac"), &Facts { segments: Vec::new(), ..f.clone() }, false);
+        let v = decide(Path::new("a.flac"), &f, false);
+        assert_eq!((v.label.clone(), v.level), (whole.label, whole.level));
+        assert_eq!(v.track.map(|t| t.state), whole.track.map(|t| t.state));
+        let line = v.report.measures.iter().find(|m| m.name == "Uneven passage").expect("a line");
+        assert_eq!((line.value.as_str(), line.level), ("00:40–01:10", Level::Info));
     }
 
     #[test]
