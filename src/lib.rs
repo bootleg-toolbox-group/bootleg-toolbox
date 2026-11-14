@@ -14,6 +14,7 @@ pub mod help;
 pub mod integration;
 pub mod lossless;
 pub mod aactrace;
+pub mod mp2trace;
 pub mod mp3trace;
 pub mod opustrace;
 pub mod matroska;

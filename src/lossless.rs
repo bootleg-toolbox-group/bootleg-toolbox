@@ -369,6 +369,7 @@ pub(crate) struct Measured {
     histogram: Vec<u32>,
     mp3_trace: Option<crate::mp3trace::Trace>,
     aac: Option<crate::mp3trace::Collector>,
+    mp2: Option<crate::mp3trace::Collector>,
     opus: Option<crate::opustrace::Collector>,
 }
 
@@ -495,6 +496,7 @@ fn measure(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<Measure
     let codec_rates = codec_rates_for(info, channels);
     let mut mp3 = codec_rates.then(|| crate::mp3trace::Collector::new(channels));
     let mut aac = codec_rates.then(|| crate::aactrace::collector(channels));
+    let mut mp2 = codec_rates.then(|| crate::mp2trace::collector(channels));
     // Opus traces, with the AAC search (Opus is 48 kHz; 44.1 to 96 kHz are resampled to it).
     let mut opus = (channels <= 2 && !info.lossy()).then(|| crate::opustrace::Collector::new(channels, info.rate)).flatten();
     const SPAN: i32 = 1 << 16;
@@ -525,6 +527,9 @@ fn measure(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<Measure
         }
         if let Some(a) = aac.as_mut() {
             a.push(values);
+        }
+        if let Some(c) = mp2.as_mut() {
+            c.push(values);
         }
         if let Some(o) = opus.as_mut() {
             o.push(values);
@@ -598,6 +603,7 @@ fn measure(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<Measure
         histogram,
         mp3_trace,
         aac,
+        mp2,
         opus,
     })
 }
@@ -627,7 +633,10 @@ fn facts_of(info: &AudioInfo, m: &Measured, aac_check: bool, all: bool, whole: O
     let mp3_found = mp3_trace.is_some_and(|t| t.found());
     let aac_trace = if !aac_check || (mp3_found && !all) { None } else { m.aac.clone().and_then(|a| crate::aactrace::detect(a, info.rate)) };
     let aac_found = aac_trace.is_some_and(|t| crate::aactrace::found(&t));
-    let opus_trace = if !aac_check || ((mp3_found || aac_found) && !all) { None } else { m.opus.clone().and_then(|o| o.detect()) };
+    // MP2 when neither was found (MP3, then AAC, then MP2, then Opus: the slow search stops at the first).
+    let mp2_trace = if !aac_check || ((mp3_found || aac_found) && !all) { None } else { m.mp2.clone().and_then(|c| crate::mp2trace::detect(c, info.rate)) };
+    let mp2_found = mp2_trace.is_some_and(|t| crate::mp2trace::found(&t));
+    let opus_trace = if !aac_check || ((mp3_found || aac_found || mp2_found) && !all) { None } else { m.opus.clone().and_then(|o| o.detect()) };
     if frames == 0 {
         return Facts { rate, samples, frames: 0, mp3_trace, searched: aac_check, ..Default::default() };
     }
@@ -861,6 +870,7 @@ fn facts_of(info: &AudioInfo, m: &Measured, aac_check: bool, all: bool, whole: O
         edge_track,
         mp3_trace,
         aac_trace,
+        mp2_trace,
         opus_trace,
         searched: aac_check,
         slices: Vec::new(),
@@ -1236,6 +1246,9 @@ pub(crate) struct Facts {
     /// not the decision would look at it (it gates them); otherwise AAC is skipped when an MP3
     /// grid was found and Opus when either was.
     pub(crate) aac_trace: Option<crate::mp3trace::Trace>,
+    /// The same with Layer II's filter bank (E10): measures recorded before it was kept have none.
+    #[serde(default)]
+    pub(crate) mp2_trace: Option<crate::mp3trace::Trace>,
     pub(crate) opus_trace: Option<crate::opustrace::Trace>,
     /// The AAC and Opus searches were made (the option, or a doubt that asked for them).
     pub(crate) searched: bool,
@@ -1476,6 +1489,15 @@ pub(crate) fn build_report(title: String, verdict: &Verdict, f: &Judged) -> Repo
             if found { Level::Error } else { Level::Ok },
         );
     }
+    // Said only when found: a search that finds nothing adds no line to the reports of the others.
+    if let Some(t) = f.mp2_trace.filter(crate::mp2trace::found) {
+        add(
+            "MP2 coding traces",
+            format!("found: {:.1} % of the bands, {:.0} standard deviations above chance (parts of 384 samples at position {})", t.likelihood * 100.0, t.contrast, t.offset),
+            "The sound is analysed again with the filter bank of MPEG-1 Layer II (the format of DAB radio, DVB, many broadcast and early digital recordings): in each subband the samples of a part fall on the lattice the encoder rounded them to. Genuine audio shows no such position. Resampling or effects after the decoder erase this trace.",
+            Level::Error,
+        );
+    }
     if let Some(t) = f.opus_trace {
         add(
             "Opus coding traces",
@@ -1582,6 +1604,8 @@ fn traced_codec(f: &Judged) -> Option<crate::encoders::Codec> {
         Some(Codec::Mp3)
     } else if f.aac_trace.is_some_and(|t| crate::aactrace::found(&t)) {
         Some(Codec::Aac)
+    } else if f.mp2_trace.is_some_and(|t| crate::mp2trace::found(&t)) {
+        Some(Codec::Mp2)
     } else if f.opus_trace.is_some_and(|t| t.found()) {
         Some(Codec::Opus)
     } else {

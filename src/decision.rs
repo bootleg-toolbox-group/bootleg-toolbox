@@ -169,6 +169,7 @@ pub(crate) struct Judged<'a> {
     pub(crate) hires_gap: Option<f64>,
     /// Gated: what the decision looks at.
     pub(crate) aac_trace: Option<crate::mp3trace::Trace>,
+    pub(crate) mp2_trace: Option<crate::mp3trace::Trace>,
     pub(crate) opus_trace: Option<crate::opustrace::Trace>,
 }
 
@@ -224,10 +225,12 @@ impl<'a> Judged<'a> {
                 format!("24-bit file made from 16-bit audio with a level change: only about 1 sample value in {:.0} is ever used", 1.0 / c.0)
             })
         };
-        // AAC only when no MP3 was found, Opus when neither was.
+        // AAC only when no MP3 was found, MP2 when neither was, Opus when none was.
         let mp3_found = f.mp3_trace.is_some_and(|t| t.found());
         let aac_trace = if !aac_check || mp3_found { None } else { f.aac_trace };
-        let opus_trace = if !aac_check || mp3_found || aac_trace.is_some_and(|t| crate::aactrace::found(&t)) { None } else { f.opus_trace };
+        let aac_found = aac_trace.is_some_and(|t| crate::aactrace::found(&t));
+        let mp2_trace = if !aac_check || mp3_found || aac_found { None } else { f.mp2_trace };
+        let opus_trace = if !aac_check || mp3_found || aac_found || mp2_trace.is_some_and(|t| crate::mp2trace::found(&t)) { None } else { f.opus_trace };
         Judged {
             facts: f,
             silent_above,
@@ -247,6 +250,7 @@ impl<'a> Judged<'a> {
             masked: masked_cutoff(&f.masked_bands),
             hires_gap: f.hires.map(|h| h.high - h.low),
             aac_trace,
+            mp2_trace,
             opus_trace,
         }
     }
@@ -562,6 +566,7 @@ pub(crate) fn findings(f: &Judged) -> Vec<Finding> {
     // C: coding.
     let mp3 = f.mp3_trace.filter(|t| t.found());
     let aac = f.aac_trace.filter(crate::aactrace::found);
+    let mp2 = f.mp2_trace.filter(crate::mp2trace::found);
     let opus = f.opus_trace.filter(|t| t.found());
     let share = |t: &crate::mp3trace::Trace| format!("{:.1} % of the bands, {:.0} standard deviations above chance", t.likelihood * 100.0, t.contrast);
     if let Some(t) = mp3 {
@@ -586,6 +591,9 @@ pub(crate) fn findings(f: &Judged) -> Vec<Finding> {
     }
     if let Some(t) = aac {
         add(Id::C1(Codec::Aac), Side::Lossy, Strength::Strong, format!("AAC coding traces: the sound falls back onto an AAC encoder's rounding grid ({})", share(&t)));
+    }
+    if let Some(t) = mp2 {
+        add(Id::C1(Codec::Mp2), Side::Lossy, Strength::Strong, format!("MP2 coding traces: the sound falls back onto an MP2 encoder's quantizing lattice ({})", share(&t)));
     }
     if let Some(t) = opus {
         add(Id::C1(Codec::Opus), Side::Lossy, Strength::Strong, format!("Opus coding traces: {} of the {} frames analysed are exactly Opus codewords", t.clean, t.frames));
@@ -837,9 +845,9 @@ fn wording(class: &Class, found: &[Finding], f: &Judged) -> (String, Level, Stri
                         share * 100.0
                     ),
                 )
-            } else if let Some(name) = [(Codec::Mp3, "MP3"), (Codec::Aac, "AAC"), (Codec::Opus, "Opus")].iter().find(|(c, _)| grid(*c).is_some()).map(|x| x.1) {
-                let detail = match (name, f.mp3_trace.filter(|t| t.found()), f.aac_trace.filter(crate::aactrace::found), f.opus_trace) {
-                    ("MP3", Some(t), _, _) | ("AAC", _, Some(t), _) => format!(
+            } else if let Some(name) = [(Codec::Mp3, "MP3"), (Codec::Aac, "AAC"), (Codec::Mp2, "MP2"), (Codec::Opus, "Opus")].iter().find(|(c, _)| grid(*c).is_some()).map(|x| x.1) {
+                let detail = match (name, f.mp3_trace.filter(|t| t.found()), f.aac_trace.filter(crate::aactrace::found).or(f.mp2_trace.filter(crate::mp2trace::found)), f.opus_trace) {
+                    ("MP3", Some(t), _, _) | ("AAC" | "MP2", _, Some(t), _) => format!(
                         "the file still holds the rounding pattern of an {name} encoder ({:.1} % of the bands match it, {:.0} standard deviations above chance), which only a lossy file converted back leaves",
                         t.likelihood * 100.0,
                         t.contrast
@@ -1022,6 +1030,7 @@ fn reasoning(class: &Class, found: &[Finding], f: &Judged) -> Vec<String> {
     for (t, name, rest) in [
         (f.mp3_trace.filter(|t| t.found()), "an MP3 encoder's filter bank", "Genuine audio shows about 2 % at no particular position: this file was decoded from an MP3 and converted back to a lossless format, whatever its spectrum looks like."),
         (f.aac_trace.filter(crate::aactrace::found), "an AAC encoder's transform", "Genuine audio shows no such position: this file was decoded from an AAC and converted back to a lossless format."),
+        (f.mp2_trace.filter(crate::mp2trace::found), "an MP2 encoder's filter bank", "Genuine audio shows no such position: this file was decoded from an MP2 (MPEG-1 Layer II: DAB, DVB, broadcast and early digital recordings) and converted back to a lossless format."),
     ] {
         if let Some(t) = t {
             r.push(format!(

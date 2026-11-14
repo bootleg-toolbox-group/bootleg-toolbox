@@ -323,7 +323,7 @@ const FIRST_SLOT: usize = GRANULE - 480;
 const SLOT_STARTS: usize = GRANULE + 35 * 32;
 
 /// The scale factor bands of MP3 (first line of each band, end of the last one).
-struct Bands {
+pub(crate) struct Bands {
     long: Vec<usize>,
     long_end: usize,
     short: Vec<usize>,
@@ -331,7 +331,7 @@ struct Bands {
 }
 
 impl Bands {
-    fn for_rate(rate: u32) -> Option<Bands> {
+    pub(crate) fn for_rate(rate: u32) -> Option<Bands> {
         let (long, long_end, short, short_end): (&[usize], usize, &[usize], usize) = match rate {
             44100 => (
                 &[1, 5, 9, 13, 17, 21, 25, 31, 37, 45, 53, 63, 75, 91, 111, 135, 163, 197, 239, 289, 343],
@@ -364,7 +364,7 @@ impl Bands {
 }
 
 /// Everything computed once: windows, modulation, thresholds.
-struct Tables {
+pub(crate) struct Tables {
     long_bands: Vec<(usize, usize)>,
     short_bands: Vec<(usize, usize)>,
     /// Error threshold of each band: genuine audio falls under it in 1 % of the cases.
@@ -387,7 +387,7 @@ struct Tables {
 const CI: [f64; 8] = [-0.6, -0.535, -0.33, -0.185, -0.095, -0.041, -0.0142, -0.0037];
 
 impl Tables {
-    fn new(bands: &Bands) -> Tables {
+    pub(crate) fn new(bands: &Bands) -> Tables {
         let long_bands = Bands::ranges(&bands.long, bands.long_end);
         let short_bands = Bands::ranges(&bands.short, bands.short_end);
         let tau = |width: usize| {
@@ -447,7 +447,7 @@ impl Tables {
 
     /// One slot of the polyphase analysis: the 32 subband samples of the 512 samples of
     /// `input`, newest last.
-    fn slot(&self, input: &[f64]) -> [f64; 32] {
+    pub(crate) fn slot(&self, input: &[f64]) -> [f64; 32] {
         #[cfg(all(target_arch = "x86_64", not(bt_no_avx2)))]
         if std::is_x86_feature_detected!("avx2") {
             #[target_feature(enable = "avx2")]

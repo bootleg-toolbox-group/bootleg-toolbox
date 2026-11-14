@@ -195,6 +195,7 @@ fn subset(m: &Measured, lo: usize, hi: usize, t0: f64, t1: f64, mp3_trace: Optio
         histogram: Vec::new(),
         mp3_trace,
         aac,
+        mp2: None,
         opus: None,
     }
 }

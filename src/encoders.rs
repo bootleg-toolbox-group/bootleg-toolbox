@@ -12,6 +12,8 @@
 pub enum Codec {
     Mp3,
     Aac,
+    /// MPEG-1 Layer II: no lowpass setting is tabulated for it (E10).
+    Mp2,
     Vorbis,
     Opus,
 }
