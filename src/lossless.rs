@@ -26,11 +26,16 @@ pub struct Verdict {
     pub(crate) facts: Option<Facts>,
     /// What the show's verdict needs (None for a silent file).
     pub(crate) track: Option<crate::decision::TrackDecision>,
+    /// The AAC search was made for this file (the option, a doubt, or the sample of its show).
+    pub(crate) searched: bool,
+    /// An AAC grid of the whole file counts in the verdict: the rest of its show is worth the search
+    /// (correction 27).
+    pub(crate) aac_grid: bool,
 }
 
 impl Verdict {
     pub(crate) fn new(label: impl Into<String>, sentence: impl Into<String>, level: Level, details: Vec<String>) -> Self {
-        Verdict { label: label.into(), sentence: sentence.into(), level, details, report: Report::default(), doubt: false, facts: None, track: None }
+        Verdict { label: label.into(), sentence: sentence.into(), level, details, report: Report::default(), doubt: false, facts: None, track: None, searched: false, aac_grid: false }
     }
 }
 
@@ -64,7 +69,17 @@ fn round_py(x: f64) -> usize {
 /// The verdict for a file. An MP3 or MP2 file is lossy by its format, whatever its spectrum
 /// shows: the measures then only tell how much was cut. `aac`: also look for AAC coding
 /// traces (several times slower, an option in Settings).
-pub fn analyse(path: &Path, info: &AudioInfo, aac: bool, cancel: &AtomicBool) -> Result<Verdict, String> {
+/// An AAC grid of the whole file that a decision drawn with the AAC search counts: found, and no
+/// MP3 grid found (the slow search stops at the first codec).
+fn aac_counted(f: &Facts) -> bool {
+    !f.mp3_trace.is_some_and(|t| t.found()) && f.aac_trace.is_some_and(|t| crate::aactrace::found(&t))
+}
+
+/// The verdict of a file. `aac`: the slow searches for every file (the option). `sample`: the file
+/// is its show's sample (correction 27): without the option, the AAC search is made for it even
+/// with no doubt, alone of the slow searches; a grid found makes the verdict the one the option
+/// gives, and the show's other tracks are searched too (`ops::op_lossless`).
+pub fn analyse(path: &Path, info: &AudioInfo, aac: bool, sample: bool, cancel: &AtomicBool) -> Result<Verdict, String> {
     if info.codec.is_some_and(|c| !c.decoded()) {
         return Ok(by_format(path, info));
     }
@@ -74,11 +89,17 @@ pub fn analyse(path: &Path, info: &AudioInfo, aac: bool, cancel: &AtomicBool) ->
         match recorded.get(path.to_string_lossy().as_ref()).ok_or("no measures recorded for this file")? {
             Ok(facts) => {
                 let first = crate::decision::decide(path, facts, aac);
-                let again = !aac && first.doubt;
-                if (aac || again) && !facts.searched {
+                let doubt = !aac && first.doubt;
+                if (aac || doubt) && !facts.searched {
                     return Err("recorded without the AAC and Opus searches: record with BT_AAC=1".into());
                 }
-                if again { crate::decision::decide(path, facts, true) } else { first }
+                // The sample's AAC search finds what the recorded one found: the same detector on the same windows.
+                // Measures recorded in normal mode keep a sample's search only when it found a grid: without it, none.
+                let again = doubt || (!aac && sample && facts.searched && aac_counted(facts));
+                let mut verdict = if again { crate::decision::decide(path, facts, true) } else { first };
+                verdict.searched = aac || doubt || sample;
+                verdict.aac_grid = (aac || again) && aac_counted(facts);
+                verdict
             }
             Err(message) => {
                 write_line(path, serde_json::json!({ "error": message }));
@@ -92,16 +113,29 @@ pub fn analyse(path: &Path, info: &AudioInfo, aac: bool, cancel: &AtomicBool) ->
         let verdict = crate::decision::decide(path, &f, aac);
         // The AAC search is slow, so an option; a doubt is worth it anyway: the verdict is drawn
         // again with it, and an AAC converted straight back turns the doubt into a certainty.
+        let mut searched = aac;
         if !aac && verdict.doubt && !cancel.load(std::sync::atomic::Ordering::Relaxed) {
             f = facts(info, &measured, true, record);
             aac_done = true;
+            searched = true;
+        } else if !aac && sample && !cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            // The show's sample: the AAC search alone; kept only if it finds a grid (otherwise nothing changes).
+            let g = facts_searched(info, &measured, true, record, true);
+            searched = true;
+            if aac_counted(&g) {
+                f = g;
+                aac_done = true;
+            }
         }
         // The parts of the file (10 s slices, 50 % overlap): measured once the searches are
         // settled (BT_FACTS has them already, with every variant).
         if !record && !cancel.load(std::sync::atomic::Ordering::Relaxed) {
             (f.slices, f.segments) = segments::measure(info, &measured, &f, aac_done, Some((10.0, true)));
         }
-        crate::decision::decide(path, &f, aac_done)
+        let mut verdict = crate::decision::decide(path, &f, aac_done);
+        verdict.searched = searched;
+        verdict.aac_grid = aac_done && aac_counted(&f);
+        verdict
     };
     if info.lossy() {
         let name = info.name();
@@ -612,7 +646,13 @@ fn measure(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<Measure
 /// `all`: whichever of them is made covers every detector, even where the decision would not
 /// look at the result (BT_FACTS records everything, so that a replay can gate as it chooses).
 fn facts(info: &AudioInfo, m: &Measured, aac_check: bool, all: bool) -> Facts {
-    let mut whole = facts_of(info, m, aac_check, all, None);
+    facts_searched(info, m, aac_check, all, false)
+}
+
+/// `aac_only`: of the slow searches, AAC alone (the sample of a show, correction 27): MP2 and Opus
+/// are left out, unless every detector is run (BT_FACTS).
+fn facts_searched(info: &AudioInfo, m: &Measured, aac_check: bool, all: bool, aac_only: bool) -> Facts {
+    let mut whole = facts_of(info, m, aac_check, all, aac_only, None);
     // BT_FACTS records every variant of the slices (to choose among them and to replay); a run
     // measures the one that decides (`analyse`).
     if all {
@@ -624,7 +664,7 @@ fn facts(info: &AudioInfo, m: &Measured, aac_check: bool, all: bool) -> Facts {
 /// The measures of the file, or of a part of it: `whole`, the measures of the file, then gives what
 /// only the whole spectrum tells (the pilot tone and the tones around it), `m` being the kept
 /// frames of the part and a spectrum made of their bands (see `segments`).
-fn facts_of(info: &AudioInfo, m: &Measured, aac_check: bool, all: bool, whole: Option<&Facts>) -> Facts {
+fn facts_of(info: &AudioInfo, m: &Measured, aac_check: bool, all: bool, aac_only: bool, whole: Option<&Facts>) -> Facts {
     let Measured { samples, rate, bins, band, bin_hz, kept_lo, kept_hi, frames, check_low, low_bits, comb_check, mp3_trace, .. } = *m;
     let (window, kept, intensity, side_vs_mid, wasted, histogram) = (&m.window, &m.kept, &m.intensity, &m.side_vs_mid, &m.wasted, &m.histogram);
     let band_freq = |b: usize| (b * band) as f64 * bin_hz + (band - 1) as f64 * bin_hz / 2.0;
@@ -634,9 +674,9 @@ fn facts_of(info: &AudioInfo, m: &Measured, aac_check: bool, all: bool, whole: O
     let aac_trace = if !aac_check || (mp3_found && !all) { None } else { m.aac.clone().and_then(|a| crate::aactrace::detect(a, info.rate)) };
     let aac_found = aac_trace.is_some_and(|t| crate::aactrace::found(&t));
     // MP2 when neither was found (MP3, then AAC, then MP2, then Opus: the slow search stops at the first).
-    let mp2_trace = if !aac_check || ((mp3_found || aac_found) && !all) { None } else { m.mp2.clone().and_then(|c| crate::mp2trace::detect(c, info.rate)) };
+    let mp2_trace = if !aac_check || (aac_only && !all) || ((mp3_found || aac_found) && !all) { None } else { m.mp2.clone().and_then(|c| crate::mp2trace::detect(c, info.rate)) };
     let mp2_found = mp2_trace.is_some_and(|t| crate::mp2trace::found(&t));
-    let opus_trace = if !aac_check || ((mp3_found || aac_found || mp2_found) && !all) { None } else { m.opus.clone().and_then(|o| o.detect()) };
+    let opus_trace = if !aac_check || (aac_only && !all) || ((mp3_found || aac_found || mp2_found) && !all) { None } else { m.opus.clone().and_then(|o| o.detect()) };
     if frames == 0 {
         return Facts { rate, samples, frames: 0, mp3_trace, searched: aac_check, ..Default::default() };
     }

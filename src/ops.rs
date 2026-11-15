@@ -1094,8 +1094,37 @@ pub fn create_checksums(ctx: &Ctx, shows: &[Show], kinds: &[&'static str]) -> St
 
 // ---------------------------------------------------------------- Lossless?
 
+/// The track of a show searched for AAC traces when the option is off (correction 27), chosen
+/// from the headers before anything is read: of 3 tracks or more, the longest of those between
+/// the first and the last, never these two (an intro, a tape played over the PA, the crowd:
+/// often another source, while a short track in the middle is still the music); of 2, the longer;
+/// a single file is its own sample. `tracks`: the show's tracks in order, with their length in
+/// seconds. The first of equals.
+pub(crate) fn aac_sample(tracks: &[(PathBuf, f64)]) -> Option<&PathBuf> {
+    let n = tracks.len();
+    let range = if n < 3 { 0..n } else { 1..n - 1 };
+    range.fold(None, |best: Option<usize>, i| if best.is_none_or(|b| tracks[i].1 > tracks[b].1) { Some(i) } else { best }).map(|i| &tracks[i].0)
+}
+
+/// The sample of each show among `files` (the files of no show are their own), when the AAC
+/// search is not made for every file.
+fn aac_samples(shows: &[Show], files: &[PathBuf]) -> std::collections::HashSet<PathBuf> {
+    let length = |p: &PathBuf| audio::probe(p).ok().filter(|i| !i.lossy()).map(|i| (p.clone(), i.seconds()));
+    let selected: std::collections::HashSet<&PathBuf> = files.iter().collect();
+    let mut in_show: std::collections::HashSet<&PathBuf> = std::collections::HashSet::new();
+    let mut out = std::collections::HashSet::new();
+    for show in shows {
+        let tracks: Vec<(PathBuf, f64)> = show.files.iter().filter(|f| selected.contains(f)).filter_map(length).collect();
+        in_show.extend(show.files.iter().filter(|f| selected.contains(f)));
+        out.extend(aac_sample(&tracks).cloned());
+    }
+    out.extend(files.iter().filter(|f| !in_show.contains(f)).cloned());
+    out
+}
+
 pub fn op_lossless(ctx: &Ctx, shows: &[Show], files: &[PathBuf]) -> String {
     ctx.add_total(files.len());
+    let samples = if ctx.opt.aac_check { Default::default() } else { aac_samples(shows, files) };
     let source = |path: &Path, text: &str, level: Level, tooltip: &str, report: crate::lossless::Report| {
         ctx.wave(path);
         let _ = ctx.tx.send(Msg::Source {
@@ -1106,10 +1135,10 @@ pub fn op_lossless(ctx: &Ctx, shows: &[Show], files: &[PathBuf]) -> String {
             report: Arc::new(report),
         });
     };
-    let results = par_map(ctx, files, |p| p.clone(), |path| {
+    let analyse = |path: &PathBuf, aac: bool| -> Result<(crate::lossless::Verdict, String), String> {
         let info = audio::probe(path)?;
         ctx.info(path, &info);
-        let verdict = crate::lossless::analyse(path, &info, ctx.opt.aac_check, &ctx.cancel)?;
+        let verdict = crate::lossless::analyse(path, &info, aac, !aac && samples.contains(path), &ctx.cancel)?;
         let tooltip = format!(
             "Lossless check:\n{}",
             verdict.details.iter().map(|d| format!("\u{2022} {d}")).collect::<Vec<_>>().join("\n")
@@ -1118,7 +1147,36 @@ pub fn op_lossless(ctx: &Ctx, shows: &[Show], files: &[PathBuf]) -> String {
         source(path, &verdict.label, verdict.level, &tooltip, verdict.report.clone());
         ctx.status(path, &verdict.sentence, verdict.level, &tooltip);
         Ok((verdict, tooltip))
-    });
+    };
+    let mut results = par_map(ctx, files, |p| p.clone(), |path| analyse(path, ctx.opt.aac_check));
+    // An AAC grid in a track (the sample, or a doubt): the show's other tracks are read again with
+    // the AAC search (correction 27).
+    if !ctx.opt.aac_check && !ctx.cancelled() {
+        let index: HashMap<&PathBuf, usize> = files.iter().enumerate().map(|(i, f)| (f, i)).collect();
+        let mut again: Vec<usize> = Vec::new();
+        for show in shows {
+            let mine: Vec<usize> = show.files.iter().filter_map(|f| index.get(f).copied()).collect();
+            if mine.iter().any(|&i| results[i].as_ref().is_some_and(|(v, _)| v.aac_grid)) {
+                let todo: Vec<usize> = mine.into_iter().filter(|&i| results[i].as_ref().is_some_and(|(v, _)| !v.searched)).collect();
+                if !todo.is_empty() {
+                    ctx.log(
+                        format!("{}: AAC coding traces in a track, the other {} track(s) searched for them too", files::show_name(&show.root), todo.len()),
+                        Level::Info,
+                    );
+                }
+                again.extend(todo);
+            }
+        }
+        if !again.is_empty() {
+            ctx.add_total(again.len());
+            let paths: Vec<PathBuf> = again.iter().map(|&i| files[i].clone()).collect();
+            for (i, r) in again.into_iter().zip(par_map(ctx, &paths, |p| p.clone(), |path| analyse(path, true))) {
+                if r.is_some() {
+                    results[i] = r;
+                }
+            }
+        }
+    }
     let by_path: HashMap<&PathBuf, &(crate::lossless::Verdict, String)> =
         files.iter().zip(results.iter()).filter_map(|(f, r)| r.as_ref().map(|v| (f, v))).collect();
     // The final verdict of each file, once the show's verdict may have changed it.
@@ -2686,6 +2744,25 @@ pub fn move_to_trash(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// Correction 27: the sample of a show, from the lengths in the headers.
+    #[test]
+    fn aac_sample_of_a_show() {
+        let show = |lengths: &[f64]| lengths.iter().enumerate().map(|(i, &s)| (PathBuf::from(format!("{:02}.flac", i + 1)), s)).collect::<Vec<_>>();
+        let pick = |lengths: &[f64]| aac_sample(&show(lengths)).map(|p| p.to_string_lossy().into_owned());
+        assert_eq!(pick(&[]), None);
+        // A single file (a show in one file, a file dropped alone) is its own sample.
+        assert_eq!(pick(&[50.0]).as_deref(), Some("01.flac"));
+        // Two tracks: the longer, the first of equals.
+        assert_eq!(pick(&[200.0, 300.0]).as_deref(), Some("02.flac"));
+        assert_eq!(pick(&[200.0, 200.0]).as_deref(), Some("01.flac"));
+        // Three or more: never the first nor the last, however long; the longest of the others, however short.
+        assert_eq!(pick(&[900.0, 180.0, 240.0, 130.0, 1200.0]).as_deref(), Some("03.flac"));
+        assert_eq!(pick(&[300.0, 100.0, 110.0, 40.0]).as_deref(), Some("03.flac"));
+        assert_eq!(pick(&[30.0, 100.0, 110.0, 400.0]).as_deref(), Some("03.flac"));
+        assert_eq!(pick(&[600.0, 45.0, 600.0]).as_deref(), Some("02.flac"));
+        assert_eq!(pick(&[10.0, 90.0, 90.0, 10.0]).as_deref(), Some("02.flac"));
+    }
+
     use super::*;
 
     /// Found by fuzzing: these bytes, named .m4a, make symphonia 0.5's AAC (ADTS) reader

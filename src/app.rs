@@ -4713,7 +4713,8 @@ impl App {
                     .on_hover_text("Finds files decoded from an AAC (M4A, iTunes, streams), an Opus stream (YouTube) or an MP2 and \
                                     converted back to a lossless format, even at high bitrates and resampled to 44.1 kHz.\n\
                                     Without this option they are looked for only in the files with a doubtful lowpass \
-                                    (Lossy?, Unclear, a treble cut). With it, in every file: the analysis then takes \
+                                    (Lossy?, Unclear, a treble cut), and AAC in one track of each show, every track of \
+                                    the show when it shows them. With it, in every file: the analysis then takes \
                                     several times longer, about 10 seconds of processor time per track, spread over the \
                                     files processed in parallel.\n\
                                     MP3 coding traces are always looked for.");

@@ -310,7 +310,7 @@ pub(super) fn measure(info: &AudioInfo, m: &Measured, whole: &Facts, aac_check: 
             let r = frames_of(t0, t1);
             let mut slice = Slice { t0, t1, frames: r.len() as u32, ..Default::default() };
             if r.len() >= MIN_FRAMES {
-                let f = facts_of(info, &subset(m, r.start, r.end, t0, t1, None, None), false, false, Some(whole));
+                let f = facts_of(info, &subset(m, r.start, r.end, t0, t1, None, None), false, false, false, Some(whole));
                 (slice.cutoff, slice.holes, slice.above_floor, slice.hf) = (f.cutoff, f.holes, f.above_floor, f.hf);
             }
             let (a0, a1) = atoms_of(t0, t1);
@@ -362,7 +362,7 @@ pub(super) fn measure(info: &AudioInfo, m: &Measured, whole: &Facts, aac_check: 
                         let ch = m.atoms_channels;
                         // No grid is looked for under hiss above the cutoff: an analog stage came after the
                         // coding, and a grid does not survive one (amendment 16, as amendment 6).
-                        let plain = facts_of(info, &subset(m, r.start, r.end, t0, t1, None, None), false, false, Some(whole));
+                        let plain = facts_of(info, &subset(m, r.start, r.end, t0, t1, None, None), false, false, false, Some(whole));
                         let (trace, aac_windows) = if search && !crate::decision::hiss_above_cutoff(&plain) {
                             (
                                 Collector::from_windows(ch, 576, 4, loudest(&m.atoms_mp3, a0, a1)).detect(m.rate as u32),
@@ -375,7 +375,7 @@ pub(super) fn measure(info: &AudioInfo, m: &Measured, whole: &Facts, aac_check: 
                             // Nothing was searched: the measures are the ones just made.
                             Box::new(Facts { searched: aac_check, ..plain })
                         } else {
-                            Box::new(facts_of(info, &subset(m, r.start, r.end, t0, t1, trace, aac_windows), aac_check, true, Some(whole)))
+                            Box::new(facts_of(info, &subset(m, r.start, r.end, t0, t1, trace, aac_windows), aac_check, true, false, Some(whole)))
                         };
                         f.wasted = whole.wasted.clone();
                         f.zero_low = whole.zero_low;
