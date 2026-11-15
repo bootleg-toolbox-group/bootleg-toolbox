@@ -56,7 +56,7 @@ pub fn collector(channels: usize) -> Collector {
 
 /// Is this a trace of MP2 coding?
 pub fn found(t: &Trace) -> bool {
-    t.likelihood > THRESHOLD && t.contrast >= MIN_CONTRAST
+    t.refused.is_none() && t.likelihood > THRESHOLD && t.contrast >= MIN_CONTRAST
 }
 
 /// Candidates tried per (part, subband).

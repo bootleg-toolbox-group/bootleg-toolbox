@@ -160,7 +160,7 @@ type Mode = (bool, fn([f32; 2]) -> f64);
 
 /// Is this a trace of AAC coding?
 pub fn found(t: &Trace) -> bool {
-    t.likelihood > THRESHOLD && t.contrast >= MIN_CONTRAST
+    t.refused.is_none() && t.likelihood > THRESHOLD && t.contrast >= MIN_CONTRAST
 }
 
 /// An MDCT of 2N samples into N lines (the detector's definition), computed as a DCT-IV of

@@ -581,11 +581,14 @@ pub(crate) fn findings(f: &Judged) -> Vec<Finding> {
             Side::Lossy,
             Strength::Weak,
             format!(
-                "A weak MP3 grid at position {}: {:.1} % of the bands round onto it, {:.1} standard deviations above chance (a grid counts as found from {:.0})",
+                "A weak MP3 grid at position {}: {:.1} % of the bands round onto it, {:.1} standard deviations above chance (a grid counts as found from {})",
                 t.offset,
                 t.likelihood * 100.0,
                 t.contrast,
-                crate::mp3trace::MIN_CONTRAST
+                match t.refused {
+                    Some(needed) => format!("{needed:.1} in a part of this file, given the parts searched"),
+                    None => format!("{:.0}", crate::mp3trace::MIN_CONTRAST),
+                }
             ),
         );
     }
@@ -1192,6 +1195,9 @@ pub(crate) fn decide(path: &Path, f: &Facts, aac_check: bool) -> Verdict {
     report.reasoning = reasoning(&class, &found, &j);
     report.confidence = Some(class.state.confidence());
     let mut track = TrackDecision::of(&class, &found, f);
+    if !matches!(class.state, State::R | State::O) {
+        report.measures.extend(refused_grids(f, aac_check));
+    }
     if let Some(p) = part {
         if p.uneven {
             // Said, not counted: no change to the colour, the state or the show.
@@ -1275,6 +1281,122 @@ fn part_rank(class: &Class, found: &[Finding]) -> PartRank {
     }
 }
 
+/// The law of a grid's contrast in a part of a lossless file (correction 26, notes/CORRECTION-26.md):
+/// P(contrast >= t) = `share` * exp(-(t - PART_GRID_FROM) / `scale`), fitted above PART_GRID_FROM on
+/// the 517 parts searched in the 1 451 files of lossless truth of the tuning group and banks
+/// (15/11/2026, notes/c26/). A part is searched in the loudest windows of 10 to 30 s, neighbours of
+/// each other: the AAC contrast of a part has a far heavier tail than that of a whole file.
+struct PartGridLaw {
+    share: f64,
+    scale: f64,
+    /// What one search of a whole file accepts: the same tail on whole files, at the detector's threshold.
+    alpha: f64,
+    /// The share of the null parts whose best position is that of the whole file (±1): the
+    /// chance of a confirmation (far over 3 in a period, as the part's windows are the file's).
+    confirmed: f64,
+    /// Grid positions in a period, samples.
+    period: usize,
+}
+
+const PART_GRID_FROM: f64 = 6.0;
+const PART_GRID_MP3: PartGridLaw = PartGridLaw { share: 0.0600, scale: 0.477, alpha: 6.50e-6, confirmed: 0.0484, period: 576 };
+const PART_GRID_AAC: PartGridLaw = PartGridLaw { share: 0.2108, scale: 1.062, alpha: 9.12e-5, confirmed: 0.0097, period: 1024 };
+/// MP2 is never searched in a part (no null law): the AAC one, the most severe, by prudence.
+const PART_GRID_MP2: PartGridLaw = PartGridLaw { period: 384, ..PART_GRID_AAC };
+/// Another part confirms a position from this contrast.
+const PART_GRID_WITNESS: f64 = 6.0;
+
+/// The contrast a grid needs in a part, out of `searched` parts of the file searched for that
+/// codec, to be as sure as a grid found in a whole file: the tests are counted (Bonferroni), a
+/// confirmed position divides them by the chance of a confirmation. Never under the detector's own.
+fn part_grid_threshold(law: &PartGridLaw, searched: usize, confirmed: bool) -> f64 {
+    let tests = searched.max(1) as f64 * if confirmed { law.confirmed } else { 1.0 };
+    (PART_GRID_FROM + law.scale * libm::log(law.share * tests / law.alpha)).max(crate::mp3trace::MIN_CONTRAST)
+}
+
+/// The parts that may name a track (§1.5): 10 s slices, 50 % overlap, at least 2 slices.
+fn deciding_parts(f: &Facts) -> impl Iterator<Item = &crate::lossless::segments::Part> {
+    f.segments.iter().filter(|p| p.size == PART_SIZE && p.overlap && p.slices >= PART_SLICES && p.facts.frames > 0)
+}
+
+/// A grid's measures in a part's facts, with its law and its detector.
+struct PartGrid {
+    name: &'static str,
+    of: fn(&Facts) -> Option<crate::mp3trace::Trace>,
+    found: fn(&crate::mp3trace::Trace) -> bool,
+    law: &'static PartGridLaw,
+}
+
+const PART_GRIDS: [PartGrid; 3] = [
+    PartGrid { name: "MP3", of: |f| f.mp3_trace, found: |t| t.found(), law: &PART_GRID_MP3 },
+    PartGrid { name: "AAC", of: |f| f.aac_trace, found: crate::aactrace::found, law: &PART_GRID_AAC },
+    PartGrid { name: "MP2", of: |f| f.mp2_trace, found: crate::mp2trace::found, law: &PART_GRID_MP2 },
+];
+
+/// A grid of part `p` with the contrast it needs (correction 26): `refused` is set when it is
+/// found by its detector but under that contrast. A position is confirmed by the whole file's
+/// best one, or by another part's, apart in time.
+fn judged_grid(f: &Facts, p: &crate::lossless::segments::Part, g: &PartGrid) -> Option<crate::mp3trace::Trace> {
+    let t = (g.of)(&p.facts)?;
+    if !(g.found)(&t) {
+        return Some(t);
+    }
+    let period = g.law.period as i64;
+    let near = |o: usize| {
+        let d = (o as i64 - t.offset as i64).rem_euclid(period);
+        d <= 1 || d >= period - 1
+    };
+    let others: Vec<_> = deciding_parts(f).filter(|q| (g.of)(&q.facts).is_some()).collect();
+    let confirmed = (g.of)(f).is_some_and(|w| near(w.offset))
+        || others.iter().any(|q| (q.t1 <= p.t0 || q.t0 >= p.t1) && (g.of)(&q.facts).is_some_and(|w| w.contrast >= PART_GRID_WITNESS && near(w.offset)));
+    let needed = part_grid_threshold(g.law, others.len(), confirmed);
+    Some(if t.contrast >= needed { t } else { crate::mp3trace::Trace { refused: Some(needed), ..t } })
+}
+
+/// The measures of a part with its grids judged against the number of parts searched in the file
+/// (correction 26). A grid that does not resist them counts as not found, as a weaker grid of
+/// the same codec would: for MP3 a weak grid (C3), for AAC and MP2 nothing. So a stronger grid
+/// never counts less than a weaker one. Opus is never searched in a part and has no contrast:
+/// its traces there are dropped.
+fn admitted_grids(f: &Facts, p: &crate::lossless::segments::Part) -> Facts {
+    let [mp3, aac, mp2] = &PART_GRIDS;
+    Facts {
+        mp3_trace: judged_grid(f, p, mp3),
+        aac_trace: judged_grid(f, p, aac),
+        mp2_trace: judged_grid(f, p, mp2),
+        opus_trace: None,
+        ..(*p.facts).clone()
+    }
+}
+
+/// An information line for each grid of a deciding part that the decision looked at and did not
+/// count (correction 26): AAC and MP2 only when their search counts, as in `Judged`.
+fn refused_grids(f: &Facts, aac_check: bool) -> Vec<crate::report::Measure> {
+    let searched = |g: &PartGrid| deciding_parts(f).filter(|q| (g.of)(&q.facts).is_some()).count();
+    let mut out = Vec::new();
+    for p in deciding_parts(f) {
+        let facts = admitted_grids(f, p);
+        let j = Judged::new(&facts, aac_check);
+        for (g, t) in PART_GRIDS.iter().zip([facts.mp3_trace, j.aac_trace, j.mp2_trace]) {
+            let Some((t, needed)) = t.and_then(|t| t.refused.map(|n| (t, n))) else { continue };
+            out.push(crate::report::Measure {
+                name: "Part grid not counted".into(),
+                value: format!("{}–{}", mmss(p.t0), mmss(p.t1)),
+                meaning: format!(
+                    "{} coding grid at {}, contrast {:.1}, below the threshold for a part of this file ({:.1}): {} parts of the file were searched, and chance alone puts a grid that high in one of them more often than in a whole file",
+                    g.name,
+                    t.offset,
+                    t.contrast,
+                    needed,
+                    searched(g)
+                ),
+                level: Level::Info,
+            });
+        }
+    }
+    out
+}
+
 /// What a lossy part of a file that is not lossy as a whole turns the track into (§1.5).
 struct PartCall {
     /// An uneven passage: the verdict of the file stays, a line says where.
@@ -1297,8 +1419,9 @@ fn part_call(f: &Facts, whole: State, aac_check: bool) -> Option<PartCall> {
     }
     type Chosen<'a> = (PartRank, f64, &'a crate::lossless::segments::Part, Class, Vec<Finding>, (String, Level, String));
     let mut best: Option<Chosen> = None;
-    for p in f.segments.iter().filter(|p| p.size == PART_SIZE && p.overlap && p.slices >= PART_SLICES && p.facts.frames > 0) {
-        let j = Judged::new(&p.facts, aac_check);
+    let admitted: Vec<(&crate::lossless::segments::Part, Facts)> = deciding_parts(f).map(|p| (p, admitted_grids(f, p))).collect();
+    for (p, facts) in &admitted {
+        let j = Judged::new(facts, aac_check);
         let found = findings(&j);
         let class = classify(&found);
         let rank = part_rank(&class, &found);
@@ -1314,7 +1437,7 @@ fn part_call(f: &Facts, whole: State, aac_check: bool) -> Option<PartCall> {
         };
         if best.as_ref().is_none_or(|b| (key(rank), length) > (key(b.0), b.1)) {
             let words = wording(&class, &found, &j);
-            best = Some((rank, length, p, class, found, words));
+            best = Some((rank, length, *p, class, found, words));
         }
     }
     let (rank, _, p, class, found, (_, level, sentence)) = best?;
@@ -1366,14 +1489,14 @@ pub(crate) struct PartVerdict {
 }
 
 /// The state of every part of the file, from the measures of the part alone: the clues are the
-/// ones of the whole file, with the same rules.
+/// ones of the whole file, with the same rules, and only the grids that resist the parts searched.
 pub(crate) fn part_verdicts(f: &Facts, aac_check: bool) -> Vec<PartVerdict> {
     f.segments
         .iter()
         .filter(|p| p.facts.frames > 0)
         .map(|p| {
-            let facts: &Facts = &p.facts;
-            let j = Judged::new(facts, aac_check);
+            let facts = admitted_grids(f, p);
+            let j = Judged::new(&facts, aac_check);
             let found = findings(&j);
             let class = classify(&found);
             let (label, _, _) = wording(&class, &found, &j);
@@ -2766,5 +2889,163 @@ mod tests {
         let v = decide(Path::new("a.flac"), &f, false);
         // Red beats orange, whatever their lengths.
         assert_eq!(v.label, "Lossy part 01:40–02:00");
+    }
+
+    /// Correction 26: a trace at a position, as measured.
+    fn at(contrast: f64, likelihood: f64, offset: usize) -> Option<Trace> {
+        Some(Trace { offset, ..grid(likelihood, contrast) })
+    }
+
+    /// A part: t0, t1, slices, MP3 trace, AAC trace.
+    type Spec = (f64, f64, u32, Option<Trace>, Option<Trace>);
+
+    /// A file of 300 s, not lossy as a whole, with parts.
+    fn with_parts(whole_mp3: Option<Trace>, whole_aac: Option<Trace>, parts: &[Spec]) -> Facts {
+        let base = Facts { rate: 44100.0, samples: 44100 * 300, frames: 3000, hf: Some(-30.0), mp3_trace: whole_mp3, aac_trace: whole_aac, ..Default::default() };
+        let segments = parts
+            .iter()
+            .map(|&(t0, t1, slices, mp3, aac)| crate::lossless::segments::Part {
+                size: 10.0,
+                overlap: true,
+                t0,
+                t1,
+                slices,
+                facts: Box::new(Facts { aac_trace: aac, ..part_facts(mp3) }),
+            })
+            .collect();
+        Facts { segments, ..base }
+    }
+
+    #[test]
+    fn part_grid_thresholds_follow_the_fitted_laws() {
+        let t = |law: &PartGridLaw, n: usize, c: bool| libm::round(part_grid_threshold(law, n, c) * 100.0) / 100.0;
+        // notes/CORRECTION-26.md: MP3 10.36 for one part, 12.01 for 32; AAC 14.23, 16.13 for 6, 17.91.
+        assert_eq!((t(&PART_GRID_MP3, 1, false), t(&PART_GRID_MP3, 32, false)), (10.36, 12.01));
+        assert_eq!((t(&PART_GRID_AAC, 1, false), t(&PART_GRID_AAC, 6, false), t(&PART_GRID_AAC, 32, false)), (14.23, 16.13, 17.91));
+        // A confirmed position: never under the detector's 10.
+        assert_eq!((t(&PART_GRID_MP3, 3, true), t(&PART_GRID_AAC, 1, true), t(&PART_GRID_AAC, 32, true)), (10.0, 10.0, 12.98));
+        assert_eq!(t(&PART_GRID_AAC, 0, false), t(&PART_GRID_AAC, 1, false));
+        // MP2 is as severe as AAC.
+        assert_eq!(t(&PART_GRID_MP2, 6, false), t(&PART_GRID_AAC, 6, false));
+    }
+
+    #[test]
+    fn loud_park_part_grid_does_not_resist_the_parts_searched() {
+        // Loud Park 2010 01-04 (old reserved group, FM, denoised, lossless): an AAC grid in 03:00–03:15 only,
+        // contrast 10.69 at 325; the whole file's best position is 622, the other 5 parts searched are elsewhere.
+        let parts = |grid: f64| {
+            with_parts(
+                at(3.905, 0.01904, 402),
+                at(5.627, 0.02056, 622),
+                &[
+                    (0.0, 30.0, 5, at(5.289, 0.02094, 320), at(4.909, 0.01966, 562)),
+                    (25.0, 75.0, 9, None, None),
+                    (70.0, 95.0, 4, at(4.317, 0.02059, 181), at(6.943, 0.025, 817)),
+                    (130.0, 170.0, 7, at(3.699, 0.01857, 146), at(6.155, 0.02037, 1005)),
+                    (180.0, 195.0, 2, at(4.402, 0.02303, 492), at(grid, 0.03365, 325)),
+                    (195.0, 215.0, 3, at(4.418, 0.02168, 500), at(5.259, 0.02428, 979)),
+                    (230.0, 255.0, 4, at(3.777, 0.01985, 110), at(5.171, 0.02197, 280)),
+                ],
+            )
+        };
+        let v = decide(Path::new("01-04.flac"), &parts(10.688), true);
+        assert!(!v.label.contains("part"), "{}", v.label);
+        assert_ne!(v.level, Level::Error);
+        assert!(part_verdicts(&parts(10.688), true).iter().all(|p| p.state != State::R));
+        // Over the threshold for 6 parts (16.1), the same grid names the track.
+        assert_eq!(decide(Path::new("01-04.flac"), &parts(16.5), true).label, "Lossy part 03:00–03:15");
+        // The refused grid is said, not counted.
+        let v = decide(Path::new("01-04.flac"), &parts(10.688), true);
+        let lines: Vec<_> = v.report.measures.iter().filter(|m| m.name == "Part grid not counted").collect();
+        assert_eq!(lines.len(), 1);
+        assert_eq!((lines[0].value.as_str(), lines[0].level), ("03:00–03:15", Level::Info));
+        assert!(lines[0].meaning.starts_with("AAC coding grid at 325, contrast 10.7, below the threshold for a part of this file (16.1): 6 parts"), "{}", lines[0].meaning);
+        // Without the slow search the AAC grid is not looked at: nothing to say.
+        assert!(!decide(Path::new("01-04.flac"), &parts(10.688), false).report.measures.iter().any(|m| m.name == "Part grid not counted"));
+    }
+
+    #[test]
+    fn a_stronger_part_grid_never_counts_less() {
+        // One part of 3 searched for its codec, no confirmation (MP3 needs 10.88, AAC and MP2 14.96): a weak grid (9), a
+        // refused one (10.5), an admitted one (20), with and without a spectral clue of the part.
+        let severity = |s: State| match s {
+            State::R => 4,
+            State::O => 3,
+            State::U(_) => 2,
+            State::L2 => 1,
+            State::L1 => 0,
+        };
+        let clue = |f: Facts| Facts { cutoff: Some(16000.0), holes: Some(20.0), above_floor: Some(12.0), hiss: Some((12.0, 12.0, 0.0)), ..f };
+        type Set = fn(Facts, Option<Trace>) -> Facts;
+        let codecs: [(&str, Set); 3] = [
+            ("MP3", |f, t| Facts { mp3_trace: t, ..f }),
+            ("AAC", |f, t| Facts { aac_trace: t, ..f }),
+            ("MP2", |f, t| Facts { mp2_trace: t, ..f }),
+        ];
+        for (name, set) in codecs {
+            for spectral in [false, true] {
+                let state = |contrast: f64| {
+                    let part = |t0: f64, t1: f64, t: Option<Trace>| crate::lossless::segments::Part {
+                        size: 10.0,
+                        overlap: true,
+                        t0,
+                        t1,
+                        slices: 3,
+                        facts: Box::new(set(Facts { frames: 300, ..part_facts(None) }, t)),
+                    };
+                    let mut target = part(40.0, 70.0, at(contrast, 0.05, 100));
+                    if spectral {
+                        target.facts = Box::new(clue(*target.facts));
+                    }
+                    let base = Facts { rate: 44100.0, samples: 44100 * 300, frames: 3000, hf: Some(-30.0), ..Default::default() };
+                    let f = Facts { segments: vec![target, part(100.0, 130.0, at(4.0, 0.02, 300)), part(150.0, 180.0, at(4.0, 0.02, 500))], ..set(base, at(4.0, 0.02, 700)) };
+                    let v = decide(Path::new("a.flac"), &f, true);
+                    (severity(v.track.expect("a track").state), v.label)
+                };
+                let (weak, refused, admitted) = (state(9.0), state(10.5), state(20.0));
+                // MP3: a weak grid and a refused one are a weak clue (C3), orange only in a pair with the spectral clue;
+                // AAC and MP2 have no weak clue: the spectral clue alone is an uneven passage, the file keeps its verdict.
+                let expected = if name == "MP3" && spectral { "Lossy? part 00:40–01:10" } else { "Lossless" };
+                assert_eq!(weak.1, expected, "{name} {spectral}");
+                assert!(weak.0 <= refused.0 && refused.0 <= admitted.0, "{name} {spectral}: {weak:?} {refused:?} {admitted:?}");
+                // A refused grid counts as a weak one; an admitted one names the part.
+                assert_eq!(refused, weak, "{name} {spectral}");
+                assert_eq!(admitted.1, "Lossy part 00:40–01:10", "{name} {spectral}");
+            }
+        }
+    }
+
+    #[test]
+    fn mp3hq_320_weak_part_grids_are_confirmed_by_the_whole_file() {
+        // mp3hq e07-320 (lame-mpglib) and e16-320 (ffmpeg-mp3fixed): MP3 320k, the whole file under 10, a part
+        // between 10 and the threshold for 3 parts (10.88), at the position of the whole file (528).
+        let e07 = |o: usize| {
+            with_parts(at(9.764, 0.0253, o), None, &[(0.0, 45.0, 8, at(10.519, 0.02753, 528), None), (45.0, 60.0, 2, at(4.85, 0.02381, o), None), (60.0, 80.0, 3, at(6.035, 0.02532, o), None)])
+        };
+        assert_eq!(decide(Path::new("e07.flac"), &e07(528), false).label, "Lossy part 00:00–00:45");
+        let e16 = with_parts(
+            at(9.871, 0.02567, 528),
+            None,
+            &[(5.0, 90.0, 16, None, None), (0.0, 50.0, 9, at(10.674, 0.02679, 528), None), (50.0, 65.0, 2, at(6.591, 0.02679, 528), None), (75.0, 90.0, 2, at(5.32, 0.02358, 510), None)],
+        );
+        assert_eq!(decide(Path::new("e16.flac"), &e16, false).label, "Lossy part 00:00–00:50");
+        // The same grid at a position nothing confirms is not admitted.
+        assert!(!decide(Path::new("e07.flac"), &e07(100), false).label.contains("part"));
+    }
+
+    #[test]
+    fn a_part_position_is_confirmed_by_the_whole_file_or_by_another_part_apart_in_time() {
+        // An AAC grid of 12 in one of 2 parts searched: under the threshold of 2 parts (15.0), over the confirmed one (10).
+        let file = |whole: usize, other: (f64, f64, f64, usize)| {
+            with_parts(None, at(4.0, 0.02, whole), &[(40.0, 70.0, 5, None, at(12.0, 0.05, 1023)), (other.0, other.1, 3, None, at(other.2, 0.02, other.3))])
+        };
+        let red = |f: &Facts| decide(Path::new("a.flac"), f, true).label.starts_with("Lossy part 00:40");
+        assert!(!red(&file(500, (100.0, 130.0, 7.0, 300))), "unconfirmed");
+        assert!(red(&file(0, (100.0, 130.0, 7.0, 300))), "the whole file's position, one sample apart across the period");
+        assert!(red(&file(500, (100.0, 130.0, 7.0, 1022))), "another part, apart in time");
+        assert!(red(&file(500, (70.0, 100.0, 7.0, 1022))), "another part that starts where it ends");
+        assert!(!red(&file(500, (60.0, 90.0, 7.0, 1022))), "a part that shares windows confirms nothing");
+        assert!(!red(&file(500, (100.0, 130.0, 5.0, 1022))), "a part under the witness contrast confirms nothing");
+        assert!(!red(&file(500, (100.0, 130.0, 7.0, 1020))), "two samples away");
     }
 }

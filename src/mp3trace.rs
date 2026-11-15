@@ -55,11 +55,16 @@ pub struct Trace {
     pub windows: u8,
     #[serde(default)]
     pub window_best: [u16; WINDOWS],
+    /// A grid of a part of a file that does not resist the number of parts searched (correction
+    /// 26): the contrast it would have needed. It counts as not found, as a weaker grid would.
+    /// Set by the decision on its own copy of a part's measures, never recorded.
+    #[serde(skip)]
+    pub refused: Option<f64>,
 }
 
 impl Trace {
     pub fn found(&self) -> bool {
-        self.likelihood > THRESHOLD && self.contrast >= MIN_CONTRAST
+        self.refused.is_none() && self.likelihood > THRESHOLD && self.contrast >= MIN_CONTRAST
     }
 }
 
