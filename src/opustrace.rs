@@ -170,7 +170,7 @@ fn clean_bands(x: &[f64]) -> usize {
 fn band_ok(band: &[f64]) -> bool {
     let mut size = band.len();
     while size >= 4 {
-        if band.chunks(size).all(|piece| codeword_error(piece) < TOLERANCE) {
+        if band.chunks(size).all(is_word) {
             return true;
         }
         if size % 2 == 1 {
@@ -181,7 +181,9 @@ fn band_ok(band: &[f64]) -> bool {
     false
 }
 
-/// How far a piece is from the nearest direction of a small-integer vector (|sum| <= K_MAX).
+/// How far a piece is from the nearest direction of a small-integer vector (|sum| <= K_MAX): the reference
+/// of `is_word`, which the detector uses.
+#[cfg(test)]
 fn codeword_error(piece: &[f64]) -> f64 {
     #[cfg(all(target_arch = "x86_64", not(bt_no_avx2)))]
     if std::is_x86_feature_detected!("avx2") {
@@ -193,6 +195,86 @@ fn codeword_error(piece: &[f64]) -> f64 {
         return unsafe { avx2(piece) };
     }
     codeword_error_plain(piece)
+}
+
+
+/// `codeword_error(piece) < TOLERANCE`, decided without finishing the sums of the K that cannot
+/// get there: a K is dropped when the cosine between the unit piece and its integer vector is
+/// below 1 - 4 times what the tolerance asks (the rounding of the sums is 1e-15, the margin 1e-5),
+/// and a K that stays is judged by the formula of `codeword_error` itself.
+fn is_word(piece: &[f64]) -> bool {
+    #[cfg(all(target_arch = "x86_64", not(bt_no_avx2)))]
+    if std::is_x86_feature_detected!("avx2") {
+        #[target_feature(enable = "avx2")]
+        fn avx2(piece: &[f64]) -> bool {
+            is_word_plain(piece)
+        }
+        // SAFETY: the processor has AVX2 (checked just above).
+        return unsafe { avx2(piece) };
+    }
+    is_word_plain(piece)
+}
+
+/// Longest piece `is_word` filters (the bands are cut in halves down to 4 values: 32 at most).
+const WORD_MAX: usize = 32;
+
+/// libm::round (away from zero) as vector operations, for |x| < 2^52.
+#[inline(always)]
+fn round_away(x: f64) -> f64 {
+    (x + 0.499_999_999_999_999_94f64.copysign(x)).trunc()
+}
+
+#[inline(always)]
+fn is_word_plain(piece: &[f64]) -> bool {
+    let norm = energy(piece).sqrt();
+    if norm < 1e-12 {
+        return true;
+    }
+    let l1: f64 = piece.iter().map(|v| v.abs()).sum::<f64>() / norm;
+    // Anything the filter's arithmetic does not cover (overflow, a piece too long): the formula itself.
+    if piece.len() > WORD_MAX || !norm.is_finite() || !l1.is_finite() || l1 <= 0.0 {
+        return codeword_error_plain(piece) < TOLERANCE;
+    }
+    let mut unit = [0f64; WORD_MAX];
+    for (u, v) in unit.iter_mut().zip(piece) {
+        *u = v / norm;
+    }
+    let unit = &unit[..piece.len()];
+    // e = sqrt(2 - 2 cos) < TOLERANCE needs cos > 1 - TOLERANCE^2 / 2.
+    const COS_MIN: f64 = 1.0 - 2.0 * TOLERANCE * TOLERANCE;
+    let split = unit.len() / 4 * 4;
+    for k in 1..=K_MAX {
+        let scale = k as f64 / l1;
+        let (mut dot, mut yy) = ([0f64; 4], [0f64; 4]);
+        for us in unit[..split].as_chunks::<4>().0 {
+            for l in 0..4 {
+                let y = round_away(us[l] * scale);
+                dot[l] += y * us[l];
+                yy[l] += y * y;
+            }
+        }
+        let (mut dot, mut yy) = (dot.iter().sum::<f64>(), yy.iter().sum::<f64>());
+        for u in &unit[split..] {
+            let y = round_away(u * scale);
+            dot += y * u;
+            yy += y * y;
+        }
+        // yy adds squares of small integers (|y| is about K_MAX at most): exact in any order. The dot only feeds the filter.
+        if yy == 0.0 || dot <= 0.0 || dot * dot < yy * COS_MIN * COS_MIN {
+            continue;
+        }
+        // The exact test of `codeword_error` for this K.
+        let (mut dot, mut yy) = (0.0, 0.0);
+        for &v in piece {
+            let y = libm::round(v / norm * scale);
+            dot += y * v / norm;
+            yy += y * y;
+        }
+        if yy != 0.0 && (2.0 - 2.0 * dot / yy.sqrt()).max(0.0).sqrt() < TOLERANCE {
+            return true;
+        }
+    }
+    false
 }
 
 /// K tried 4 at a time (side by side: each K's sums still add their terms in order), then
@@ -690,6 +772,69 @@ mod tests {
             // A codeword (small integers), found at its own K.
             let word: Vec<f64> = (0..len).map(|i| ((i * 7) % 5) as f64 - 2.0).collect();
             assert_eq!(codeword_error(&word).to_bits(), codeword_error_plain(&word).to_bits());
+        }
+    }
+
+    /// The filtered decision is the full one: random pieces, integer vectors (in every length 4..=32, at
+    /// amplitudes from 1e-14 to 1e150) pushed off their direction by amounts that cross the tolerance,
+    /// halves (ties of the rounding), zeros, one nonzero value, infinities and NaN.
+    #[test]
+    fn is_word_decides_like_codeword_error() {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let (mut words, mut near, mut total) = (0, 0, 0);
+        let mut check = |piece: &[f64], what: &str| {
+            let full = codeword_error(piece);
+            assert_eq!(is_word(piece), full < TOLERANCE, "{what}: {piece:?}");
+            total += 1;
+            words += usize::from(full < TOLERANCE);
+            near += usize::from((TOLERANCE / 3.0..TOLERANCE * 3.0).contains(&full));
+        };
+        for round in 0..40_000 {
+            let len = 4 + round % 29;
+            let amplitude = [1.0, 1e-14, 1e-3, 3.7, 1e6, 1e150, 1e-160][round % 7];
+            // Random.
+            let noise: Vec<f64> = (0..len).map(|_| (next() - 0.5) * amplitude).collect();
+            check(&noise, "noise");
+            // A vector of small integers, then pushed off its direction by about `s` of its length.
+            let k = 1 + (next() * 40.0) as usize;
+            let word: Vec<f64> = (0..len).map(|_| libm::round((next() - 0.5) * k as f64 * 2.0)).collect();
+            check(&word.iter().map(|v| v * amplitude).collect::<Vec<_>>(), "word");
+            let norm = word.iter().map(|v| v * v).sum::<f64>().sqrt().max(1.0);
+            for s in [0.0003, 0.001, 0.002, 0.0028, 0.003, 0.0032, 0.004, 0.006, 0.012] {
+                let pushed: Vec<f64> = word.iter().map(|v| (v + (next() - 0.5) * 2.0 * s * norm / (len as f64).sqrt() * 1.7) * amplitude).collect();
+                check(&pushed, "pushed");
+            }
+            // Halves: every tie of the rounding.
+            let halves: Vec<f64> = (0..len).map(|_| (libm::floor(next() * 6.0) / 2.0) * amplitude).collect();
+            check(&halves, "halves");
+        }
+        for len in 4..=32 {
+            check(&vec![0.0; len], "zeros");
+            check(&vec![1.0; len], "ones");
+            check(&vec![0.5; len], "half ones");
+            let mut one = vec![0.0; len];
+            one[len / 2] = 3.0;
+            check(&one, "one value");
+            one[0] = f64::INFINITY;
+            check(&one, "infinity");
+            one[0] = f64::NAN;
+            check(&one, "nan");
+            check(&(0..len).map(|i| i as f64 + 1.0).collect::<Vec<_>>(), "ramp");
+        }
+        eprintln!("{total} pieces, {words} words, {near} within a factor 3 of the tolerance");
+        assert!(words > 2_000 && near > 500, "{words} {near}");
+        for i in 0..2_000_000u64 {
+            let x = ((i * 2654435761 % 1_000_003) as f64 - 500_000.0) / 7.0 + if i % 3 == 0 { 0.5 } else { 0.0 };
+            assert_eq!(round_away(x).to_bits(), libm::round(x).to_bits(), "{x}");
+        }
+        for x in [0.5, -0.5, 1.5, -1.5, 2.5, 0.0, -0.0, 0.499_999_999_999_999_94, -0.499_999_999_999_999_94, 4503599627370495.5, 1e-300, 129.0] {
+            assert_eq!(round_away(x).to_bits(), libm::round(x).to_bits(), "{x}");
         }
     }
 
