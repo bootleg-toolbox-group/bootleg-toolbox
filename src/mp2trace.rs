@@ -85,6 +85,20 @@ fn scale_factors() -> [f64; 63] {
 
 /// (candidates under the threshold, candidates tried) for the 12 samples of a subband in a part.
 fn part_hits(x: &[f64; PART_SLOTS], sf: &[f64; 63], tau: f64) -> (usize, usize) {
+    #[cfg(all(target_arch = "x86_64", not(bt_no_avx2)))]
+    if std::is_x86_feature_detected!("avx2") {
+        #[target_feature(enable = "avx2")]
+        fn avx2(x: &[f64; PART_SLOTS], sf: &[f64; 63], tau: f64) -> (usize, usize) {
+            part_hits_plain(x, sf, tau)
+        }
+        // SAFETY: the processor has AVX2 (checked just above).
+        return unsafe { avx2(x, sf, tau) };
+    }
+    part_hits_plain(x, sf, tau)
+}
+
+#[inline(always)]
+fn part_hits_plain(x: &[f64; PART_SLOTS], sf: &[f64; 63], tau: f64) -> (usize, usize) {
     let largest = x.iter().fold(0f64, |m, v| m.max(v.abs()));
     if largest < QUIET {
         return (0, 0);
@@ -215,6 +229,27 @@ mod tests {
         // The sample that makes the scale factor the one asked for.
         x[0] = scale * (n - 1.0) / n * if top > 0 { 1.0 } else { 0.0 };
         x
+    }
+
+    #[test]
+    fn part_hits_plain_and_avx2_agree() {
+        let sf = scale_factors();
+        let tau = threshold();
+        let mut n_hits = 0;
+        for seed in 0..300u64 {
+            let x = if seed % 3 == 0 {
+                let v = crate::dsp::tests::noise(PART_SLOTS, seed);
+                std::array::from_fn(|i| v[i] * [1.0, 0.01, 3.0][seed as usize % 7 % 3])
+            } else {
+                lattice((seed as usize * 5) % 60, [3.0, 5.0, 7.0, 9.0, 15.0, 65.0][seed as usize % 6], seed)
+            };
+            for tau in [tau, 0.0, 0.02, 0.0833, 1.0] {
+                let (a, b) = (part_hits(&x, &sf, tau), part_hits_plain(&x, &sf, tau));
+                assert_eq!(a, b, "seed {seed} tau {tau}");
+                n_hits += a.0;
+            }
+        }
+        assert!(n_hits > 100, "{n_hits}");
     }
 
     #[test]
