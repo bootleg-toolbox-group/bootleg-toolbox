@@ -275,25 +275,62 @@ fn decode_frames(
         }
         pending.drain(..whole);
     };
+    // BT_PROFILE: the time the decoder works, the time the frames take, the time each waits for the other.
+    let profiled = crate::prof::enabled();
+    let micros = |t: Option<std::time::Instant>| t.map_or(0, |t| t.elapsed().as_micros() as u64);
+    let now = || profiled.then(std::time::Instant::now);
     let Some(_thread) = Busy::spare() else {
-        audio::read_pcm(path, cancel, hand_out)?;
+        crate::prof::decoded("inline");
+        let (start, cpu0) = (now(), crate::prof::cpu_now());
+        let mut frames_us = 0u64;
+        audio::read_pcm(path, cancel, |chunk| {
+            let t = now();
+            hand_out(chunk);
+            frames_us += micros(t);
+        })?;
+        if profiled {
+            let (total, cpu) = (micros(start), crate::prof::cpu_now().saturating_sub(cpu0));
+            crate::prof::add("decode", total.saturating_sub(frames_us), 0);
+            // Inline, the thread's CPU time is that of the decoding and the frames together.
+            crate::prof::add("frames", frames_us, cpu);
+        }
         return Ok(());
     };
+    crate::prof::decoded("thread");
     // A thread is free: the file is decoded in it while the frames are handed out here.
     let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(8);
-    std::thread::scope(|scope| {
+    let cpu0 = crate::prof::cpu_now();
+    let (mut waiting_us, mut frames_us) = (0u64, 0u64);
+    let (result, (decode_wall, blocked_us, decode_cpu)) = std::thread::scope(|scope| {
         let decoder = scope.spawn(move || {
             lower_priority();
-            audio::read_pcm(path, cancel, |chunk| {
+            let (start, cpu0) = (now(), crate::prof::cpu_now());
+            let mut blocked_us = 0u64;
+            let result = audio::read_pcm(path, cancel, |chunk| {
+                let t = now();
                 // The receiver only stops early on a panic, which is passed on below.
                 let _ = tx.send(chunk.to_vec());
-            })
+                blocked_us += micros(t);
+            });
+            (result, (micros(start), blocked_us, crate::prof::cpu_now().saturating_sub(cpu0)))
         });
-        for chunk in rx {
+        loop {
+            let t = now();
+            let Ok(chunk) = rx.recv() else { break };
+            waiting_us += micros(t);
+            let t = now();
             hand_out(&chunk);
+            frames_us += micros(t);
         }
         decoder.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-    })?;
+    });
+    result?;
+    if profiled {
+        crate::prof::add("decode", decode_wall.saturating_sub(blocked_us), decode_cpu);
+        crate::prof::add("decoder_blocked", blocked_us, 0);
+        crate::prof::add("frames", frames_us, crate::prof::cpu_now().saturating_sub(cpu0));
+        crate::prof::add("waiting_for_decoder", waiting_us, 0);
+    }
     Ok(())
 }
 

@@ -1124,7 +1124,11 @@ fn aac_samples(shows: &[Show], files: &[PathBuf]) -> std::collections::HashSet<P
 
 pub fn op_lossless(ctx: &Ctx, shows: &[Show], files: &[PathBuf]) -> String {
     ctx.add_total(files.len());
-    let samples = if ctx.opt.aac_check { Default::default() } else { aac_samples(shows, files) };
+    crate::prof::start();
+    let samples = {
+        let _f = crate::prof::file(Path::new("<aac_samples>"), "main");
+        if ctx.opt.aac_check { Default::default() } else { aac_samples(shows, files) }
+    };
     let source = |path: &Path, text: &str, level: Level, tooltip: &str, report: crate::lossless::Report| {
         ctx.wave(path);
         let _ = ctx.tx.send(Msg::Source {
@@ -1135,8 +1139,10 @@ pub fn op_lossless(ctx: &Ctx, shows: &[Show], files: &[PathBuf]) -> String {
             report: Arc::new(report),
         });
     };
-    let analyse = |path: &PathBuf, aac: bool| -> Result<(crate::lossless::Verdict, String), String> {
+    let analyse = |path: &PathBuf, aac: bool, phase: &'static str| -> Result<(crate::lossless::Verdict, String), String> {
+        let _f = crate::prof::file(path, phase);
         let info = audio::probe(path)?;
+        crate::prof::describe(path, info.seconds(), info.rate, info.bits, info.channels);
         ctx.info(path, &info);
         let verdict = crate::lossless::analyse(path, &info, aac, !aac && samples.contains(path), &ctx.cancel)?;
         let tooltip = format!(
@@ -1148,7 +1154,9 @@ pub fn op_lossless(ctx: &Ctx, shows: &[Show], files: &[PathBuf]) -> String {
         ctx.status(path, &verdict.sentence, verdict.level, &tooltip);
         Ok((verdict, tooltip))
     };
-    let mut results = par_map(ctx, files, |p| p.clone(), |path| analyse(path, ctx.opt.aac_check));
+    crate::prof::mark("pass_start:main");
+    let mut results = par_map(ctx, files, |p| p.clone(), |path| analyse(path, ctx.opt.aac_check, "main"));
+    crate::prof::mark("pass_end:main");
     // An AAC grid in a track (the sample, or a doubt): the show's other tracks are read again with
     // the AAC search (correction 27).
     if !ctx.opt.aac_check && !ctx.cancelled() {
@@ -1170,13 +1178,18 @@ pub fn op_lossless(ctx: &Ctx, shows: &[Show], files: &[PathBuf]) -> String {
         if !again.is_empty() {
             ctx.add_total(again.len());
             let paths: Vec<PathBuf> = again.iter().map(|&i| files[i].clone()).collect();
-            for (i, r) in again.into_iter().zip(par_map(ctx, &paths, |p| p.clone(), |path| analyse(path, true))) {
+            crate::prof::mark("pass_start:extension");
+            let redone = par_map(ctx, &paths, |p| p.clone(), |path| analyse(path, true, "extension"));
+            crate::prof::mark("pass_end:extension");
+            for (i, r) in again.into_iter().zip(redone) {
                 if r.is_some() {
                     results[i] = r;
                 }
             }
         }
     }
+    crate::prof::mark("show_pass_start");
+    let post = crate::prof::file(Path::new("<show pass>"), "main");
     let by_path: HashMap<&PathBuf, &(crate::lossless::Verdict, String)> =
         files.iter().zip(results.iter()).filter_map(|(f, r)| r.as_ref().map(|v| (f, v))).collect();
     // The final verdict of each file, once the show's verdict may have changed it.
@@ -1198,7 +1211,11 @@ pub fn op_lossless(ctx: &Ctx, shows: &[Show], files: &[PathBuf]) -> String {
                 }
             })
             .collect();
-        let Some(decided) = crate::decision::aggregate(files::show_name(&show.root), &mut done) else {
+        let aggregated = {
+            let _t = crate::prof::span_hot("aggregate");
+            crate::decision::aggregate(files::show_name(&show.root), &mut done)
+        };
+        let Some(decided) = aggregated else {
             continue;
         };
         // Tracks whose verdict the show changed are shown again.
@@ -1229,6 +1246,9 @@ pub fn op_lossless(ctx: &Ctx, shows: &[Show], files: &[PathBuf]) -> String {
         .filter_map(|f| finals.get(f))
         .map(|(level, _)| Some(if *level == Level::Info { Level::Warn } else { *level }))
         .collect();
+    crate::prof::mark("show_pass_end");
+    drop(post);
+    crate::prof::finish();
     summarize(&levels, "file(s) checked for lossless origin")
 }
 

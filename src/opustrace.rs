@@ -95,22 +95,28 @@ impl Collector {
             deemphasis(&mut y);
             y
         };
+        let resampled = crate::prof::span("resample");
         let mut mid = to48(&inputs[0], 0);
         let mut side = to48(&inputs[1], 0);
+        drop(resampled);
         if mid.len() < 40 * N {
             return None;
         }
         let phases = resampler.as_ref().map_or(1, |r| r.down);
+        let aligned = crate::prof::span("align");
         let (mut offset, clean, near) = align(&mid, &side, phases > 1);
+        drop(aligned);
         let mut phase = 0;
         // A cut-out file: the Opus frames may lie between two samples of the 48 kHz grid.
         if let Some(r) = resampler.as_ref().filter(|r| r.down > 1 && !near.is_empty()) {
+            let _t = crate::prof::span("align_phases");
             if let Some((p, o)) = align_phases(r, &inputs, &mid, clean, &near) {
                 (phase, offset) = (p, o);
                 mid = to48(&inputs[0], phase);
                 side = to48(&inputs[1], phase);
             }
         }
+        let _count = crate::prof::span("count");
         // Every frame on its own (in parallel): (loud enough, clean).
         let count = |x: &[f64]| -> (usize, usize) {
             if x.is_empty() {

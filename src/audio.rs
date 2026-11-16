@@ -312,6 +312,7 @@ pub fn hex(bytes: &[u8]) -> String {
 // ---------------------------------------------------------------- probing
 
 pub fn probe(path: &Path) -> Result<AudioInfo, String> {
+    let _t = crate::prof::span_hot("probe");
     probe_as(path, Format::from_path(path))
 }
 

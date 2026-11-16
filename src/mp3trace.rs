@@ -186,6 +186,7 @@ impl Collector {
         if segments.len() < 2 {
             return None;
         }
+        crate::prof::windows("mp3", segments.iter().map(|s| s.as_slice()));
         let tables = Tables::new(&bands);
         let mid: fn([f32; 2]) -> f64 = |f| (f[0] as f64 + f[1] as f64) / 2.0;
         let side: fn([f32; 2]) -> f64 = |f| (f[0] as f64 - f[1] as f64) / 2.0;
@@ -203,6 +204,7 @@ impl Collector {
         // The filter bank's output (one slot every 32 samples) for every start in the segment,
         // per channel and segment: a window at position `offset` takes the 36 slots from
         // offset + 96 on, 32 apart, so positions 32 apart share them.
+        let _slots = crate::prof::span("slots");
         let slots: Vec<Vec<[f64; 32]>> = modes
             .iter()
             .flat_map(|&(_, take)| segments.iter().map(move |seg| (take, seg)))
@@ -213,6 +215,8 @@ impl Collector {
                 (0..SLOT_STARTS).map(|q| tables.slot(&x[FIRST_SLOT + q..FIRST_SLOT + q + 512])).collect()
             })
             .collect();
+        drop(_slots);
+        let _rates = crate::prof::span("rates");
         // Every position on its own (in parallel), then taken in order as before.
         // Per position: the rate of each channel mode over all windows, and the best rate of any
         // mode in each window on its own.
@@ -239,6 +243,7 @@ impl Collector {
                 (pooled, per_window)
             })
             .collect();
+        drop(_rates);
         let likelihoods: Vec<&Vec<f64>> = rates.iter().map(|r| &r.0).collect();
         let mut best = Trace::default();
         let mut per_offset = vec![0f64; GRANULE];

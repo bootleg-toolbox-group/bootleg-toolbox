@@ -46,6 +46,7 @@ pub fn detect(collector: Collector, rate: u32) -> Option<Trace> {
     if segments.len() < 2 {
         return None;
     }
+    crate::prof::windows("aac", segments.iter().map(|s| s.as_slice()));
     let tables = Tables::new(long_starts, short_starts);
     // Of left and right, and of mid and side, only the louder one is analysed.
     let energy = |f: fn([f32; 2]) -> f64| segments.iter().map(|s| s[..2 * FRAME].iter().map(|x| f(*x).powi(2)).sum::<f64>()).sum::<f64>();
@@ -59,6 +60,7 @@ pub fn detect(collector: Collector, rate: u32) -> Option<Trace> {
         vec![(false, left)]
     };
     // Every position on its own (in parallel), then taken in order as before.
+    let _positions = crate::prof::span("positions");
     let likelihoods: Vec<Vec<f64>> = (0..FRAME)
         .into_par_iter()
         .map_init(
@@ -82,6 +84,7 @@ pub fn detect(collector: Collector, rate: u32) -> Option<Trace> {
             },
         )
         .collect();
+    drop(_positions);
     let mut per_offset = vec![0f64; FRAME];
     let mut best = Trace::default();
     for (offset, row) in likelihoods.iter().enumerate() {

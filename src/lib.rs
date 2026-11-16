@@ -20,6 +20,7 @@ pub mod opustrace;
 pub mod matroska;
 pub mod mediainfo;
 pub mod ops;
+pub mod prof;
 pub mod report;
 pub mod sbe;
 pub mod setlistfm;

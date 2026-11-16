@@ -112,6 +112,7 @@ pub fn detect(collector: Collector, rate: u32) -> Option<Trace> {
     if segments.len() < 2 {
         return None;
     }
+    crate::prof::windows("mp2", segments.iter().map(|s| s.as_slice()));
     let tables = Tables::new(&bands);
     let modes: &[fn([f32; 2]) -> f64] = if channels == 2 { &[|f| f[0] as f64, |f| f[1] as f64] } else { &[|f| f[0] as f64] };
     // The filter bank's output at every sound sample of every window and channel.

@@ -107,20 +107,21 @@ pub fn analyse(path: &Path, info: &AudioInfo, aac: bool, sample: bool, cancel: &
             }
         }
     } else {
-        let measured = measure(path, info, cancel).inspect_err(|e| write_line(path, serde_json::json!({ "error": e })))?;
-        let mut f = facts(info, &measured, aac, record);
+        let measured = { let _t = crate::prof::span("measure"); measure(path, info, cancel) }
+            .inspect_err(|e| write_line(path, serde_json::json!({ "error": e })))?;
+        let mut f = { let _t = crate::prof::span("facts_main"); facts(info, &measured, aac, record) };
         let mut aac_done = aac;
-        let verdict = crate::decision::decide(path, &f, aac);
+        let verdict = { let _t = crate::prof::span("decide"); crate::decision::decide(path, &f, aac) };
         // The AAC search is slow, so an option; a doubt is worth it anyway: the verdict is drawn
         // again with it, and an AAC converted straight back turns the doubt into a certainty.
         let mut searched = aac;
         if !aac && verdict.doubt && !cancel.load(std::sync::atomic::Ordering::Relaxed) {
-            f = facts(info, &measured, true, record);
+            f = { let _t = crate::prof::span("facts_doubt"); facts(info, &measured, true, record) };
             aac_done = true;
             searched = true;
         } else if !aac && sample && !cancel.load(std::sync::atomic::Ordering::Relaxed) {
             // The show's sample: the AAC search alone; kept only if it finds a grid (otherwise nothing changes).
-            let g = facts_searched(info, &measured, true, record, true);
+            let g = { let _t = crate::prof::span("facts_sample"); facts_searched(info, &measured, true, record, true) };
             searched = true;
             if aac_counted(&g) {
                 f = g;
@@ -130,9 +131,10 @@ pub fn analyse(path: &Path, info: &AudioInfo, aac: bool, sample: bool, cancel: &
         // The parts of the file (10 s slices, 50 % overlap): measured once the searches are
         // settled (BT_FACTS has them already, with every variant).
         if !record && !cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            let _t = crate::prof::span("parts");
             (f.slices, f.segments) = segments::measure(info, &measured, &f, aac_done, Some((10.0, true)));
         }
-        let mut verdict = crate::decision::decide(path, &f, aac_done);
+        let mut verdict = { let _t = crate::prof::span("decide_final"); crate::decision::decide(path, &f, aac_done) };
         verdict.searched = searched;
         verdict.aac_grid = aac_done && aac_counted(&f);
         verdict
@@ -596,6 +598,7 @@ fn measure(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<Measure
                 pending.push((std::mem::replace(&mut block, Vec::with_capacity(nfft)), side, keep));
                 frames += 1;
                 if pending.len() == BATCH {
+                    let _t = crate::prof::span_hot("spectra_add");
                     spectra.add(std::mem::take(&mut pending), &shape);
                 }
             }
@@ -604,10 +607,13 @@ fn measure(path: &Path, info: &AudioInfo, cancel: &AtomicBool) -> Result<Measure
             silent = true;
         }
     })?;
-    spectra.add(pending, &shape);
+    {
+        let _t = crate::prof::span_hot("spectra_add");
+        spectra.add(pending, &shape);
+    }
     let Spectra { power, kept, intensity, side_vs_mid, level, intensity_at, width_at } = spectra;
     let (atoms_mp3, atoms_aac) = atoms.map(|a| (a.mp3_atoms, a.aac_atoms)).unwrap_or_default();
-    let mp3_trace = mp3.and_then(|m| m.detect(info.rate));
+    let mp3_trace = { let _t = crate::prof::span("detect_mp3"); mp3.and_then(|m| m.detect(info.rate)) };
     Ok(Measured {
         samples: info.samples,
         rate,
@@ -671,12 +677,12 @@ fn facts_of(info: &AudioInfo, m: &Measured, aac_check: bool, all: bool, aac_only
     let mut power = m.power.clone();
     // AAC only when no MP3 was found, Opus when neither was (the decision gates the same way).
     let mp3_found = mp3_trace.is_some_and(|t| t.found());
-    let aac_trace = if !aac_check || (mp3_found && !all) { None } else { m.aac.clone().and_then(|a| crate::aactrace::detect(a, info.rate)) };
+    let aac_trace = if !aac_check || (mp3_found && !all) { None } else { let _t = crate::prof::span("detect_aac"); m.aac.clone().and_then(|a| crate::aactrace::detect(a, info.rate)) };
     let aac_found = aac_trace.is_some_and(|t| crate::aactrace::found(&t));
     // MP2 when neither was found (MP3, then AAC, then MP2, then Opus: the slow search stops at the first).
-    let mp2_trace = if !aac_check || (aac_only && !all) || ((mp3_found || aac_found) && !all) { None } else { m.mp2.clone().and_then(|c| crate::mp2trace::detect(c, info.rate)) };
+    let mp2_trace = if !aac_check || (aac_only && !all) || ((mp3_found || aac_found) && !all) { None } else { let _t = crate::prof::span("detect_mp2"); m.mp2.clone().and_then(|c| crate::mp2trace::detect(c, info.rate)) };
     let mp2_found = mp2_trace.is_some_and(|t| crate::mp2trace::found(&t));
-    let opus_trace = if !aac_check || (aac_only && !all) || ((mp3_found || aac_found || mp2_found) && !all) { None } else { m.opus.clone().and_then(|o| o.detect()) };
+    let opus_trace = if !aac_check || (aac_only && !all) || ((mp3_found || aac_found || mp2_found) && !all) { None } else { let _t = crate::prof::span("detect_opus"); m.opus.clone().and_then(|o| o.detect()) };
     if frames == 0 {
         return Facts { rate, samples, frames: 0, mp3_trace, searched: aac_check, ..Default::default() };
     }
