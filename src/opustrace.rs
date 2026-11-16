@@ -241,8 +241,16 @@ fn codeword_error_plain(piece: &[f64]) -> f64 {
 /// candidates of both are then compared by their clean frames. Returns the offset, its clean
 /// frames and, when `near` is set, the offsets whose low bands come closest to codewords.
 fn align(mid: &[f64], side: &[f64], near: bool) -> (usize, usize, Vec<usize>) {
+    align_with(mid, side, near, true)
+}
+
+/// `share`: the transform of a frame that is both a probe and a near frame is made once (what
+/// `align` does); without it, twice, as before (the test compares the two).
+fn align_with(mid: &[f64], side: &[f64], near: bool, share: bool) -> (usize, usize, Vec<usize>) {
     let probe = loudest(mid, PROBE);
     let near_probe = if near { loudest(mid, NEAR_PROBE) } else { Vec::new() };
+    // `loudest` takes the first of one sorted list, so the probe frames lead the near ones.
+    let shared = share && near_probe.starts_with(&probe);
     // Every position on its own (in parallel), in order.
     let measured: Vec<(f64, usize, usize)> = (0..N)
         .into_par_iter()
@@ -263,9 +271,13 @@ fn align(mid: &[f64], side: &[f64], near: bool) -> (usize, usize, Vec<usize>) {
                             ratios.push(energy(&out[800..]) / total);
                         }
                         words += middle_words(out);
+                        // The probe frames are the first of the near ones: the same transform serves both.
+                        if shared {
+                            close += BANDS[..9].windows(2).filter(|b| near_word(&out[b[0]..b[1]])).count();
+                        }
                     }
                     leak += crate::dsp::median(&ratios).unwrap_or(1.0);
-                    for &f in &near_probe {
+                    for &f in &near_probe[if shared { probe.len() } else { 0 }..] {
                         let start = offset + N / 2 + f * N;
                         mdct.forward(&x[start..start + 2 * N], out);
                         close += BANDS[..9].windows(2).filter(|b| near_word(&out[b[0]..b[1]])).count();
@@ -679,6 +691,22 @@ mod tests {
             let word: Vec<f64> = (0..len).map(|i| ((i * 7) % 5) as f64 - 2.0).collect();
             assert_eq!(codeword_error(&word).to_bits(), codeword_error_plain(&word).to_bits());
         }
+    }
+
+    /// The probe frames and the near ones are transformed once (`align`) or twice: the same alignment,
+    /// with or without `near`, on a signal with codeword-like and noisy stretches.
+    #[test]
+    fn align_shares_the_probe_frames_with_the_near_ones_without_changing_anything() {
+        let n = 60 * N;
+        let mid: Vec<f64> = noise(n, 11).iter().enumerate().map(|(i, v)| if (i / N).is_multiple_of(3) { libm::round(v * 8.0) / 8.0 } else { *v }).collect();
+        let side = noise(n, 12);
+        for near in [false, true] {
+            let (a, b) = (align_with(&mid, &side, near, true), align_with(&mid, &side, near, false));
+            assert_eq!(a, b, "near = {near}");
+        }
+        // The probe frames lead the near ones: both come from one sorted list.
+        let (probe, near) = (loudest(&mid, PROBE), loudest(&mid, NEAR_PROBE));
+        assert!(near.starts_with(&probe));
     }
 
     fn direct_mdct(input: &[f64], window: &[f64]) -> Vec<f64> {
