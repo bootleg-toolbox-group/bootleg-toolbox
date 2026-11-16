@@ -201,6 +201,7 @@ fn run_cli(args: &[String]) -> i32 {
     // BT_PROFILE_JOBS (with BT_PROFILE): files read at a time, for measuring only.
     if let Some(jobs) = bootleg_toolbox::prof::jobs() {
         opt.jobs = jobs;
+        opt.jobs_auto = Some(false);
     }
     if std::env::var("BT_SFV").is_ok() {
         opt.create_sfv = true;

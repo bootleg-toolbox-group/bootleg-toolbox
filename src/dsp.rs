@@ -35,8 +35,9 @@ impl Drop for Busy {
     }
 }
 
-/// Lowers the calling thread's priority: the analysis then uses the processor time other
-/// programs leave, and the computer stays responsive.
+/// Lowers the calling thread's priority to the background: the analysis then uses the processor
+/// and disk time other programs leave, and the computer stays responsive (Windows: background mode,
+/// which lowers the processor, disk and memory priorities of the thread).
 #[cfg(windows)]
 pub fn lower_priority() {
     #[link(name = "kernel32")]
@@ -45,26 +46,88 @@ pub fn lower_priority() {
         fn SetThreadPriority(thread: isize, priority: i32) -> i32;
     }
     const THREAD_PRIORITY_BELOW_NORMAL: i32 = -1;
+    const THREAD_MODE_BACKGROUND_BEGIN: i32 = 0x0001_0000;
+    // SAFETY: plain calls on the current thread's pseudo-handle. Below normal first: where the
+    // background mode is refused (Wine), the thread still runs below the others.
     unsafe {
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+        SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
     }
 }
 
-/// Lowers the calling thread's priority (nice 10: on Linux, for this thread only).
+/// Lowers the calling thread's priority to the background, for this thread only (a thread it
+/// starts inherits it): nice 10, the idle scheduling policy (the thread runs only when a core
+/// would otherwise be idle) and the idle I/O class. Each step is left alone where the system
+/// refuses it (a container).
 #[cfg(target_os = "linux")]
 pub fn lower_priority() {
+    #[repr(C)]
+    struct SchedParam {
+        priority: i32,
+    }
     extern "C" {
         fn gettid() -> i32;
         fn setpriority(which: i32, who: u32, prio: i32) -> i32;
+        fn sched_setscheduler(pid: i32, policy: i32, param: *const SchedParam) -> i32;
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        fn syscall(number: i64, ...) -> i64;
     }
     const PRIO_PROCESS: i32 = 0;
+    const SCHED_IDLE: i32 = 5;
+    // ioprio_set(IOPRIO_WHO_PROCESS, tid, IOPRIO_CLASS_IDLE << 13).
+    #[cfg(target_arch = "x86_64")]
+    const SYS_IOPRIO_SET: i64 = 251;
+    #[cfg(target_arch = "aarch64")]
+    const SYS_IOPRIO_SET: i64 = 30;
+    // SAFETY: calls on the calling thread by its own id; the parameter outlives the call.
     unsafe {
-        setpriority(PRIO_PROCESS, gettid() as u32, 10);
+        let tid = gettid();
+        setpriority(PRIO_PROCESS, tid as u32, 10);
+        sched_setscheduler(tid, SCHED_IDLE, &SchedParam { priority: 0 });
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        syscall(SYS_IOPRIO_SET, 1i64, tid as i64, 3i64 << 13);
     }
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]
 pub fn lower_priority() {}
+
+/// The memory the system can give to programs without swapping, in bytes (None where unknown).
+pub fn available_memory() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+        let line = text.lines().find(|l| l.starts_with("MemAvailable:"))?;
+        let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+        Some(kib * 1024)
+    }
+    #[cfg(windows)]
+    {
+        #[repr(C)]
+        struct MemoryStatus {
+            length: u32,
+            load: u32,
+            total_phys: u64,
+            avail_phys: u64,
+            total_page: u64,
+            avail_page: u64,
+            total_virtual: u64,
+            avail_virtual: u64,
+            avail_extended: u64,
+        }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GlobalMemoryStatusEx(status: *mut MemoryStatus) -> i32;
+        }
+        let mut status = MemoryStatus { length: std::mem::size_of::<MemoryStatus>() as u32, load: 0, total_phys: 0, avail_phys: 0, total_page: 0, avail_page: 0, total_virtual: 0, avail_virtual: 0, avail_extended: 0 };
+        // SAFETY: the structure is the one the function fills, its length set.
+        (unsafe { GlobalMemoryStatusEx(&mut status) } != 0).then_some(status.avail_phys)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        None
+    }
+}
 
 /// In-place radix-2 complex FFT.
 pub struct Fft {
@@ -404,6 +467,29 @@ pub(crate) mod tests {
         unsafe { getpriority(0, gettid() as u32) }
     }
 
+    /// The scheduling policy of the calling thread (0 normal, 5 idle), and its I/O class (0 none, 3 idle).
+    #[cfg(target_os = "linux")]
+    fn thread_policy() -> (i32, i64) {
+        extern "C" {
+            fn gettid() -> i32;
+            fn sched_getscheduler(pid: i32) -> i32;
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            fn syscall(number: i64, ...) -> i64;
+        }
+        #[cfg(target_arch = "x86_64")]
+        const SYS_IOPRIO_GET: i64 = 252;
+        #[cfg(target_arch = "aarch64")]
+        const SYS_IOPRIO_GET: i64 = 31;
+        // SAFETY: reads this thread's policy and I/O priority.
+        unsafe {
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            let io = syscall(SYS_IOPRIO_GET, 1i64, gettid() as i64) >> 13;
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+            let io = 3;
+            (sched_getscheduler(gettid()), io)
+        }
+    }
+
     #[test]
     fn priority_is_lowered_for_this_thread_only() {
         let own = thread_priority();
@@ -414,12 +500,33 @@ pub(crate) mod tests {
         })
         .join()
         .unwrap();
-        // Windows: THREAD_PRIORITY_BELOW_NORMAL; Linux: nice 10, or lower already (a process
-        // started by a build tool can run at nice 1).
-        let lowered = if cfg!(windows) { -1 } else { before.max(10) };
-        assert_eq!(after, lowered, "priority before {before}, after {after}");
+        // Windows: below normal at most (the background mode may lower it further); Linux: nice 10, or
+        // lower already (a process started by a build tool can run at nice 1).
+        if cfg!(windows) {
+            assert!(after <= -1, "priority before {before}, after {after}");
+        } else {
+            assert_eq!(after, before.max(10), "priority before {before}, after {after}");
+        }
         // The thread that started it (the window's, in the application) keeps its own.
         assert_eq!(thread_priority(), own, "the calling thread's priority changed (lowered one: {before} -> {after})");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn background_threads_run_idle_for_the_processor_and_the_disk() {
+        let own = thread_policy();
+        let lowered = std::thread::spawn(|| {
+            lower_priority();
+            // A thread it starts inherits the policy (the decoder thread of a file).
+            let child = std::thread::spawn(thread_policy).join().unwrap();
+            (thread_policy(), child)
+        })
+        .join()
+        .unwrap();
+        assert_eq!(lowered.0 .0, 5, "scheduling policy {:?}", lowered.0);
+        assert_eq!(lowered.1 .0, 5, "the thread it starts: {:?}", lowered.1);
+        assert_eq!(lowered.0 .1, 3, "I/O class {:?}", lowered.0);
+        assert_eq!(thread_policy(), own, "the calling thread changed");
     }
 
     #[test]

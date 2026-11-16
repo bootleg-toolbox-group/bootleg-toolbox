@@ -1285,6 +1285,7 @@ struct Spectrogram {
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, paths: Vec<PathBuf>) -> Self {
         let mut opt: Options = cc.storage.and_then(|s| eframe::get_value(s, "options")).unwrap_or_default();
+        opt.migrate();
         // "Do not rename" was a file name choice before the Rename box.
         if opt.tag_scheme == crate::tagging::NameScheme::Keep {
             opt.tag_scheme = Default::default();
@@ -4702,12 +4703,30 @@ impl App {
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label("Files processed in parallel");
-                    ui.add(egui::DragValue::new(&mut draft.jobs).range(1..=64)).on_hover_text(
-                        "Also the most processor threads used: when fewer files are left, the free threads help \
-                         with the ones still running. The work runs at a low priority, so the computer stays \
-                         responsive.",
-                    );
+                    let mut auto = draft.jobs_auto != Some(false);
+                    if ui
+                        .checkbox(&mut auto, "Auto")
+                        .on_hover_text(
+                            "One file per logical processor but one, fewer when the available memory would not hold them                              (about 300 MB each). Worked out again at each operation.",
+                        )
+                        .changed()
+                    {
+                        draft.jobs_auto = Some(auto);
+                        if !auto {
+                            draft.jobs = ops::auto_jobs();
+                        }
+                    }
+                    if auto {
+                        let mut shown = ops::auto_jobs();
+                        ui.add_enabled(false, egui::DragValue::new(&mut shown));
+                    } else {
+                        ui.add(egui::DragValue::new(&mut draft.jobs).range(1..=64)).on_hover_text(
+                            "Also the most processor threads used: when fewer files are left, the free threads help \
+                             with the ones still running.",
+                        );
+                    }
                 });
+                ui.label(egui::RichText::new("The analysis runs at the lowest priority (processor and disk), so the computer stays responsive.").weak());
                 ui.checkbox(&mut draft.auto_details, "Read file details automatically when adding files");
                 ui.checkbox(&mut draft.aac_check, "Lossless?: look for AAC, Opus and MP2 coding traces in every file (slower)")
                     .on_hover_text("Finds files decoded from an AAC (M4A, iTunes, streams), an Opus stream (YouTube) or an MP2 and \

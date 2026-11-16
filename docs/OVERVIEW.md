@@ -334,7 +334,7 @@ The interface is one compact window, close in spirit to TLH: a list of shows and
 
 - Light, dark or follow-the-system theme (read from the desktop on Linux as well), and an accent colour: amber, teal, indigo or burgundy.
 - **Always on top**, remembered between sessions.
-- Settings cover checksum types, overwrite, line endings, number of parallel jobs, tracker announce URLs and extra trackers, torrent and MP3 folders, the file manager entry and the update check. All choices are remembered. The Settings window scrolls on small screens, with its buttons always in view.
+- Settings cover checksum types, overwrite, line endings, number of parallel jobs (automatic by default, from the processors and the free memory; the analysis runs at the lowest priority), tracker announce URLs and extra trackers, torrent and MP3 folders, the file manager entry and the update check. All choices are remembered. The Settings window scrolls on small screens, with its buttons always in view.
 - The window opens at a modest 1000 x 465 and remembers its size.
 - On Linux, Help > Add to the applications menu installs a menu entry with the icon, for the current user, without administrator rights.
 - All texts are in English, for the international trading community.

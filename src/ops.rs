@@ -140,7 +140,12 @@ pub struct Options {
     pub create_sfv: bool,
     pub overwrite: bool,
     pub crlf: bool,
+    /// Files processed at a time when `jobs_auto` is off (and the threads that help them).
     pub jobs: usize,
+    /// How many files at a time: Some(true) = computed from the machine (`auto_jobs`), Some(false) = `jobs`.
+    /// None in settings saved before the choice existed: `migrate` decides.
+    #[serde(default = "no_choice")]
+    pub jobs_auto: Option<bool>,
     pub auto_details: bool,
     /// Lossless? also looks for AAC coding traces (several times slower; off by default).
     pub aac_check: bool,
@@ -220,9 +225,54 @@ pub enum ThemeChoice {
     Dark,
 }
 
+fn no_choice() -> Option<bool> {
+    None
+}
+
+/// What one file analysed at a time takes at most (forced Lossless? on a 93-minute concert: 175 MB,
+/// the extra thread of a 20-thread run: 127 MB; margin for the other operations).
+const JOB_MEMORY: u64 = 300 << 20;
+
+/// The default number of files processed at a time, from the machine: every logical processor but one
+/// (the computer stays usable; the threads also run at the lowest priority), at least 2, and no more
+/// than half of the available memory holds at `JOB_MEMORY` each.
+pub fn auto_jobs() -> usize {
+    let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
+    let by_cpu = cpus.saturating_sub(1).max(2).min(cpus);
+    match crate::dsp::available_memory() {
+        Some(free) => by_cpu.min(((free / 2 / JOB_MEMORY) as usize).max(1)),
+        None => by_cpu,
+    }
+}
+
+/// The default of earlier versions: the physical cores but one (half the threads of most
+/// processors), at least 2.
+fn legacy_jobs() -> usize {
+    let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
+    (cpus / 2).saturating_sub(1).max(2).min(cpus)
+}
+
+impl Options {
+    /// The number of files processed at a time, now.
+    pub fn jobs_now(&self) -> usize {
+        if self.jobs_auto == Some(false) {
+            self.jobs.max(1)
+        } else {
+            auto_jobs()
+        }
+    }
+
+    /// Settings saved before the automatic choice existed: a value equal to the former default goes to
+    /// automatic, one chosen by hand stays.
+    pub fn migrate(&mut self) {
+        if self.jobs_auto.is_none() {
+            self.jobs_auto = Some(self.jobs == legacy_jobs());
+        }
+    }
+}
+
 impl Default for Options {
     fn default() -> Self {
-        let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
         Options {
             create_ffp: true,
             create_md5: false,
@@ -230,8 +280,8 @@ impl Default for Options {
             create_sfv: false,
             overwrite: false,
             crlf: cfg!(windows),
-            // The physical cores but one (half the threads of most processors), at least 2.
-            jobs: (cpus / 2).saturating_sub(1).max(2).min(cpus),
+            jobs: legacy_jobs(),
+            jobs_auto: Some(true),
             auto_details: true,
             aac_check: false,
             announce_dime: Tracker::Dime.default_announce().into(),
@@ -463,8 +513,9 @@ pub fn spawn(op: Op, shows: Vec<Show>, files: Vec<PathBuf>, opt: Options, tx: Se
         };
         // `jobs` threads at most, at a lower priority: as many files at a time, and when fewer
         // are left, the free threads help inside them.
-        crate::dsp::THREADS.store(ctx.opt.jobs.max(1), Ordering::SeqCst);
-        let pool = rayon::ThreadPoolBuilder::new().num_threads(ctx.opt.jobs.max(1)).start_handler(|_| crate::dsp::lower_priority()).build();
+        let jobs = ctx.opt.jobs_now();
+        crate::dsp::THREADS.store(jobs, Ordering::SeqCst);
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(jobs).start_handler(|_| crate::dsp::lower_priority()).build();
         let summary = match pool {
             Ok(pool) => catch_panic(|| Ok(pool.install(|| match &op {
                 Op::Details { verbose } => op_details(&ctx, &shows, &files, *verbose),
@@ -546,7 +597,7 @@ fn par_map<T: Sync, R: Send>(
         }
     };
     rayon::scope(|scope| {
-        for _ in 0..ctx.opt.jobs.max(1).min(items.len()) {
+        for _ in 0..crate::dsp::THREADS.load(Ordering::SeqCst).max(1).min(items.len()) {
             scope.spawn(|_| loop {
                 let k = next.fetch_add(1, Ordering::Relaxed);
                 let Some(&(_, i)) = order.get(k) else { break };
@@ -2955,7 +3006,7 @@ mod tests {
         std::fs::write(dir.join(st5_name), format!("{sum}  [shntool]  notes.txt\n")).unwrap();
         std::fs::write(dir.join(md5_name), format!("{sum}  notes.txt\n{sum}  gone.wav\n")).unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
-        let opt = Options { jobs: 1, ..Options::default() }; // the checksum files are read in order
+        let opt = Options { jobs: 1, jobs_auto: Some(false), ..Options::default() }; // the checksum files are read in order
         let ctx = Ctx { tx, cancel: Arc::new(AtomicBool::new(false)), opt, done: AtomicUsize::new(0), total: AtomicUsize::new(0), rescan: AtomicBool::new(false) };
         let show = Show { root: dir.clone(), files: vec![notes] };
         let summary = op_verify(&ctx, &[show]);
@@ -2972,6 +3023,33 @@ mod tests {
     }
 
     /// An error is never hidden by the OK of another checksum file, whatever comes first.
+    #[test]
+    fn the_number_of_files_at_a_time_is_automatic_unless_chosen() {
+        let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
+        let auto = auto_jobs();
+        assert!(auto >= 1 && auto <= cpus.max(2), "{auto} of {cpus}");
+        assert!(auto >= 2.min(cpus) || crate::dsp::available_memory().is_some());
+        // The default is automatic; chosen by hand it is the number given.
+        assert_eq!(Options::default().jobs_auto, Some(true));
+        assert_eq!(Options { jobs: 3, jobs_auto: Some(false), ..Options::default() }.jobs_now(), 3);
+        assert_eq!(Options { jobs: 0, jobs_auto: Some(false), ..Options::default() }.jobs_now(), 1);
+        // Settings saved before: the former default becomes automatic, a number chosen by hand stays.
+        let saved = |jobs: usize| -> Options {
+            let mut o: Options = serde_json::from_str(&format!("{{\"jobs\": {jobs}}}")).unwrap();
+            assert_eq!(o.jobs_auto, None);
+            o.migrate();
+            o
+        };
+        let legacy = legacy_jobs();
+        assert_eq!(saved(legacy).jobs_auto, Some(true));
+        let chosen = saved(legacy + 3);
+        assert_eq!((chosen.jobs_auto, chosen.jobs_now()), (Some(false), legacy + 3));
+        // A choice made since is never migrated again.
+        let mut o: Options = serde_json::from_str(&format!("{{\"jobs\": {legacy}, \"jobs_auto\": false}}")).unwrap();
+        o.migrate();
+        assert_eq!(o.jobs_auto, Some(false));
+    }
+
     #[test]
     fn verify_error_is_not_hidden_by_a_later_ok() {
         for (tag, st5, md5) in [("first", "a.st5", "b.md5"), ("last", "b.st5", "a.md5")] {
