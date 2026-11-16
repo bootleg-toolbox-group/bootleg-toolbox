@@ -615,15 +615,16 @@ impl Tables {
         let sf_max = 4.0 * libm::log2(max) + 16.0 / 3.0 + 80.0;
         let powered: Vec<f64> = band.iter().map(|x| { let r = x.abs().sqrt(); r * r.sqrt() }).collect();
         let gains = self.scale.map(|sf| libm::exp2(-3.0 / 16.0 * (sf * sf_max - 80.0)));
-        grid_errors(&powered, &gains).iter().filter(|&&e| e < tau).count()
+        grid_hits(&powered, &gains, tau)
     }
 }
 
 /// Mean squared distance of `values × gain` (all ≥ 0) to the nearest integers: how well
 /// they fit an encoder's quantisation grid.
-/// The mean squared rounding error of `values` scaled by each gain, in one pass over the
-/// values (the bulk of the detectors' time). Each gain's sum still adds its terms one after
+/// The mean squared rounding error of `values` scaled by each gain (the reference of `grid_hits`, which
+/// the detectors use) in one pass over the values. Each gain's sum still adds its terms one after
 /// the other, in order: the gains are only computed side by side (4 at a time with AVX2).
+#[cfg(test)]
 pub(crate) fn grid_errors<const N: usize>(values: &[f64], gains: &[f64; N]) -> [f64; N] {
     #[cfg(all(target_arch = "x86_64", not(bt_no_avx2)))]
     if std::is_x86_feature_detected!("avx2") {
@@ -637,6 +638,7 @@ pub(crate) fn grid_errors<const N: usize>(values: &[f64], gains: &[f64; N]) -> [
     grid_errors_plain(values, gains)
 }
 
+#[cfg(test)]
 #[inline(always)]
 fn grid_errors_plain<const N: usize>(values: &[f64], gains: &[f64; N]) -> [f64; N] {
     // Adding then removing 2^52 rounds to the nearest integer in plain arithmetic: f64::round
@@ -652,6 +654,42 @@ fn grid_errors_plain<const N: usize>(values: &[f64], gains: &[f64; N]) -> [f64; 
         }
     }
     sums.map(|s| s / values.len() as f64)
+}
+
+/// How many of the gains leave a mean squared rounding error under `tau`: what `grid_errors` then
+/// a count says, stopped as soon as no gain can get under (the sums only grow).
+pub(crate) fn grid_hits<const N: usize>(values: &[f64], gains: &[f64; N], tau: f64) -> usize {
+    #[cfg(all(target_arch = "x86_64", not(bt_no_avx2)))]
+    if std::is_x86_feature_detected!("avx2") {
+        #[target_feature(enable = "avx2")]
+        fn avx2<const N: usize>(values: &[f64], gains: &[f64; N], tau: f64) -> usize {
+            grid_hits_plain(values, gains, tau)
+        }
+        // SAFETY: the processor has AVX2 (checked just above).
+        return unsafe { avx2(values, gains, tau) };
+    }
+    grid_hits_plain(values, gains, tau)
+}
+
+#[inline(always)]
+fn grid_hits_plain<const N: usize>(values: &[f64], gains: &[f64; N], tau: f64) -> usize {
+    const SHIFT: f64 = 4_503_599_627_370_496.0;
+    const BLOCK: usize = 8;
+    let n = values.len() as f64;
+    let mut sums = [0f64; N];
+    for block in values.chunks(BLOCK) {
+        for p in block {
+            for (sum, gain) in sums.iter_mut().zip(gains) {
+                let v = p * gain;
+                let e = if v < SHIFT { (v + SHIFT) - SHIFT - v } else { 0.0 };
+                *sum += e * e;
+            }
+        }
+        if sums.iter().all(|&s| s / n >= tau) {
+            return 0;
+        }
+    }
+    sums.iter().filter(|&&s| s / n < tau).count()
 }
 
 /// erf, to 1.2e-7 (Numerical Recipes, Chebyshev fit of erfc).
@@ -765,6 +803,36 @@ mod tests {
         let values: Vec<f64> = noise(400, 9).iter().map(|v| v.abs() * 300.0).collect();
         let gains = [0.01, 0.1, 0.5, 1.0, 1.7, 3.3, 10.0, 1e17];
         same_bits(&grid_errors(&values, &gains), &grid_errors_plain(&values, &gains));
+    }
+
+    /// `grid_hits` counts what `grid_errors` then a comparison count, for noise, for values on a grid (some
+    /// of them off it) and for the extremes, with thresholds around the errors found.
+    #[test]
+    fn grid_hits_counts_like_grid_errors() {
+        let gains: [f64; 8] = [0.01, 0.1, 0.5, 1.0, 1.7, 3.3, 10.0, 1e17];
+        let mut checked = 0;
+        for seed in 0..400u64 {
+            let len = [1usize, 2, 7, 8, 9, 16, 33, 100, 400][seed as usize % 9];
+            let mut values: Vec<f64> = noise(len, seed).iter().map(|v| v.abs() * [3.0, 300.0, 1e-6, 1e9][seed as usize % 4]).collect();
+            if seed % 3 == 0 {
+                // On the grid of one gain, the last values off it.
+                let g = gains[(seed / 3) as usize % 8].min(10.0);
+                let off = (seed as usize / 5) % (len + 1);
+                for (i, v) in values.iter_mut().enumerate() {
+                    *v = (libm::round(*v * g) + if i >= len - off { 0.37 } else { 0.0 }) / g;
+                }
+            }
+            let errors = grid_errors(&values, &gains);
+            let mut taus = vec![0.0, 1e-12, 0.001, 0.02, 0.0833, 0.2, 1.0, f64::INFINITY];
+            for e in errors {
+                taus.extend([e, e.next_up(), e.next_down()]);
+            }
+            for tau in taus {
+                assert_eq!(grid_hits(&values, &gains, tau), errors.iter().filter(|&&e| e < tau).count(), "seed {seed} tau {tau}");
+                checked += 1;
+            }
+        }
+        assert!(checked > 10_000);
     }
 
     #[test]

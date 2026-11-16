@@ -397,7 +397,7 @@ impl Tables {
         powered.clear();
         powered.extend(band.iter().map(|x| { let r = x.abs().sqrt(); r * r.sqrt() }));
         let gains = self.scale.map(|sf| libm::exp2(-3.0 / 16.0 * (sf * sf_max - 60.0)));
-        crate::mp3trace::grid_errors(powered, &gains).iter().filter(|&&e| e < tau).count()
+        crate::mp3trace::grid_hits(powered, &gains, tau)
     }
 }
 
