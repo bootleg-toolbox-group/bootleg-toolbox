@@ -10,6 +10,7 @@
 //! resampled to 48 kHz: a good resampler keeps the audio band, and the codewords with it.
 
 use rayon::prelude::*;
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
 use crate::dsp::Fft;
 
@@ -80,7 +81,7 @@ impl Collector {
     }
 
     /// Runs the detector: None when there is too little audio.
-    pub fn detect(self) -> Option<Trace> {
+    pub fn detect(self, cancel: &AtomicBool) -> Option<Trace> {
         let resampler = (self.rate != 48000).then(|| Resampler::new(self.rate));
         let to64 = |x: &[f32]| -> Vec<f64> { x.iter().map(|&v| v as f64).collect() };
         let inputs = [to64(&self.mid), if self.channels == 2 { to64(&self.side) } else { Vec::new() }];
@@ -99,21 +100,27 @@ impl Collector {
         let mut mid = to48(&inputs[0], 0);
         let mut side = to48(&inputs[1], 0);
         drop(resampled);
-        if mid.len() < 40 * N {
+        if mid.len() < 40 * N || cancel.load(Relaxed) {
             return None;
         }
         let phases = resampler.as_ref().map_or(1, |r| r.down);
         let aligned = crate::prof::span("align");
-        let (mut offset, clean, near) = align(&mid, &side, phases > 1);
+        let (mut offset, clean, near) = align(&mid, &side, phases > 1, cancel);
         drop(aligned);
+        if cancel.load(Relaxed) {
+            return None;
+        }
         let mut phase = 0;
         // A cut-out file: the Opus frames may lie between two samples of the 48 kHz grid.
         if let Some(r) = resampler.as_ref().filter(|r| r.down > 1 && !near.is_empty()) {
             let _t = crate::prof::span("align_phases");
-            if let Some((p, o)) = align_phases(r, &inputs, &mid, clean, &near) {
+            if let Some((p, o)) = align_phases(r, &inputs, &mid, clean, &near, cancel) {
                 (phase, offset) = (p, o);
                 mid = to48(&inputs[0], phase);
                 side = to48(&inputs[1], phase);
+            }
+            if cancel.load(Relaxed) {
+                return None;
             }
         }
         let _count = crate::prof::span("count");
@@ -128,6 +135,9 @@ impl Collector {
                 .map_init(
                     || (Mdct::new(), vec![0f64; N]),
                     |(mdct, out), &start| {
+                        if cancel.load(Relaxed) {
+                            return (0, 0);
+                        }
                         mdct.forward(&x[start..start + 2 * N], out);
                         let loud = BANDS.windows(2).filter(|b| energy(&out[b[0]..b[1]]) > 1e-14).count();
                         if loud < CLEAN_BANDS {
@@ -322,13 +332,13 @@ fn codeword_error_plain(piece: &[f64]) -> f64 {
 /// rounding noise can fill the empty band as much as a misaligned clean stream leaks); the best
 /// candidates of both are then compared by their clean frames. Returns the offset, its clean
 /// frames and, when `near` is set, the offsets whose low bands come closest to codewords.
-fn align(mid: &[f64], side: &[f64], near: bool) -> (usize, usize, Vec<usize>) {
-    align_with(mid, side, near, true)
+fn align(mid: &[f64], side: &[f64], near: bool, cancel: &AtomicBool) -> (usize, usize, Vec<usize>) {
+    align_with(mid, side, near, true, cancel)
 }
 
 /// `share`: the transform of a frame that is both a probe and a near frame is made once (what
 /// `align` does); without it, twice, as before (the test compares the two).
-fn align_with(mid: &[f64], side: &[f64], near: bool, share: bool) -> (usize, usize, Vec<usize>) {
+fn align_with(mid: &[f64], side: &[f64], near: bool, share: bool, cancel: &AtomicBool) -> (usize, usize, Vec<usize>) {
     let probe = loudest(mid, PROBE);
     let near_probe = if near { loudest(mid, NEAR_PROBE) } else { Vec::new() };
     // `loudest` takes the first of one sorted list, so the probe frames lead the near ones.
@@ -339,6 +349,10 @@ fn align_with(mid: &[f64], side: &[f64], near: bool, share: bool) -> (usize, usi
         .map_init(
             || (Mdct::new(), vec![0f64; N]),
             |(mdct, out), offset| {
+                // The Stop button: the search is dropped by the caller.
+                if cancel.load(Relaxed) {
+                    return (1.0, 0, 0);
+                }
                 let (mut leak, mut words, mut close) = (0.0, 0usize, 0usize);
                 for x in [mid, side].into_iter().filter(|x| !x.is_empty()) {
                     let mut ratios = Vec::with_capacity(probe.len());
@@ -378,7 +392,7 @@ fn align_with(mid: &[f64], side: &[f64], near: bool, share: bool) -> (usize, usi
     let candidates: Vec<usize> = leaks.iter().take(6).map(|l| l.1).chain(codewords.iter().take(6).map(|c| c.1)).collect();
     let cleans: Vec<usize> = candidates
         .par_iter()
-        .map_init(|| (Mdct::new(), vec![0f64; N]), |(mdct, out), &offset| [mid, side].iter().map(|x| first_clean(mdct, out, x, offset)).sum())
+        .map_init(|| (Mdct::new(), vec![0f64; N]), |(mdct, out), &offset| [mid, side].iter().map(|x| first_clean(mdct, out, x, offset, cancel)).sum())
         .collect();
     for (&offset, &clean) in candidates.iter().zip(&cleans) {
         if clean > best.0 {
@@ -436,9 +450,12 @@ fn middle_words(out: &[f64]) -> usize {
 }
 
 /// Clean frames among the first 300 at `offset` (`x` from its first 48 kHz sample).
-fn first_clean(mdct: &mut Mdct, out: &mut [f64], x: &[f64], offset: usize) -> usize {
+fn first_clean(mdct: &mut Mdct, out: &mut [f64], x: &[f64], offset: usize, cancel: &AtomicBool) -> usize {
     let mut clean = 0;
     for f in 1..=300 {
+        if cancel.load(Relaxed) {
+            break;
+        }
         let start = offset + N / 2 + f * N;
         if start + 2 * N > x.len() {
             break;
@@ -456,7 +473,7 @@ fn first_clean(mdct: &mut Mdct, out: &mut [f64], x: &[f64], offset: usize) -> us
 /// phase, scored by bands 0 to 14 of the loudest frames, the best few then compared by their
 /// clean frames. Some((phase, offset)) when one has more clean frames than `clean`, the best of
 /// phase 0.
-fn align_phases(r: &Resampler, inputs: &[Vec<f64>; 2], mid0: &[f64], clean: usize, near: &[usize]) -> Option<(usize, usize)> {
+fn align_phases(r: &Resampler, inputs: &[Vec<f64>; 2], mid0: &[f64], clean: usize, near: &[usize], cancel: &AtomicBool) -> Option<(usize, usize)> {
     const CANDIDATES: usize = 6;
     let probe = loudest(mid0, PROBE);
     let inputs: Vec<&[f64]> = inputs.iter().map(|x| x.as_slice()).filter(|x| !x.is_empty()).collect();
@@ -472,6 +489,9 @@ fn align_phases(r: &Resampler, inputs: &[Vec<f64>; 2], mid0: &[f64], clean: usiz
                 let mut words = vec![0usize; offsets.len()];
                 for x in &inputs {
                     for &f in &probe {
+                        if cancel.load(Relaxed) {
+                            break;
+                        }
                         let seg = r.range(x, phase, f * N + N / 2, f * N + N / 2 + 3 * N);
                         if seg.len() < 3 * N {
                             continue;
@@ -496,7 +516,10 @@ fn align_phases(r: &Resampler, inputs: &[Vec<f64>; 2], mid0: &[f64], clean: usiz
             |(mdct, out), &(_, phase, offset)| {
                 // The first 300 frames, from 48 kHz sample 0 (`first_clean` counts from there).
                 let end = offset + N / 2 + 302 * N;
-                inputs.iter().map(|x| first_clean(mdct, out, &r.range(x, phase, 0, end), offset)).sum()
+                if cancel.load(Relaxed) {
+                    return 0;
+                }
+                inputs.iter().map(|x| first_clean(mdct, out, &r.range(x, phase, 0, end), offset, cancel)).sum()
             },
         )
         .collect();
@@ -846,7 +869,8 @@ mod tests {
         let mid: Vec<f64> = noise(n, 11).iter().enumerate().map(|(i, v)| if (i / N).is_multiple_of(3) { libm::round(v * 8.0) / 8.0 } else { *v }).collect();
         let side = noise(n, 12);
         for near in [false, true] {
-            let (a, b) = (align_with(&mid, &side, near, true), align_with(&mid, &side, near, false));
+            let go = AtomicBool::new(false);
+            let (a, b) = (align_with(&mid, &side, near, true, &go), align_with(&mid, &side, near, false, &go));
             assert_eq!(a, b, "near = {near}");
         }
         // The probe frames lead the near ones: both come from one sorted list.

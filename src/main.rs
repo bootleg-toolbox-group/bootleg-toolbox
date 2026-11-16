@@ -215,7 +215,19 @@ fn run_cli(args: &[String]) -> i32 {
     // setlist: the user's setlist.fm API key.
     opt.setlistfm_key = std::env::var("BT_SETLISTFM_KEY").unwrap_or_default();
     let (tx, rx) = mpsc::channel();
-    ops::spawn(op, shows, all, opt, tx, Arc::new(AtomicBool::new(false)));
+    let cancel = Arc::new(AtomicBool::new(false));
+    // BT_STOP_AFTER=<seconds>: what the Stop button does, after that time (to time how fast the operation ends).
+    let stop_at = std::env::var("BT_STOP_AFTER").ok().and_then(|v| v.parse::<f64>().ok()).map(|secs| {
+        let (flag, clicked) = (cancel.clone(), Arc::new(std::sync::Mutex::new(None)));
+        let when = clicked.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs_f64(secs));
+            *when.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        clicked
+    });
+    ops::spawn(op, shows, all, opt, tx, cancel);
     let mut errors = 0;
     // Lossless?: a show's verdict can change a track's after the fact, so only the last verdict
     // of each file is printed, when the analysis ends (in the order the files were done); a
@@ -311,6 +323,11 @@ fn run_cli(args: &[String]) -> i32 {
                 break;
             }
             _ => {}
+        }
+    }
+    if let Some(clicked) = stop_at {
+        if let Some(t) = *clicked.lock().unwrap_or_else(|e| e.into_inner()) {
+            eprintln!("stopped {:.2} s after the request", t.elapsed().as_secs_f64());
         }
     }
     if errors > 0 { 1 } else { 0 }

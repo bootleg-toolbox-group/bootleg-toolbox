@@ -2125,6 +2125,13 @@ impl App {
                         self.waves.insert(path, levels);
                     }
                     Msg::Source { path, text, level, tooltip, report } => {
+                        // Stop: the show's row says how many tracks were analysed; its earlier analysis goes.
+                        if text.starts_with(ops::STOPPED) {
+                            self.reports.remove(&(ReportKind::Lossless, path.clone()));
+                            running.done_files.insert(path.clone());
+                            self.source.insert(path, (text, level, tooltip));
+                            continue;
+                        }
                         // Reading the files again (Details) must not replace a measured verdict.
                         if report.measures.is_empty() && self.reports.get(&(ReportKind::Lossless, path.clone())).is_some_and(|r| !r.measures.is_empty()) {
                             continue;
@@ -3486,8 +3493,15 @@ impl App {
                         self.settings = Some(self.opt.clone());
                     }
                     // Red while a task runs, so that it can be stopped at a glance.
-                    let stop = if busy { RichText::new("⏹ Stop").color(color(Level::Error).unwrap_or_default()) } else { RichText::new("⏹ Stop") };
-                    if ui.add_enabled(busy, egui::Button::new(stop)).on_hover_text("Stop the running task (Esc)").clicked() {
+                    let stopping = self.running.as_ref().is_some_and(|r| r.cancel.load(Ordering::Relaxed));
+                    let stop = if stopping {
+                        RichText::new("⏹ Stopping...")
+                    } else if busy {
+                        RichText::new("⏹ Stop").color(color(Level::Error).unwrap_or_default())
+                    } else {
+                        RichText::new("⏹ Stop")
+                    };
+                    if ui.add_enabled(busy && !stopping, egui::Button::new(stop)).on_hover_text("Stop the running task (Esc)").clicked() {
                         self.stop();
                     }
                     // The whole list in a few words.
@@ -3599,15 +3613,19 @@ impl App {
                         let w = width(ui, text);
                         (w <= room).then(|| room -= w).is_some()
                     };
-                    let label = format!("{}...", r.label);
+                    // Stop was clicked: said at once, until the task has ended (no time left to tell).
+                    let stopping = r.cancel.load(Ordering::Relaxed);
+                    let label = if stopping { "Stopping...".to_string() } else { format!("{}...", r.label) };
                     if fits(ui, &label) {
                         ui.label(RichText::new(label).color(busy).strong());
-                        let show_eta = fits(ui, &eta);
-                        if let Some(done) = done.filter(|d| fits(ui, d)) {
-                            ui.label(RichText::new(done).color(busy));
-                        }
-                        if show_eta {
-                            ui.label(RichText::new(eta).color(busy));
+                        if !stopping {
+                            let show_eta = fits(ui, &eta);
+                            if let Some(done) = done.filter(|d| fits(ui, d)) {
+                                ui.label(RichText::new(done).color(busy));
+                            }
+                            if show_eta {
+                                ui.label(RichText::new(eta).color(busy));
+                            }
                         }
                     }
                 } else if let Some((text, when)) = &self.flash {
@@ -4154,7 +4172,12 @@ impl App {
     fn verdict_cell(ui: &mut egui::Ui, verdict: Option<&(String, Level, String)>) -> egui::Response {
         match verdict {
             Some((text, level, tooltip)) => {
-                let response = badge(ui, format!("{}{text}", mark(*level)), *level);
+                // A show stopped (no verdict): plain text, no colour of a verdict.
+                let response = if text.starts_with(ops::STOPPED) {
+                    ui.label(RichText::new(text).weak())
+                } else {
+                    badge(ui, format!("{}{text}", mark(*level)), *level)
+                };
                 let tip = if tooltip.is_empty() { text } else { tooltip };
                 response.on_hover_text(tip)
             }

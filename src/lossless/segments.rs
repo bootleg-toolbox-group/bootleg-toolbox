@@ -9,6 +9,7 @@
 
 use super::{facts_of, Atom, Facts, Measured, ATOM_SECONDS};
 use crate::audio::AudioInfo;
+use std::sync::atomic::AtomicBool;
 use crate::mp3trace::Collector;
 
 /// Slice sizes, seconds. The step is half the size.
@@ -288,7 +289,8 @@ fn member_runs(v: &[&Slice], member: &dyn Fn(&Slice) -> bool) -> Vec<(usize, usi
 /// The slices of the file in every size and the parts of every variant, measured as a whole.
 /// `whole`: the measures of the file.
 /// `only`: a single variant (size, overlap) instead of the six (production).
-pub(super) fn measure(info: &AudioInfo, m: &Measured, whole: &Facts, aac_check: bool, only: Option<(f64, bool)>) -> (Vec<Series>, Vec<Part>) {
+pub(super) fn measure(info: &AudioInfo, m: &Measured, whole: &Facts, aac_check: bool, only: Option<(f64, bool)>, cancel: &AtomicBool) -> (Vec<Series>, Vec<Part>) {
+    use std::sync::atomic::Ordering::Relaxed;
     let kb = m.kept_hi.saturating_sub(m.kept_lo);
     if m.rate >= 88200.0 || m.frames == 0 || kb == 0 || m.kept_block.is_empty() || m.kept.len() != m.kept_block.len() * kb || m.level.len() != m.kept_block.len() {
         return (Vec::new(), Vec::new());
@@ -312,6 +314,10 @@ pub(super) fn measure(info: &AudioInfo, m: &Measured, whole: &Facts, aac_check: 
         let mut slices = Vec::new();
         let mut i = 0usize;
         while i as f64 * step + size <= total + 1e-9 {
+            // The Stop button: what is measured is dropped by the caller.
+            if cancel.load(Relaxed) {
+                return (Vec::new(), Vec::new());
+            }
             let (t0, t1) = (i as f64 * step, i as f64 * step + size);
             let r = frames_of(t0, t1);
             let mut slice = Slice { t0, t1, frames: r.len() as u32, ..Default::default() };
@@ -321,7 +327,7 @@ pub(super) fn measure(info: &AudioInfo, m: &Measured, whole: &Facts, aac_check: 
                     subset(m, r.start, r.end, t0, t1, None, None)
                 };
                 let _t = crate::prof::span_hot("slice_facts");
-                let f = facts_of(info, &sub, false, false, false, Some(whole));
+                let f = facts_of(info, &sub, false, false, false, Some(whole), cancel);
                 (slice.cutoff, slice.holes, slice.above_floor, slice.hf) = (f.cutoff, f.holes, f.above_floor, f.hf);
             }
             let (a0, a1) = atoms_of(t0, t1);
@@ -334,7 +340,7 @@ pub(super) fn measure(info: &AudioInfo, m: &Measured, whole: &Facts, aac_check: 
                 let best = |atoms: &[Atom], frame: usize, frames: usize, aac: bool| {
                     let w = loudest(atoms, a0, a1);
                     let c = Collector::from_windows(m.atoms_channels, frame, frames, w);
-                    let t = if aac { crate::aactrace::detect(c, m.rate as u32) } else { c.detect(m.rate as u32) };
+                    let t = if aac { crate::aactrace::detect(c, m.rate as u32, cancel) } else { c.detect(m.rate as u32, cancel) };
                     t.map(|t| (t.offset, t.likelihood, t.contrast))
                 };
                 slice.best = Some([best(&m.atoms_mp3, 576, 4, false), best(&m.atoms_aac, 1024, 3, true)]);
@@ -366,6 +372,9 @@ pub(super) fn measure(info: &AudioInfo, m: &Measured, whole: &Facts, aac_check: 
             found.extend(by_grid);
             drop(grouping);
             for (&(i, j), search) in found.iter().zip(searched) {
+                if cancel.load(Relaxed) {
+                    return (Vec::new(), Vec::new());
+                }
                 let (t0, t1) = (v[i].t0, v[j - 1].t1);
                 // The grid is searched in a part unlike the rest of the file only: elsewhere it would
                 // find what the whole file shows (plan §2.2).
@@ -384,7 +393,7 @@ pub(super) fn measure(info: &AudioInfo, m: &Measured, whole: &Facts, aac_check: 
                         };
                         let plain = {
                             let _t = crate::prof::span_hot("part_plain");
-                            facts_of(info, &plain_subset, false, false, false, Some(whole))
+                            facts_of(info, &plain_subset, false, false, false, Some(whole), cancel)
                         };
                         let (trace, aac_windows) = if search && !crate::decision::hiss_above_cutoff(&plain) {
                             let _t = crate::prof::span_hot("part_mp3_grid");
@@ -393,7 +402,7 @@ pub(super) fn measure(info: &AudioInfo, m: &Measured, whole: &Facts, aac_check: 
                                 (loudest(&m.atoms_mp3, a0, a1), loudest(&m.atoms_aac, a0, a1))
                             };
                             (
-                                Collector::from_windows(ch, 576, 4, mp3_windows.0).detect(m.rate as u32),
+                                Collector::from_windows(ch, 576, 4, mp3_windows.0).detect(m.rate as u32, cancel),
                                 Some(Collector::from_windows(ch, 1024, 3, mp3_windows.1)),
                             )
                         } else {
@@ -408,7 +417,7 @@ pub(super) fn measure(info: &AudioInfo, m: &Measured, whole: &Facts, aac_check: 
                                 subset(m, r.start, r.end, t0, t1, trace, aac_windows)
                             };
                             let _t = crate::prof::span_hot("part_searched");
-                            Box::new(facts_of(info, &searched_subset, aac_check, true, false, Some(whole)))
+                            Box::new(facts_of(info, &searched_subset, aac_check, true, false, Some(whole), cancel))
                         };
                         f.wasted = whole.wasted.clone();
                         f.zero_low = whole.zero_low;

@@ -119,7 +119,8 @@ fn part_hits_plain(x: &[f64; PART_SLOTS], sf: &[f64; 63], tau: f64) -> (usize, u
 }
 
 /// Runs the detector (32, 44.1 and 48 kHz: the rates of MPEG-1).
-pub fn detect(collector: Collector, rate: u32) -> Option<Trace> {
+pub fn detect(collector: Collector, rate: u32, cancel: &std::sync::atomic::AtomicBool) -> Option<Trace> {
+    use std::sync::atomic::Ordering::Relaxed;
     let bands = Bands::for_rate(rate)?;
     let channels = collector.channels;
     let segments = collector.segments();
@@ -136,15 +137,25 @@ pub fn detect(collector: Collector, rate: u32) -> Option<Trace> {
         .collect::<Vec<_>>()
         .into_par_iter()
         .map(|(take, seg)| {
+            // The Stop button: the search is dropped (below).
+            if cancel.load(Relaxed) {
+                return Vec::new();
+            }
             let x: Vec<f64> = seg.iter().map(|f| take(*f)).collect();
             (0..SLOT_STARTS).map(|s| tables.slot(&x[s..s + 512])).collect()
         })
         .collect();
+    if cancel.load(Relaxed) {
+        return None;
+    }
     let (sf, tau) = (scale_factors(), threshold());
     // Per position: the rate of each channel over all windows, and the best rate in each window.
     let rates: Vec<(Vec<f64>, Vec<f64>)> = (0..PART)
         .into_par_iter()
         .map(|offset| {
+            if cancel.load(Relaxed) {
+                return (Vec::new(), Vec::new());
+            }
             let mut per_window = vec![0f64; segments.len()];
             let pooled = slots
                 .chunks(segments.len())
@@ -179,6 +190,9 @@ pub fn detect(collector: Collector, rate: u32) -> Option<Trace> {
             (pooled, per_window)
         })
         .collect();
+    if cancel.load(Relaxed) {
+        return None;
+    }
     let mut best = Trace::default();
     let mut per_offset = vec![0f64; PART];
     for (offset, (row, _)) in rates.iter().enumerate() {

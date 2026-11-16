@@ -225,6 +225,9 @@ pub enum ThemeChoice {
     Dark,
 }
 
+/// The start of the text of a show's row after Stop, in Lossless?: the tracks it counts are the ones analysed.
+pub const STOPPED: &str = "Stopped: ";
+
 fn no_choice() -> Option<bool> {
     None
 }
@@ -1245,8 +1248,17 @@ pub fn op_lossless(ctx: &Ctx, shows: &[Show], files: &[PathBuf]) -> String {
         files.iter().zip(results.iter()).filter_map(|(f, r)| r.as_ref().map(|v| (f, v))).collect();
     // The final verdict of each file, once the show's verdict may have changed it.
     let mut finals: HashMap<&PathBuf, (Level, String)> = by_path.iter().map(|(f, (v, _))| (*f, (v.level, v.sentence.clone()))).collect();
+    let listed: std::collections::HashSet<&PathBuf> = files.iter().collect();
     for show in shows {
         let in_show: Vec<&PathBuf> = show.files.iter().filter(|f| by_path.contains_key(f)).collect();
+        // Stop was pressed: no verdict of the show is drawn from some of its tracks, and its former one is
+        // not kept either; the row says how many tracks were analysed. The tracks keep their own verdicts.
+        if ctx.cancelled() {
+            let total = show.files.iter().filter(|f| listed.contains(f)).count();
+            let text = format!("{STOPPED}{} of {} analysed", in_show.len(), plural(total, "track", "tracks"));
+            source(&show.root, &text, Level::Info, "The analysis was stopped: the show has no verdict. The tracks analysed keep theirs.", Default::default());
+            continue;
+        }
         let mut done: Vec<crate::decision::TrackResult> = in_show
             .iter()
             .map(|f| {
@@ -3022,7 +3034,6 @@ mod tests {
         (last, messages, summary)
     }
 
-    /// An error is never hidden by the OK of another checksum file, whatever comes first.
     #[test]
     fn the_number_of_files_at_a_time_is_automatic_unless_chosen() {
         let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
@@ -3050,6 +3061,99 @@ mod tests {
         assert_eq!(o.jobs_auto, Some(false));
     }
 
+    /// A 16-bit stereo WAV of noisy tones, `seconds` long.
+    fn write_noise_wav(path: &Path, seconds: usize) {
+        let rate = 44100usize;
+        let mut data = Vec::with_capacity(rate * seconds * 4);
+        let mut state = 0x2545_F491_4F6C_DD1Du64 ^ seconds as u64;
+        let mut low = 0.0f64;
+        for i in 0..rate * seconds {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            low += 0.2 * ((state >> 11) as f64 / (1u64 << 53) as f64 - 0.5 - low);
+            let tone = 0.2 * libm::sin(440.0 * std::f64::consts::TAU * i as f64 / rate as f64);
+            for _ in 0..2 {
+                data.extend_from_slice(&((((tone + 1.5 * low) * 20000.0).clamp(-32768.0, 32767.0)) as i16).to_le_bytes());
+            }
+        }
+        let mut out = b"RIFF".to_vec();
+        out.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"WAVEfmt ");
+        for v in [16u32, 0x0002_0001, rate as u32, rate as u32 * 4, 0x0010_0004] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&data);
+        std::fs::write(path, out).unwrap();
+    }
+
+    /// Lossless? on a show of `n` tracks, Stop pressed (`stop_at`: after that many tracks have their verdict;
+    /// None: before anything). The messages, and the row of the show.
+    fn lossless_stopped(tag: &str, n: usize, stop_at: Option<usize>) -> (Vec<Msg>, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("bt-stop-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let files: Vec<PathBuf> = (0..n)
+            .map(|i| {
+                let f = dir.join(format!("{:02}.wav", i + 1));
+                write_noise_wav(&f, 12 + i);
+                f
+            })
+            .collect();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let opt = Options { jobs: 1, jobs_auto: Some(false), ..Options::default() };
+        let cancel = Arc::new(AtomicBool::new(stop_at.is_none()));
+        let ctx = Ctx { tx, cancel: cancel.clone(), opt, done: AtomicUsize::new(0), total: AtomicUsize::new(0), rescan: AtomicBool::new(false) };
+        let show = Show { root: dir.clone(), files: files.clone() };
+        // The window's side: Stop is pressed when the given number of tracks have their verdict.
+        let watcher = std::thread::spawn(move || {
+            let mut messages = Vec::new();
+            let mut tracks = 0;
+            for m in rx {
+                if let (Msg::Source { path, .. }, Some(k)) = (&m, stop_at) {
+                    if path.extension().is_some_and(|e| e == "wav") {
+                        tracks += 1;
+                        if tracks >= k {
+                            cancel.store(true, Ordering::SeqCst);
+                        }
+                    }
+                }
+                messages.push(m);
+            }
+            messages
+        });
+        crate::dsp::THREADS.store(1, Ordering::SeqCst);
+        op_lossless(&ctx, &[show], &files);
+        drop(ctx);
+        let messages = watcher.join().unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        (messages, dir)
+    }
+
+    /// After Stop the show's row says how many tracks were analysed, with no verdict of the show (none drawn from
+    /// some of its tracks, none kept from before); the tracks analysed keep their own.
+    #[test]
+    fn a_show_stopped_in_lossless_says_how_many_tracks_were_analysed() {
+        for (tag, stop_at) in [("before", None), ("after-one", Some(1))] {
+            let (messages, dir) = lossless_stopped(tag, 3, stop_at);
+            let tracks = messages.iter().filter(|m| matches!(m, Msg::Source { path, .. } if path.extension().is_some_and(|e| e == "wav"))).count();
+            let rows: Vec<(&String, Level)> = messages.iter().filter_map(|m| match m {
+                Msg::Source { path, text, level, .. } if *path == dir => Some((text, *level)),
+                _ => None,
+            }).collect();
+            // One line for the show, whatever the tracks: said as it is, in no verdict's colour.
+            assert_eq!(rows.len(), 1, "{tag}: {rows:?}");
+            assert_eq!(rows[0].0, &format!("{STOPPED}{tracks} of 3 tracks analysed"), "{tag}");
+            assert_eq!(rows[0].1, Level::Info, "{tag}");
+            // The tracks analysed before Stop have their verdict; none came after the first for "after-one" (one worker).
+            assert_eq!(tracks >= 1, stop_at.is_some(), "{tag}: {tracks}");
+            assert!(tracks < 3, "{tag}: the whole show was analysed");
+        }
+    }
+
+    /// An error is never hidden by the OK of another checksum file, whatever comes first.
     #[test]
     fn verify_error_is_not_hidden_by_a_later_ok() {
         for (tag, st5, md5) in [("first", "a.st5", "b.md5"), ("last", "b.st5", "a.md5")] {

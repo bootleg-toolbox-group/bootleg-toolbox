@@ -179,7 +179,8 @@ impl Collector {
     }
 
     /// Runs the detector (44.1, 48 or 32 kHz only: the rates of MP3).
-    pub fn detect(self, rate: u32) -> Option<Trace> {
+    pub fn detect(self, rate: u32, cancel: &std::sync::atomic::AtomicBool) -> Option<Trace> {
+        use std::sync::atomic::Ordering::Relaxed;
         let bands = Bands::for_rate(rate)?;
         let channels = self.channels;
         let segments = self.segments();
@@ -211,11 +212,18 @@ impl Collector {
             .collect::<Vec<_>>()
             .into_par_iter()
             .map(|(take, seg)| {
+                // The Stop button: the work of this segment is dropped (the whole search with it, below).
+                if cancel.load(Relaxed) {
+                    return Vec::new();
+                }
                 let x: Vec<f64> = seg.iter().map(|f| take(*f)).collect();
                 (0..SLOT_STARTS).map(|q| tables.slot(&x[FIRST_SLOT + q..FIRST_SLOT + q + 512])).collect()
             })
             .collect();
         drop(_slots);
+        if cancel.load(Relaxed) {
+            return None;
+        }
         let _rates = crate::prof::span("rates");
         // Every position on its own (in parallel), then taken in order as before.
         // Per position: the rate of each channel mode over all windows, and the best rate of any
@@ -223,6 +231,9 @@ impl Collector {
         let rates: Vec<(Vec<f64>, Vec<f64>)> = (0..GRANULE)
             .into_par_iter()
             .map(|offset| {
+                if cancel.load(Relaxed) {
+                    return (Vec::new(), Vec::new());
+                }
                 let mut per_window = vec![0f64; segments.len()];
                 let pooled = slots
                     .chunks(segments.len())
@@ -244,6 +255,9 @@ impl Collector {
             })
             .collect();
         drop(_rates);
+        if cancel.load(Relaxed) {
+            return None;
+        }
         let likelihoods: Vec<&Vec<f64>> = rates.iter().map(|r| &r.0).collect();
         let mut best = Trace::default();
         let mut per_offset = vec![0f64; GRANULE];
@@ -856,7 +870,7 @@ mod tests {
         for _ in 0..44100 * 3 {
             c.push(&[next(), next()]);
         }
-        let t = c.detect(44100).unwrap();
+        let t = c.detect(44100, &std::sync::atomic::AtomicBool::new(false)).unwrap();
         assert!(!t.found(), "{t:?}");
     }
 }

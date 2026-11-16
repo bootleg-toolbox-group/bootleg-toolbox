@@ -28,7 +28,8 @@ pub fn collector(channels: usize) -> Collector {
 }
 
 /// Runs the detector (32, 44.1 and 48 kHz: the rates its band tables cover).
-pub fn detect(collector: Collector, rate: u32) -> Option<Trace> {
+pub fn detect(collector: Collector, rate: u32, cancel: &std::sync::atomic::AtomicBool) -> Option<Trace> {
+    use std::sync::atomic::Ordering::Relaxed;
     let long_starts: &[usize] = match rate {
         32000 => &[
             1, 5, 9, 13, 17, 21, 25, 29, 33, 37, 41, 49, 57, 65, 73, 81, 89, 97, 109, 121, 133, 145, 161, 177, 197, 217, 241, 265, 293, 321,
@@ -66,6 +67,10 @@ pub fn detect(collector: Collector, rate: u32) -> Option<Trace> {
         .map_init(
             || (Work::new(), vec![0f64; 2 * FRAME]),
             |(work, buf), offset| {
+                // The Stop button: the search is dropped (below).
+                if cancel.load(Relaxed) {
+                    return Vec::new();
+                }
                 modes
                     .iter()
                     .map(|&(_, take)| {
@@ -85,6 +90,9 @@ pub fn detect(collector: Collector, rate: u32) -> Option<Trace> {
         )
         .collect();
     drop(_positions);
+    if cancel.load(Relaxed) {
+        return None;
+    }
     let mut per_offset = vec![0f64; FRAME];
     let mut best = Trace::default();
     for (offset, row) in likelihoods.iter().enumerate() {
