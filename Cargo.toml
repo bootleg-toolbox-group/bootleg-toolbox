@@ -43,7 +43,7 @@ ape-decoder = "0.3.2"
 # WavPack (lossless, mono/stereo, 16-32-bit and float) decoder in pure Rust (MIT OR Apache-2.0).
 wavicle = "0.1.0"
 # MP3 encoding: LAME 3.100 (C, LGPL-3.0), built from source into the executable.
-mp3lame-encoder = "0.2.5"
+mp3lame-encoder = "0.3.0"
 ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "platform-verifier"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 libm = "0.2"
