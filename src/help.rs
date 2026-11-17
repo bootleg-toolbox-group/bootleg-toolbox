@@ -28,7 +28,7 @@ pub const MOUSE: &[(&str, &str)] = &[
     ("Ctrl + click", "Add a row to the selection, or take it out"),
     ("Shift + click", "Select every row up to this one"),
     ("Drag over rows", "Select a range (also from the empty area below the rows)"),
-    ("Right-click", "Every action, with Open folder first"),
+    ("Right-click", "Decode test, Lossless?, checksums and torrents, copy info file and FFP; the Check, Edit, Convert and Share sub-menus; Open folder, Remove from list (actions that do not apply to the row are left out)"),
     ("Double-click a column edge", "Fit the column to its content"),
     ("Up / Down, Enter", "In the info file choice: pick a file, copy it"),
 ];

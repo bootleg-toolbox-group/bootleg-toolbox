@@ -2314,7 +2314,7 @@ pub fn op_tag(ctx: &Ctx, jobs: &[crate::tagging::TagJob]) -> String {
     if ctx.cancelled() {
         return "Stopped.".into();
     }
-    let undo = if journal { " To undo: Tools > Undo tagging (or --cli undo-tagging)." } else { "" };
+    let undo = if journal { " To undo: Edit > Undo tagging (or --cli undo-tagging)." } else { "" };
     format!("{} tagged, {} renamed.{undo}", plural(tagged, "file", "files"), renamed)
 }
 

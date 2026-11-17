@@ -950,6 +950,7 @@ enum Action {
     Run(Op),
     Click { index: usize, ctrl: bool, shift: bool },
     RightClick(usize),
+    UndoTagging,
     Toggle(PathBuf),
     OpenFolder(PathBuf),
     CopyFfp,
@@ -1785,6 +1786,14 @@ impl App {
 
     /// What an action works on: the selected shows and files, or without a selection the whole
     /// list. With a filter, only the files it shows (a selected show gives its files shown).
+    /// What the right-click menu offers for the row clicked (and the selection it belongs to):
+    /// (rules, only rows of missing files, a single row).
+    fn menu_rules(&self, row: Row, path: &Path) -> (MenuRules, bool, bool) {
+        let selected: HashSet<&Path> = if self.selected.contains(path) { self.selected.iter().map(|p| p.as_path()).collect() } else { HashSet::from([path]) };
+        let rules = menu_rules_of(&self.shows, &selected);
+        (rules.0, matches!(row, Row::Missing(..)) && rules.1 == 0, selected.len() == 1)
+    }
+
     fn selection(&self) -> (Vec<Show>, Vec<PathBuf>) {
         if self.selected.is_empty() && self.filter.is_none() {
             let files = self.shows.iter().flat_map(|s| s.files.clone()).collect();
@@ -2557,7 +2566,7 @@ impl App {
                 ui.label(format!(
                     "{} shows: {clear} clear, {to_check} to check, {cannot} that cannot be tagged. The clear ones are ticked; \
                      check the others in the Tag and rename window (Check) before ticking them. Nothing is written before Apply, \
-                     and Tools > Undo tagging gives the files back as they were.",
+                     and Edit > Undo tagging gives the files back as they were.",
                     b.rows.len()
                 ));
                 ui.add_space(4.0);
@@ -3261,16 +3270,25 @@ impl App {
                 }));
                 ui.menu_button("Tools", |ui| fit_below(ui, |ui| {
                     menu_open = true;
-                    ops_menu(ui, busy || !has, self.opt.flac_level, &tracker_entries(&self.opt), actions);
+                    let kinds = self.checksum_kinds();
+                    let trackers = tracker_entries(&self.opt);
+                    let menu = MenuCtx { busy, has, scope, kinds: &kinds, flac_level: self.opt.flac_level, trackers: &trackers, rules: MenuRules::ALL };
+                    // The groups of the toolbar, one after the other (a sub-menu would stay open over the entries below, egui 0.29).
+                    let heading = |ui: &mut egui::Ui, text: &str| {
+                        ui.label(RichText::new(text).size(10.5).family(crate::fonts::bold()).color(Palette::now().weak));
+                    };
+                    heading(ui, "CHECK");
+                    check_menu(ui, &menu, actions);
                     ui.separator();
-                    if ui.add_enabled(!busy && has, egui::Button::new("🖼 Share card...")).on_hover_text(SHARE_TIP).clicked() {
-                        ui.close_menu();
-                        actions.push(Action::ShareCard(None));
-                    }
-                    if ui.add_enabled(!busy, egui::Button::new("↩ Undo tagging...")).on_hover_text(UNDO_TIP).clicked() {
-                        ui.close_menu();
-                        self.open_undo_dialog();
-                    }
+                    heading(ui, "EDIT");
+                    edit_menu(ui, &menu, actions);
+                    ui.separator();
+                    heading(ui, "CONVERT");
+                    convert_menu(ui, &menu, actions);
+                    ui.separator();
+                    heading(ui, "SHARE");
+                    share_menu(ui, &menu, actions);
+                    ui.separator();
                     if ui.add_enabled(busy, egui::Button::new("Stop")).clicked() {
                         ui.close_menu();
                         self.stop();
@@ -3384,109 +3402,41 @@ impl App {
                 });
                 let on = !busy && has;
                 let kinds = self.checksum_kinds();
+                let trackers = tracker_entries(&self.opt);
+                let menu = MenuCtx { busy, has, scope, kinds: &kinds, flac_level: self.opt.flac_level, trackers: &trackers, rules: MenuRules::ALL };
+                // Grouped by what the actions do to the files: Check reads, Edit corrects, Convert makes copies,
+                // Share prepares what goes to the trackers; shortcuts unchanged.
                 ui.add_enabled_ui(on, |ui| {
                     ui.menu_button(tool_title("✔", "Check", on, ui.style()), |ui| fit_below(ui, |ui| {
                         menu_open = true;
-                        let items: [(&str, &str, Op, String); 7] = [
-                            ("🛡 Verify checksums", "F5", Op::Verify, format!("Check the files of {scope} against their .ffp, .md5, .st5 and .sfv files.\nAn FFP line only compares the MD5 stored in the FLAC header: use Decode test to find damaged audio.")),
-                            ("✔ Decode test", "F7", Op::Test, format!("Decode every file of {scope} completely to find damaged or truncated audio; FLAC files are also checked against their MD5 signature.\nNeeds no checksum file.")),
-                            ("🔍 Lossless?", "Ctrl+L", Op::Lossless, format!("Analyse the spectrum of every file of {scope} to find lossy (MP3/AAC) sources, FM broadcasts, upsampled files and fake 24-bit.\nThe verdict goes to the Source column; click it for the full analysis.")),
-                            ("⏱ Speed?", "Ctrl+P", Op::Speed, format!("Estimate whether the tape of {scope} runs too fast or too slow, and the correction to apply.\nThe verdict goes to the Speed column; click it for the full analysis.")),
-                            ("📊 Spectrogram", "F9", Op::Spectrogram, format!("Show the spectrogram of the first files of {scope}, up to 4, to see lossy sources for yourself")),
-                            ("ℹ Show details", "F8", Op::Details { verbose: true }, format!("Read the format, length and SBEs of {scope} again, and list them in the log")),
-                            ("📋 Media info", "Ctrl+I", Op::MediaInfo(Vec::new()), format!("A technical summary of {scope} (format, encoder, length, bit rate, tags; for a DVD title, the whole DVD: video, audio tracks, subtitles, titles and chapters), as text to copy.")),
-                        ];
-                        for (i, (label, key, op, tip)) in items.into_iter().enumerate() {
-                            if i == 4 {
-                                ui.separator();
-                            }
-                            if ui.add(egui::Button::new(label).shortcut_text(key)).on_hover_text(tip).clicked() {
-                                ui.close_menu();
-                                actions.push(Action::Run(op));
-                            }
-                            if i == 1 {
-                                torrent_check_button(ui, false, actions);
-                            }
-                        }
+                        check_menu(ui, &menu, actions);
                     }))
                     .response
                     .on_hover_text(format!("Verify, test and analyse {scope}"));
-                    ui.menu_button(tool_title("✚", "Create", on, ui.style()), |ui| fit_below(ui, |ui| {
+                });
+                // Edit stays open on an empty list: Undo tagging works from the journal.
+                ui.add_enabled_ui(!busy, |ui| {
+                    ui.menu_button(tool_title("🏷", "Edit", !busy, ui.style()), |ui| fit_below(ui, |ui| {
                         menu_open = true;
-                        if ui
-                            .add(egui::Button::new("✚ Create checksums").shortcut_text("F6"))
-                            .on_hover_text(format!("Create {kinds} for {scope}.\nThe types of files to create can be changed in Settings."))
-                            .clicked()
-                        {
-                            ui.close_menu();
-                            actions.push(Action::Run(Op::Create));
-                        }
-                        if ui
-                            .button("📋 Copy FFP contents")
-                            .on_hover_text("Copy the show's .ffp file to the clipboard (for the TTD upload form)")
-                            .clicked()
-                        {
-                            ui.close_menu();
-                            actions.push(Action::CopyFfp);
-                        }
-                        if ui.button("📋 Copy info file").on_hover_text(INFO_TIP).clicked() {
-                            ui.close_menu();
-                            actions.push(Action::CopyInfo);
-                        }
+                        edit_menu(ui, &menu, actions);
                     }))
                     .response
-                    .on_hover_text(format!("Create checksum files ({kinds}) for {scope}"));
+                    .on_hover_text(format!("Correct and complete {scope}: tags and names from the info file, the setlist, SBEs and WAV headers"));
                 });
                 ui.separator();
                 ui.add_enabled_ui(on, |ui| {
-                    let level = self.opt.flac_level;
                     ui.menu_button(tool_title("🎵", "Convert", on, ui.style()), |ui| fit_below(ui, |ui| {
                         menu_open = true;
-                        ui.label(RichText::new("To FLAC (verified), level:").strong());
-                        // The levels on one row: a sub-menu would stay open over the other entries (egui 0.29).
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 2.0;
-                            for l in 0..=8u8 {
-                                let tip = match l {
-                                    0 => "Level 0: fastest".to_string(),
-                                    5 => "Level 5: the flac default".to_string(),
-                                    8 => "Level 8: smallest files".to_string(),
-                                    _ => format!("Level {l}"),
-                                };
-                                if ui.selectable_label(l == level, format!(" {l} ")).on_hover_text(tip).clicked() {
-                                    ui.close_menu();
-                                    actions.push(Action::FlacLevel(l));
-                                    actions.push(Action::Run(Op::Convert { target: Target::Flac, level: l, round_float: false }));
-                                }
-                            }
-                        });
-                        ui.separator();
-                        if ui.button("To WAV").clicked() {
-                            ui.close_menu();
-                            actions.push(Action::Run(Op::Convert { target: Target::Wav, level, round_float: false }));
-                        }
-                        ui.separator();
-                        ui.label(RichText::new("MP3 copy (separate folder)").strong());
-                        mp3_buttons(ui, false, actions);
-                        ui.separator();
-                        sbe_button(ui, false, actions);
-                        clean_wav_button(ui, false, actions);
-                        ui.separator();
-                        tag_button(ui, false, actions);
-                        setlist_button(ui, false, actions);
-                        extract_button(ui, false, actions);
+                        convert_menu(ui, &menu, actions);
                     }))
                     .response
-                    .on_hover_text(format!("Convert {scope} to FLAC (each file is decoded again and checked) or to WAV, make an MP3 copy of the shows in a separate folder, or fix SBEs. The originals are kept."));
-                });
-                ui.separator();
-                let trackers = tracker_entries(&self.opt);
-                ui.add_enabled_ui(on, |ui| {
-                    let torrent = ui.menu_button(tool_title("🌐", "Torrent", on, ui.style()), |ui| fit_below(ui, |ui| {
+                    .on_hover_text(format!("Convert {scope} to FLAC (each file is decoded again and checked), to WAV, or make an MP3 copy of the shows in a separate folder. The originals are kept."));
+                    ui.menu_button(tool_title("🌐", "Share", on, ui.style()), |ui| fit_below(ui, |ui| {
                         menu_open = true;
-                        torrent_menu(ui, &trackers, actions)
-                    }));
-                    torrent.response.on_hover_text(format!("Create torrents for the shows of {scope}"));
+                        share_menu(ui, &menu, actions);
+                    }))
+                    .response
+                    .on_hover_text(format!("Checksum files ({kinds}), torrents, the info file and FFP to copy, and the share card of {scope}"));
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.add_enabled(!busy, egui::Button::new(RichText::new("⚙").size(16.0))).on_hover_text("Settings").clicked() {
@@ -4060,27 +4010,68 @@ impl App {
                             let has_lossless = self.reports.contains_key(&(ReportKind::Lossless, path.clone()));
                             let has_speed = self.reports.contains_key(&(ReportKind::Speed, path.clone()));
                             // Set from inside: egui 0.29 only returns Some when the menu closes.
+                            let kinds = self.checksum_kinds();
+                            let (rules, only_missing, single) = self.menu_rules(r, &path);
                             response.context_menu(|ui| fit_window(ui, |ui| {
                                 menu_open = true;
+                                let menu = MenuCtx { busy, has: true, scope: "the selection", kinds: &kinds, flac_level, trackers: &trackers, rules };
+                                let on = !busy;
+                                let mut g = Groups::default();
+                                if !only_missing {
+                                    g.item(ui);
+                                    if menu_item(ui, on, "✔ Decode test", "F7", "Decode every file of the selection completely to find damaged or truncated audio") {
+                                        actions.push(Action::Run(Op::Test));
+                                    }
+                                    if menu_item(ui, on, "🔍 Lossless?", "Ctrl+L", "Analyse the spectrum of the selection to find lossy sources, FM broadcasts, upsampled files and fake 24-bit") {
+                                        actions.push(Action::Run(Op::Lossless));
+                                    }
+                                    // Only when there is one: nothing greyed out, and none for several rows at once.
+                                    for (kind, has, text) in [
+                                        (ReportKind::Lossless, has_lossless, "🔍 See lossless analysis..."),
+                                        (ReportKind::Speed, has_speed, "⏱ See speed analysis..."),
+                                    ] {
+                                        if has && single && menu_item(ui, true, text, "", "") {
+                                            actions.push(Action::OpenReport(kind, path.clone()));
+                                        }
+                                    }
+                                    g.next();
+                                    if rules.show_files {
+                                        g.item(ui);
+                                        if menu_item(ui, on, "✚ Create checksums", "F6", &format!("Create {kinds} for the show of the selection.\nThe types of files to create can be changed in Settings.")) {
+                                            actions.push(Action::Run(Op::Create));
+                                        }
+                                        if let Some((label, key, list)) = trackers.iter().find(|t| !t.1.is_empty()) {
+                                            if menu_item(ui, on, &format!("🌐 Torrent for {}", label.strip_prefix("For ").unwrap_or(label)), key, "Create a torrent for the show of the selection") {
+                                                actions.push(Action::Run(Op::Torrent(list.clone())));
+                                            }
+                                        }
+                                        g.next();
+                                    }
+                                    if rules.one_show {
+                                        g.item(ui);
+                                        if menu_item(ui, on, "📋 Copy info file", "", INFO_TIP) {
+                                            actions.push(Action::CopyInfo);
+                                        }
+                                        if menu_item(ui, on, "📋 Copy FFP contents", "", "Copy the show's .ffp file to the clipboard (for the TTD upload form)") {
+                                            actions.push(Action::CopyFfp);
+                                        }
+                                        g.next();
+                                    }
+                                    g.next();
+                                    g.item(ui);
+                                    // Sub-menus: the groups of the toolbar.
+                                    ui.menu_button("✔ Check", |ui| check_menu(ui, &menu, actions));
+                                    ui.menu_button("🏷 Edit", |ui| edit_menu(ui, &menu, actions));
+                                    ui.menu_button("🎵 Convert", |ui| convert_menu(ui, &menu, actions));
+                                    if rules.show_files || rules.whole_shows {
+                                        ui.menu_button("🌐 Share", |ui| share_menu(ui, &menu, actions));
+                                    }
+                                    g.next();
+                                }
+                                g.item(ui);
                                 if ui.button("📁 Open folder").on_hover_text("Open the folder in the file manager (for a file, with the file selected)").clicked() {
                                     ui.close_menu();
                                     actions.push(Action::OpenFolder(folder.clone()));
-                                }
-                                if ui.add_enabled(!busy, egui::Button::new("🖼 Share card...")).on_hover_text(SHARE_TIP).clicked() {
-                                    ui.close_menu();
-                                    actions.push(Action::ShareCard(None));
-                                }
-                                ui.separator();
-                                ops_menu(ui, busy, flac_level, &trackers, actions);
-                                ui.separator();
-                                for (kind, has, text, first) in [
-                                    (ReportKind::Lossless, has_lossless, "🔍 See lossless analysis...", "Run Lossless? first"),
-                                    (ReportKind::Speed, has_speed, "⏱ See speed analysis...", "Run Speed? first"),
-                                ] {
-                                    if ui.add_enabled(has, egui::Button::new(text)).on_disabled_hover_text(first).clicked() {
-                                        ui.close_menu();
-                                        actions.push(Action::OpenReport(kind, path.clone()));
-                                    }
                                 }
                                 if ui.add_enabled(!busy, egui::Button::new("Remove from list")).clicked() {
                                     ui.close_menu();
@@ -4450,6 +4441,7 @@ impl App {
                         self.log(format!("Cannot open {}: {e}", path.display()), Level::Error);
                     }
                 }
+                Action::UndoTagging => self.open_undo_dialog(),
                 Action::CopyFfp => self.copy_ffp(ctx),
                 Action::CopyInfo => self.copy_info(ctx),
                 Action::TagInfo => self.open_tag_dialog(),
@@ -4688,7 +4680,7 @@ impl App {
                 });
                 ui.add_space(4.0);
                 ui.label(RichText::new("Other trackers").strong())
-                    .on_hover_text("Each one gets its own torrent, named \"<show> [Name].torrent\", and its entry in the Torrent menus.");
+                    .on_hover_text("Each one gets its own torrent, named \"<show> [Name].torrent\", and its entry in the Share menus.");
                 let mut remove = None;
                 // Sizes are forced: inside a grid, text fields would otherwise shrink to a few letters.
                 let field_height = ui.spacing().interact_size.y;
@@ -4719,7 +4711,7 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.label("API key");
                     ui.add(egui::TextEdit::singleline(&mut draft.setlistfm_key).password(true).hint_text("Your own key").desired_width(320.0))
-                        .on_hover_text("Used by Tools > Get setlist from setlist.fm and by the Tag and rename window. \
+                        .on_hover_text("Used by Edit > Get setlist from setlist.fm and by the Tag and rename window. \
                                         setlist.fm is asked only then, with the artist and the date of the show.");
                     ui.hyperlink_to("Get a free key", "https://www.setlist.fm/settings/api");
                 });
@@ -5608,8 +5600,8 @@ fn fit_below<R>(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui) -> R
 }
 
 fn mp3_buttons(ui: &mut egui::Ui, disabled: bool, actions: &mut Vec<Action>) {
-    for (label, mode) in [("🎧 To MP3 320 kbps (CBR)", Mp3Mode::Cbr320), ("🎧 To MP3 VBR V0 (about 245 kbps)", Mp3Mode::V0)] {
-        let tip = format!("Writes \"<show> [{}]\" next to the show folder (or in the folder set in Settings), with the text files and pictures", mode.tag());
+    for (label, what, mode) in [("🎧 MP3 320", "MP3 320 kbps (constant bit rate)", Mp3Mode::Cbr320), ("🎧 MP3 V0", "MP3 VBR V0 (about 245 kbps)", Mp3Mode::V0)] {
+        let tip = format!("{what}: writes \"<show> [{}]\" next to the show folder (or in the folder set in Settings), with the text files and pictures", mode.tag());
         if ui.add_enabled(!disabled, egui::Button::new(label)).on_hover_text(tip).clicked() {
             ui.close_menu();
             actions.push(Action::Run(Op::Mp3(mode)));
@@ -5641,7 +5633,7 @@ fn clean_wav_button(ui: &mut egui::Ui, disabled: bool, actions: &mut Vec<Action>
     let tip = "Rewrite WAV files with only their format and their sound, in the canonical layout: extra chunks (LIST, id3, bext...), \
                non-standard headers and stray bytes are left out. Copies go to a WAV-cleaned folder and are checked to hold the same \
                sound; the originals are not touched. Some burning and SBE tools stumble on WAVs that are not canonical.";
-    if ui.add_enabled(!disabled, egui::Button::new("✨ Clean WAV headers")).on_hover_text(tip).clicked() {
+    if ui.add_enabled(!disabled, egui::Button::new("✨ Clean WAV headers (new folder)")).on_hover_text(tip).clicked() {
         ui.close_menu();
         actions.push(Action::Run(Op::CleanWav));
     }
@@ -5657,7 +5649,7 @@ fn tag_button(ui: &mut egui::Ui, disabled: bool, actions: &mut Vec<Action>) {
 
 /// "Extract audio...": one track of each DVD title or video to one file.
 fn extract_button(ui: &mut egui::Ui, disabled: bool, actions: &mut Vec<Action>) {
-    if ui.add_enabled(!disabled, egui::Button::new("📀 Extract audio...")).on_hover_text(EXTRACT_TIP).clicked() {
+    if ui.add_enabled(!disabled, egui::Button::new("📀 Extract audio from video...")).on_hover_text(EXTRACT_TIP).clicked() {
         ui.close_menu();
         actions.push(Action::ExtractAudio);
     }
@@ -5694,72 +5686,232 @@ fn sbe_button(ui: &mut egui::Ui, disabled: bool, actions: &mut Vec<Action>) {
     let tip = "Fix sector boundary errors, disc by disc (CD1, CD2... folders), as shntool fix: boundaries move back to \
                the previous CD sector, the last track is padded with silence. Corrected FLAC copies of the tracks that \
                change go to an SBE-fixed folder; the originals are not touched.";
-    if ui.add_enabled(!disabled, egui::Button::new("🔧 Fix SBE")).on_hover_text(tip).clicked() {
+    if ui.add_enabled(!disabled, egui::Button::new("🔧 Fix SBE (new folder)")).on_hover_text(tip).clicked() {
         ui.close_menu();
         actions.push(Action::Run(Op::FixSbe));
     }
 }
 
-fn ops_menu(ui: &mut egui::Ui, disabled: bool, flac_level: u8, trackers: &[(String, &'static str, Vec<Tracker>)], actions: &mut Vec<Action>) {
-    let items: [(&str, &str, Op); 7] = [
-        ("🛡 Verify checksums", "F5", Op::Verify),
-        ("✚ Create checksums", "F6", Op::Create),
-        ("✔ Decode test", "F7", Op::Test),
-        ("🔍 Lossless?", "Ctrl+L", Op::Lossless),
-        ("⏱ Speed?", "Ctrl+P", Op::Speed),
-        ("ℹ Show details", "F8", Op::Details { verbose: true }),
-        ("📋 Media info", "Ctrl+I", Op::MediaInfo(Vec::new())),
-    ];
-    for (label, key, op) in items {
-        if ui.add_enabled(!disabled, egui::Button::new(label).shortcut_text(key)).clicked() {
-            ui.close_menu();
-            actions.push(Action::Run(op));
+/// What the menus offer for what is selected (the toolbar and the Tools menu offer everything).
+#[derive(Clone, Copy)]
+struct MenuRules {
+    /// Create checksums and the torrents: the show of the selection (one show, or a show row selected).
+    show_files: bool,
+    /// Copy info file, Copy FFP contents: exactly one show.
+    one_show: bool,
+    /// Tag and rename, setlist, share card: whole shows selected.
+    whole_shows: bool,
+    /// Fix SBE: whole shows or discs selected.
+    discs: bool,
+    /// Extract audio from video: a video or a DVD in the selection.
+    video: bool,
+}
+
+impl MenuRules {
+    const ALL: MenuRules = MenuRules { show_files: true, one_show: true, whole_shows: true, discs: true, video: true };
+}
+
+/// The rules of a selection (show roots, disc folders and files of `shows`), and the number of shows it
+/// touches. Create, the torrents and the copies of the info file and FFP work on the show that holds the
+/// tracks (a track of two shows: none of them); the others need whole shows.
+fn menu_rules_of(shows: &[Show], selected: &HashSet<&Path>) -> (MenuRules, usize) {
+    let (mut touched, mut whole, mut discs, mut video) = (0usize, false, false, false);
+    for show in shows {
+        let root_picked = selected.contains(show.root.as_path());
+        let mut any = false;
+        for f in &show.files {
+            let disc = f.parent().filter(|d| *d != show.root.as_path());
+            let disc_picked = disc.is_some_and(|d| selected.contains(d));
+            if root_picked || disc_picked || selected.contains(f.as_path()) {
+                any = true;
+                video |= crate::audio::Format::from_path(f).is_some_and(|fm| fm.video() || fm == crate::audio::Format::Vob);
+            }
+            discs |= disc_picked;
         }
+        touched += usize::from(any);
+        whole |= root_picked;
     }
-    ui.separator();
-    for (label, target) in [(format!("🎵 To FLAC (level {flac_level})"), Target::Flac), ("🎵 To WAV".to_string(), Target::Wav)] {
-        if ui.add_enabled(!disabled, egui::Button::new(label)).clicked() {
-            ui.close_menu();
-            actions.push(Action::Run(Op::Convert { target, level: flac_level, round_float: false }));
+    let rules = MenuRules { show_files: touched >= 1 && (whole || touched == 1), one_show: touched == 1, whole_shows: whole, discs: whole || discs, video };
+    (rules, touched)
+}
+
+/// What a menu needs to draw its items.
+struct MenuCtx<'a> {
+    /// A task runs: nothing can start.
+    busy: bool,
+    /// Items that need files are greyed out when the list is empty.
+    has: bool,
+    /// "the selection", "the whole list (nothing selected)"...: for the tips.
+    scope: &'a str,
+    kinds: &'a str,
+    flac_level: u8,
+    trackers: &'a [(String, &'static str, Vec<Tracker>)],
+    rules: MenuRules,
+}
+
+/// Separators only between groups that have something in them.
+#[derive(Default)]
+struct Groups {
+    started: bool,
+    pending: bool,
+}
+
+impl Groups {
+    fn next(&mut self) {
+        self.pending = self.started;
+    }
+    fn item(&mut self, ui: &mut egui::Ui) {
+        if self.pending {
+            ui.separator();
+            self.pending = false;
         }
-    }
-    mp3_buttons(ui, disabled, actions);
-    sbe_button(ui, disabled, actions);
-    clean_wav_button(ui, disabled, actions);
-    tag_button(ui, disabled, actions);
-    setlist_button(ui, disabled, actions);
-    extract_button(ui, disabled, actions);
-    ui.separator();
-    if ui.add_enabled(!disabled, egui::Button::new("📊 Spectrogram").shortcut_text("F9")).clicked() {
-        ui.close_menu();
-        actions.push(Action::Run(Op::Spectrogram));
-    }
-    // Flat entries: an egui 0.29 sub-menu stays open while hovering plain buttons.
-    ui.separator();
-    for (label, key, list) in trackers {
-        let label = format!("🌐 Torrent for {}", label.strip_prefix("For ").unwrap_or(label));
-        if ui.add_enabled(!disabled, egui::Button::new(label).shortcut_text(*key)).clicked() {
-            ui.close_menu();
-            actions.push(Action::Run(Op::Torrent(list.clone())));
-        }
-    }
-    ui.separator();
-    torrent_check_button(ui, disabled, actions);
-    if ui.add_enabled(!disabled, egui::Button::new("📋 Copy FFP contents")).on_hover_text("Copy the show's .ffp file to the clipboard (for the TTD upload form)").clicked() {
-        ui.close_menu();
-        actions.push(Action::CopyFfp);
-    }
-    if ui.add_enabled(!disabled, egui::Button::new("📋 Copy info file")).on_hover_text(INFO_TIP).clicked() {
-        ui.close_menu();
-        actions.push(Action::CopyInfo);
+        self.started = true;
     }
 }
 
-fn torrent_menu(ui: &mut egui::Ui, trackers: &[(String, &'static str, Vec<Tracker>)], actions: &mut Vec<Action>) {
-    for (label, key, list) in trackers {
-        if ui.add(egui::Button::new(label.as_str()).shortcut_text(*key)).clicked() {
-            ui.close_menu();
-            actions.push(Action::Run(Op::Torrent(list.clone())));
+fn menu_item(ui: &mut egui::Ui, enabled: bool, label: &str, key: &str, tip: &str) -> bool {
+    let mut button = egui::Button::new(label);
+    if !key.is_empty() {
+        button = button.shortcut_text(key);
+    }
+    let response = ui.add_enabled(enabled, button);
+    let clicked = response.clicked();
+    if !tip.is_empty() {
+        response.on_hover_text(tip);
+    }
+    if clicked {
+        ui.close_menu();
+    }
+    clicked
+}
+
+/// Check: reads the files and reports, nothing is written.
+fn check_menu(ui: &mut egui::Ui, m: &MenuCtx, actions: &mut Vec<Action>) {
+    let on = !m.busy && m.has;
+    let scope = m.scope;
+    let items: [(&str, &str, Op, String); 7] = [
+        ("🛡 Verify checksums", "F5", Op::Verify, format!("Check the files of {scope} against their .ffp, .md5, .st5 and .sfv files.\nAn FFP line only compares the MD5 stored in the FLAC header: use Decode test to find damaged audio.")),
+        ("✔ Decode test", "F7", Op::Test, format!("Decode every file of {scope} completely to find damaged or truncated audio; FLAC files are also checked against their MD5 signature.\nNeeds no checksum file.")),
+        ("🔍 Lossless?", "Ctrl+L", Op::Lossless, format!("Analyse the spectrum of every file of {scope} to find lossy (MP3/AAC) sources, FM broadcasts, upsampled files and fake 24-bit.\nThe verdict goes to the Source column; click it for the full analysis.")),
+        ("⏱ Speed?", "Ctrl+P", Op::Speed, format!("Estimate whether the tape of {scope} runs too fast or too slow, and the correction to apply.\nThe verdict goes to the Speed column; click it for the full analysis.")),
+        ("📊 Spectrogram", "F9", Op::Spectrogram, format!("Show the spectrogram of the first files of {scope}, up to 4, to see lossy sources for yourself")),
+        ("ℹ Show details", "F8", Op::Details { verbose: true }, format!("Read the format, length and SBEs of {scope} again, and list them in the log")),
+        ("📋 Media info", "Ctrl+I", Op::MediaInfo(Vec::new()), format!("A technical summary of {scope} (format, encoder, length, bit rate, tags; for a DVD title, the whole DVD: video, audio tracks, subtitles, titles and chapters), as text to copy.")),
+    ];
+    for (i, (label, key, op, tip)) in items.into_iter().enumerate() {
+        if i == 4 {
+            ui.separator();
+        }
+        if menu_item(ui, on, label, key, &tip) {
+            actions.push(Action::Run(op));
+        }
+        if i == 1 {
+            torrent_check_button(ui, !on, actions);
+        }
+    }
+}
+
+/// Edit: corrects and completes a show (tags and names in place, the other fixes in new folders).
+fn edit_menu(ui: &mut egui::Ui, m: &MenuCtx, actions: &mut Vec<Action>) {
+    let on = !m.busy && m.has;
+    let mut g = Groups::default();
+    if m.rules.whole_shows {
+        g.item(ui);
+        tag_button(ui, !on, actions);
+    }
+    // Always there: it works from the journal, not from the list.
+    g.item(ui);
+    if menu_item(ui, !m.busy, "↩ Undo tagging...", "", UNDO_TIP) {
+        actions.push(Action::UndoTagging);
+    }
+    if m.rules.whole_shows {
+        g.item(ui);
+        setlist_button(ui, !on, actions);
+    }
+    g.next();
+    if m.rules.discs {
+        g.item(ui);
+        sbe_button(ui, !on, actions);
+    }
+    g.item(ui);
+    clean_wav_button(ui, !on, actions);
+}
+
+/// Convert: makes copies, the originals are kept.
+fn convert_menu(ui: &mut egui::Ui, m: &MenuCtx, actions: &mut Vec<Action>) {
+    let on = !m.busy && m.has;
+    let level = m.flac_level;
+    ui.add_enabled_ui(on, |ui| {
+        ui.label(RichText::new("To FLAC (verified), level:").strong());
+        // The levels on one row: a sub-menu would stay open over the other entries (egui 0.29).
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            for l in 0..=8u8 {
+                let tip = match l {
+                    0 => "Level 0: fastest".to_string(),
+                    5 => "Level 5: the flac default".to_string(),
+                    8 => "Level 8: smallest files".to_string(),
+                    _ => format!("Level {l}"),
+                };
+                if ui.selectable_label(l == level, format!(" {l} ")).on_hover_text(tip).clicked() {
+                    ui.close_menu();
+                    actions.push(Action::FlacLevel(l));
+                    actions.push(Action::Run(Op::Convert { target: Target::Flac, level: l, round_float: false }));
+                }
+            }
+        });
+    });
+    ui.separator();
+    if menu_item(ui, on, "🎵 To WAV", "", &format!("Convert {} to WAV; the originals are kept", m.scope)) {
+        actions.push(Action::Run(Op::Convert { target: Target::Wav, level, round_float: false }));
+    }
+    mp3_buttons(ui, !on, actions);
+    if m.rules.video {
+        ui.separator();
+        extract_button(ui, m.busy, actions);
+    }
+}
+
+/// Share: what goes to a tracker or a forum.
+fn share_menu(ui: &mut egui::Ui, m: &MenuCtx, actions: &mut Vec<Action>) {
+    let on = !m.busy && m.has;
+    let r = m.rules;
+    let mut g = Groups::default();
+    // The entry for all the sites comes last in the list: first here.
+    let (all, sites): (Vec<_>, Vec<_>) = m.trackers.iter().partition(|(_, key, _)| !key.is_empty());
+    if r.show_files {
+        g.item(ui);
+        let tip = format!("Create {} for {}.\nThe types of files to create can be changed in Settings.", m.kinds, m.scope);
+        if menu_item(ui, on, "✚ Create checksums", "F6", &tip) {
+            actions.push(Action::Run(Op::Create));
+        }
+        for (label, key, list) in &all {
+            if menu_item(ui, on, &format!("🌐 Torrent for {}", label.strip_prefix("For ").unwrap_or(label)), key, &format!("Create torrents for the shows of {}", m.scope)) {
+                actions.push(Action::Run(Op::Torrent(list.clone())));
+            }
+        }
+        g.next();
+        for (label, key, list) in &sites {
+            g.item(ui);
+            if menu_item(ui, on, &format!("🌐 Torrent for {}", label.strip_prefix("For ").unwrap_or(label)), key, &format!("Create torrents for the shows of {}", m.scope)) {
+                actions.push(Action::Run(Op::Torrent(list.clone())));
+            }
+        }
+        g.next();
+    }
+    if r.one_show {
+        g.item(ui);
+        if menu_item(ui, on, "📋 Copy info file", "", INFO_TIP) {
+            actions.push(Action::CopyInfo);
+        }
+        if menu_item(ui, on, "📋 Copy FFP contents", "", "Copy the show's .ffp file to the clipboard (for the TTD upload form)") {
+            actions.push(Action::CopyFfp);
+        }
+    }
+    if r.whole_shows {
+        g.item(ui);
+        if menu_item(ui, on, "🖼 Share card...", "", SHARE_TIP) {
+            actions.push(Action::ShareCard(None));
         }
     }
 }
@@ -5853,6 +6005,35 @@ fn tally_levels<'a>(files: impl Iterator<Item = &'a PathBuf>, status: &HashMap<P
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the right-click menu offers: a concert, one track, tracks of one or two concerts, a disc, a video, one row
+    /// that is a missing file.
+    #[test]
+    fn right_click_menu_rules_follow_the_selection() {
+        let show = |root: &str, files: &[&str]| Show { root: PathBuf::from(root), files: files.iter().map(|f| PathBuf::from(format!("{root}/{f}"))).collect() };
+        let shows = vec![show("/a", &["01.flac", "02.flac"]), show("/b", &["CD1/01.flac", "CD2/01.flac"]), show("/v", &["movie.mkv"])];
+        let rules = |picked: &[&str]| {
+            let set: HashSet<&Path> = picked.iter().map(|p| Path::new(*p)).collect();
+            menu_rules_of(&shows, &set)
+        };
+        let flags = |r: MenuRules| (r.show_files, r.one_show, r.whole_shows, r.discs, r.video);
+        // A concert: everything on the show; the video one, the extraction.
+        assert_eq!(flags(rules(&["/a"]).0), (true, true, true, true, false));
+        assert_eq!(flags(rules(&["/v"]).0), (true, true, true, true, true));
+        // Two concerts: no copy of one info file; the rest.
+        assert_eq!(flags(rules(&["/a", "/b"]).0), (true, false, true, true, false));
+        // A track, or two tracks of one concert: the show's files, not the whole-show actions.
+        assert_eq!(flags(rules(&["/a/01.flac"]).0), (true, true, false, false, false));
+        assert_eq!(flags(rules(&["/a/01.flac", "/a/02.flac"]).0), (true, true, false, false, false));
+        // Tracks of two concerts: none of the actions that need one show.
+        assert_eq!(flags(rules(&["/a/01.flac", "/b/CD1/01.flac"]).0), (false, false, false, false, false));
+        // A disc of a concert: the show's files, and the SBE fix.
+        assert_eq!(flags(rules(&["/b/CD1"]).0), (true, true, false, true, false));
+        // A track and a concert: the concert's rules (several shows: no single copy).
+        assert_eq!(flags(rules(&["/a/01.flac", "/b"]).0), (true, false, true, true, false));
+        // A missing file touches no show.
+        assert_eq!(rules(&["/a/gone.flac"]).1, 0);
+    }
 
     /// The filter bar and the notification count the same things: the files of the shows and
     /// the files Verify did not find, each once; never the show itself.
