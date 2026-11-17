@@ -22,6 +22,10 @@ ignore = [
     { id = "RUSTSEC-2026-0370", reason = "zvariant 4: older zbus pulled by egui accessibility" },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names 3: older zbus pulled by egui accessibility" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive 4: older zbus pulled by egui accessibility" },
+    # chrono (Linux only, through trash): unmaintained, no known vulnerability, no alternative up to
+    # date. trash uses it to write DeletionDate in the freedesktop trash; without it the date shown in
+    # the trash is lost. To remove when trash no longer depends on chrono.
+    { id = "RUSTSEC-2026-0543", reason = "chrono via trash (Linux only): unmaintained, no known flaw; removing it loses the deletion date in the trash" },
 ]
 
 [licenses]
