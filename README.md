@@ -59,7 +59,7 @@ ffmpeg or LAME. Every decoder and encoder is built in.
   renamed ("01 - Title", "d1t01 - Title" or eTree style), or only renamed. The audio is not
   touched, so FFP and ST5 stay valid; `.md5` and `.sfv` lines are computed again, and new
   names are carried into every checksum file. Several shows at once: the clear ones are
-  ready to go, the doubtful ones are checked one by one. **Tools > Undo tagging** gives the
+  ready to go, the doubtful ones are checked one by one. **Edit > Undo tagging** gives the
   files back byte for byte (30 days).
 - **Setlists from setlist.fm** (with your own free API key, in Settings): the setlist of
   each show is written in its folder as "Artist - YYYY-MM-DD - Venue, City, Country.txt"
@@ -95,8 +95,14 @@ code-signed through SignPath: see the [code signing policy](#code-signing-policy
 Drag folders or files onto the window (hold Ctrl to add to the list instead of replacing
 it), or use **Add**. A show is a folder; its `CD1`, `CD2`, `Disc 2`, `Set 1`... sub-folders
 are its discs. Select shows or tracks (click, Ctrl/Shift+click, or drag over the rows);
-with no selection, actions apply to the whole list. Every action is in the toolbar, in the
-**Tools** menu and on right-click.
+with no selection, actions apply to the whole list. The actions are grouped by what they do
+to the files: **Check** reads them (checksums, decode test, Lossless?, Speed?, spectrogram,
+details), **Edit** corrects and completes a show (tag and rename, setlist, Fix SBE and Clean
+WAV headers into new folders), **Convert** makes copies (FLAC, WAV, MP3, audio from a video),
+**Share** prepares what goes to a tracker (checksums, torrents, info file and FFP to copy,
+share card). They are in the toolbar, in the **Tools** menu and, as sub-menus, on right-click,
+which also puts the most used actions first (Decode test, Lossless?, Create checksums,
+Torrent for both sites, Copy info file, Copy FFP contents).
 
 ### Command line
 

@@ -18,7 +18,7 @@ Three principles guide it:
 
 ## At a glance
 
-Sixteen groups of tasks, all in one window and all from the same right-click menu.
+Sixteen groups of tasks, all in one window, in five toolbar menus and the right-click menu.
 
 | Task | What it does |
 | --- | --- |
@@ -115,7 +115,7 @@ One click makes a private torrent per tracker, ready to upload.
 
 Torrent check answers the question every downloader has: is this show complete and undamaged?
 
-- Drop a .torrent on the window, or pick it from the Check menu. The show is found by name in the list, next to the .torrent, or taken from the selection.
+- Drop a .torrent on the window, or pick it from the Check menu (Check against torrent). The show is found by name in the list, next to the .torrent, or taken from the selection.
 - Every piece is hashed again (in parallel) and compared with the torrent. Damaged pieces are traced back to the files they cover, so the result names the bad files, the missing ones and those of the wrong size.
 - Files on disk that the torrent does not list are reported too, and file names that only differ in letter case are accepted.
 - The log shows the torrent's name, size, piece count, private flag, source and tracker host. The passkey in the announce URL is never displayed.
@@ -179,11 +179,11 @@ Most shows arrive with a text file describing them; Bootleg Toolbox turns it int
 - **Several shows at once:** select them and open Tag and rename. Each show's plan is prepared and listed. The clear ones are ticked: a single info file whose tracklist fits the files, as many titles as files, the artist and a full date there, agreeing with the folder name. The others say what to check ("29 titles for 4 files", "no date", "2 info files fit, with other titles"...) and open one by one in the usual window, whose OK ticks them. Apply writes the ticked shows in one go; the rest can wait. Shows without an info file are listed as such and left alone.
 - **The audio is never rewritten:** only the FLAC header changes, in place when its padding has room. The audio signature is checked after every file. FFP and ST5 stay valid; .md5 and .sfv lines of the tagged files are computed again, and new names are written into every checksum file. Lines that did not match the files before tagging are reported, as tagging rewrites them. A .torrent made before is reported as out of date.
 - **Nothing is changed when a file is read-only** (a torrent client may still hold it): you are told which files to unlock, so a show never ends up with names but no tags.
-- **Undo:** before a show is changed, its FLAC headers, former names and checksum files are kept for 30 days in the program's data folder (not in the show's folder). Tools > Undo tagging lists each Apply with its shows; rolling back gives the files back byte for byte, so the checksums and torrents made before match again. A file changed since by another program, or whose former name is taken, is left as it is and reported, and the checksum files are then kept as they are. From the command line: `undo-tagging`.
+- **Undo:** before a show is changed, its FLAC headers, former names and checksum files are kept for 30 days in the program's data folder (not in the show's folder). Edit > Undo tagging lists each Apply with its shows; rolling back gives the files back byte for byte, so the checksums and torrents made before match again. A file changed since by another program, or whose former name is taken, is left as it is and reported, and the checksum files are then kept as they are. From the command line: `undo-tagging`.
 
 ### Setlists from setlist.fm
 
-Tools > Get setlist from setlist.fm (also in the Convert menu and the right-click menu) writes the setlist of each selected show into its folder, for shows that came without one.
+Edit > Get setlist from setlist.fm (also in the Tools menu and the right-click menu) writes the setlist of each selected show into its folder, for shows that came without one.
 
 - **Your own key:** setlist.fm hands out free API keys (setlist.fm > Settings > API); paste yours in Settings > setlist.fm. Without it nothing is asked.
 - **Which show:** the artist and the date come from the info file, the folder name ("Artist - YYYY-MM-DD - ..." or "Artist YYYY-MM-DD ...") or the tags. setlist.fm's search also returns other artists whose name contains this one; only the same name is kept ("AC/DC" = "ACDC", "Mötley Crüe" = "Motley Crue").
@@ -194,7 +194,7 @@ Tools > Get setlist from setlist.fm (also in the Convert menu and the right-clic
 
 ### Share card
 
-Tools > Share card (also in the right-click menu, and on the band shown at the end of a long task) makes a picture of each selected show to post with it: 1200 × 630 PNG, saved in the show folder as "<folder> - card.png", so that it goes with the show into its torrent.
+Share > Share card (also in the Tools menu, the right-click menu and on the band shown at the end of a long task) makes a picture of each selected show to post with it: 1200 × 630 PNG, saved in the show folder as "<folder> - card.png", so that it goes with the show into its torrent.
 
 - **What it says:** artist, date and venue (from the info file, the folder name or the tags), the recording source (SBD, AUD, FM...), format, number of tracks and length, "Tagged" when every track is a FLAC with its artist, title and number, and the checks run on the show in this session with their outcome: Lossless?, Speed?, checksums and decode test, CD-ready or gap risk (SBE). A check not run is left out, never shown as passed.
 - **The pictures:** the cassette with the show written on its label, and the spectrogram of the longest track with the lowpass found by Lossless?.
@@ -266,7 +266,7 @@ Media info writes a technical summary in the manner of MediaInfo, as plain text 
 
 An optional "Open in Bootleg Toolbox" entry can be added to the right-click menu of folders and audio files (Settings, off by default).
 
-- **Windows:** in Explorer, for the current user only, with no administrator rights. On Windows 11 it is under "Show more options", as for every program that is not from the Microsoft Store.
+- **Windows:** in Explorer, for the current user only, with no administrator rights. On Windows 11 it is in the classic menu, as for every program that is not from the Microsoft Store. On recent versions of Windows 11 (the new right-click menu of autumn 2026) "Show more options" is disabled by default, so the entry no longer appears in the new menu: hold Shift while right-clicking to get the classic menu, or turn "Show more options" back on through "Customize the menu". Integration with the new menu is planned for a later version.
 - **Linux:** Dolphin, Nautilus and Nemo, whichever are installed.
 - The entry follows the program if you move it, and unticking the option removes it completely.
 
@@ -305,8 +305,13 @@ The interface is one compact window, close in spirit to TLH: a list of shows and
 
 ### Menus and shortcuts
 
-- **Toolbar on one line:** Add, Check, Create, Convert, Torrent, with Stop and Settings on the right.
-- **Right-click** on any row gives every action, with Open folder first. For a track, the folder opens with the file selected (Explorer on Windows, Dolphin, Nautilus and others on Linux).
+- **Toolbar on one line:** Add, Check, Edit, Convert, Share, with Stop and Settings on the right. The menus are ordered by what the actions do to the files:
+  - **Check** (reads, writes nothing): Verify checksums, Decode test, Check against torrent, Lossless?, Speed?, Spectrogram, Show details, Media info.
+  - **Edit** (corrects and completes a show): Tag and rename from info file, Undo tagging, Get setlist from setlist.fm; Fix SBE and Clean WAV headers (both write to a new folder).
+  - **Convert** (makes copies, the originals are kept): To FLAC (verified, levels 0 to 8), To WAV, MP3 320, MP3 V0, Extract audio from video.
+  - **Share** (what goes to a tracker): Create checksums, Torrent for both sites (or all trackers), one entry per site, Copy info file, Copy FFP contents, Share card.
+  The **Tools** menu lists the same four groups one after the other, with Stop at the end.
+- **Right-click** gives, in this order: Decode test and Lossless? (and "See lossless analysis" or "See speed analysis" when the row has one); Create checksums and Torrent for both sites; Copy info file and Copy FFP contents; the Check, Edit, Convert and Share sub-menus; Open folder and Remove from list. What does not apply to the row is left out, not greyed: on a track, the checksums, torrents and copies work on the show that holds it (and are left out for tracks of several shows); Copy info file and Copy FFP contents need a single show; Tag and rename, setlist, Share card and Fix SBE need whole shows or discs; Extract audio needs a video or a DVD; a file listed as missing only has Open folder and Remove from list. For a track, the folder opens with the file selected (Explorer on Windows, Dolphin, Nautilus and others on Linux).
 - **Keyboard:** Page Up/Page Down and Home/End move through the list; F1 help, F5 verify, F6 create, F7 decode test, F8 details, F9 spectrogram, F10 torrents for all trackers, Ctrl+L Lossless?, Ctrl+P Speed?, Ctrl+I media info, Ctrl+A select all, Delete removes from the list, Escape stops a running task (or clears the selection, or closes a window).
 - **Help > Keyboard shortcuts and command line** (F1) lists every shortcut, mouse gesture and command-line option in one page, with a Copy button.
 - Menus scroll instead of spilling over the window when it is small.
@@ -383,7 +388,7 @@ Bootleg Toolbox runs on 64-bit Windows and Linux from a single file, with nothin
 
 ### Safety of your files
 
-- **Originals are never modified** by conversions, MP3 copies, SBE fixes and WAV clean-ups: they write new files. Tag and rename changes tags and names in place, only after you have checked them, never the audio, and Tools > Undo tagging gives the files back byte for byte.
+- **Originals are never modified** by conversions, MP3 copies, SBE fixes and WAV clean-ups: they write new files. Tag and rename changes tags and names in place, only after you have checked them, never the audio, and Edit > Undo tagging gives the files back byte for byte.
 - **Nothing half-written:** new files are written as ".part" and renamed only once complete and verified; a stopped or failed job removes them.
 - **Existing files are not overwritten** without your say: an existing FLAC, MP3 or checksum file is skipped and reported.
 - **Nothing is deleted:** the after-conversion window moves files to the system trash (Recycle Bin, or the desktop trash on Linux), only if you tick the box, so they can be restored.
