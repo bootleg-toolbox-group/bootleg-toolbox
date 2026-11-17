@@ -181,8 +181,7 @@ impl Fft {
     #[inline(always)]
     fn run_plain(&self, re: &mut [f64], im: &mut [f64]) {
         let n = self.rev.len();
-        for i in 0..n {
-            let j = self.rev[i];
+        for (i, &j) in self.rev.iter().enumerate() {
             if j > i {
                 re.swap(i, j);
                 im.swap(i, j);
