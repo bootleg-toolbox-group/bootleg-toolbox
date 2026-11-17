@@ -562,7 +562,7 @@ dependencies = [
 
 [[package]]
 name = "bootleg-toolbox"
-version = "0.1.14"
+version = "0.2.0"
 dependencies = [
  "ab_glyph",
  "ape-decoder",
