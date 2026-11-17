@@ -275,6 +275,8 @@ pub fn start() {
 pub fn finish() {
     let Some(path) = target() else { return };
     mark("end");
+    // Only Linux adds the process totals below.
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
     let mut proc = serde_json::json!({ "proc": true, "t": micros_since_start() });
     #[cfg(target_os = "linux")]
     {
