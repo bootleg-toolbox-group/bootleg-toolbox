@@ -102,7 +102,7 @@ pub fn audio_tracks(path: &Path) -> Vec<VideoAudio> {
                     .collect()
             })
             .unwrap_or_default(),
-        Some(Format::Mp4) => audio::container_tracks(path)
+        Some(Format::Mp4 | Format::Mov) => audio::container_tracks(path)
             .map(|tracks| {
                 tracks
                     .iter()

@@ -34,6 +34,8 @@ pub enum Format {
     M4a,
     /// MPEG-4 and Matroska video files: their audio track only (concert videos).
     Mp4,
+    /// QuickTime (.mov), read like MP4: camera and recorder files often hold plain PCM.
+    Mov,
     Mkv,
     Mka,
     /// AIFF (big-endian PCM, the Apple counterpart of WAV), and OGG (Vorbis, FLAC; Opus is
@@ -57,7 +59,8 @@ impl Format {
             "mp3" => Some(Format::Mp3),
             "mp2" => Some(Format::Mp2),
             "m4a" => Some(Format::M4a),
-            "mp4" => Some(Format::Mp4),
+            "mp4" | "m4v" => Some(Format::Mp4),
+            "mov" => Some(Format::Mov),
             "vob" => Some(Format::Vob),
             "mka" => Some(Format::Mka),
             "mkv" => Some(Format::Mkv),
@@ -78,6 +81,7 @@ impl Format {
             Format::Mp2 => "MP2",
             Format::M4a => "M4A",
             Format::Mp4 => "MP4",
+            Format::Mov => "MOV",
             Format::Vob => "VOB",
             Format::Mka => "MKA",
             Format::Mkv => "MKV",
@@ -97,12 +101,12 @@ impl Format {
     }
 
     pub fn container(self) -> bool {
-        matches!(self, Format::M4a | Format::Mp4 | Format::Mkv | Format::Mka | Format::Aiff | Format::Ogg | Format::Vob)
+        matches!(self, Format::M4a | Format::Mp4 | Format::Mov | Format::Mkv | Format::Mka | Format::Aiff | Format::Ogg | Format::Vob)
     }
 
     /// Concert videos: their sound is read, and they are tracks only in a show made of them.
     pub fn video(self) -> bool {
-        matches!(self, Format::Mp4 | Format::Mkv)
+        matches!(self, Format::Mp4 | Format::Mov | Format::Mkv)
     }
 
     pub fn matroska(self) -> bool {
@@ -348,7 +352,7 @@ fn probe_header(path: &Path, format: Option<Format>) -> Result<AudioInfo, String
         }),
         Some(Format::Wav) => probe_wav(path).map(|(info, _, _)| info),
         Some(f @ (Format::Mp3 | Format::Mp2)) => probe_mpa(path, f),
-        Some(f @ (Format::M4a | Format::Mp4 | Format::Mkv | Format::Mka | Format::Aiff | Format::Ogg)) => probe_container(path, f),
+        Some(f @ (Format::M4a | Format::Mp4 | Format::Mov | Format::Mkv | Format::Mka | Format::Aiff | Format::Ogg)) => probe_container(path, f),
         Some(Format::Vob) => crate::dvd::probe_title(path),
         Some(Format::Ape) => {
             let decoder = open_ape(path)?;
@@ -604,7 +608,7 @@ pub fn read_pcm_as(
         Some(Format::Ape) => decode_ape(path, cancel, sink),
         Some(Format::WavPack) => crate::wv::decode(path, cancel, sink),
         Some(f @ (Format::Mp3 | Format::Mp2)) => decode_mpa(path, f, cancel, sink),
-        Some(f @ (Format::M4a | Format::Mp4 | Format::Mkv | Format::Mka | Format::Aiff | Format::Ogg)) => decode_container(path, f, cancel, sink),
+        Some(f @ (Format::M4a | Format::Mp4 | Format::Mov | Format::Mkv | Format::Mka | Format::Aiff | Format::Ogg)) => decode_container(path, f, cancel, sink),
         Some(Format::Vob) => Err(DVD_NOT_DECODED.into()),
         None => Err("not an audio file".into()),
     }
@@ -750,7 +754,7 @@ fn probe_for(format: Format) -> &'static symphonia::core::probe::Probe {
     });
     match format {
         Format::Mp3 | Format::Mp2 => &probes[1],
-        Format::M4a | Format::Mp4 => &probes[2],
+        Format::M4a | Format::Mp4 | Format::Mov => &probes[2],
         Format::Mka | Format::Mkv => &probes[3],
         Format::Aiff => &probes[4],
         Format::Ogg => &probes[5],
@@ -1024,7 +1028,7 @@ pub fn source_tags(path: &Path) -> Vec<(String, String)> {
     match Format::from_path(path) {
         Some(Format::Flac) => return flac_tags(path).unwrap_or_default(),
         Some(Format::Ape | Format::WavPack) => {}
-        Some(f @ (Format::M4a | Format::Mp4 | Format::Mkv | Format::Mka | Format::Ogg)) => return container_tags(path, f),
+        Some(f @ (Format::M4a | Format::Mp4 | Format::Mov | Format::Mkv | Format::Mka | Format::Ogg)) => return container_tags(path, f),
         _ => return Vec::new(),
     }
     let Ok(mut file) = File::open(path) else { return Vec::new() };

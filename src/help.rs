@@ -55,7 +55,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("tag-info", "Tag and rename the FLAC files from the info file (prints what it read first)"),
     ("undo-tagging", "Roll back the latest tag-info or Tag and rename (every show of it)"),
     ("setlist", "Write the setlist of each show from setlist.fm in its folder (needs BT_SETLISTFM_KEY)"),
-    ("extract-audio", "Extract one audio track of each DVD title or video (MKV, MP4) to one file: FLAC for a lossless track, the stream otherwise"),
+    ("extract-audio", "Extract one audio track of each DVD title or video (MKV, MP4, MOV) to one file: FLAC for a lossless track, the stream otherwise"),
     ("media-info", "Media info of the shows, and of the DVDs (VIDEO_TS folders, VOB files)"),
     ("check-update", "Look for a newer release on GitHub"),
     ("shell-menu-add", "Add \"Open in Bootleg Toolbox\" to the file manager's right-click menu"),

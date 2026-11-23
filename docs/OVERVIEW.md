@@ -41,7 +41,7 @@ Sixteen groups of tasks, all in one window, in five toolbar menus and the right-
 
 ## Supported formats
 
-All five lossless formats found in trading circles are read natively, as are AIFF, ALAC, MP3, MP2, AAC and Vorbis, the M4A, MKA and Ogg containers, and the audio track of MP4 and MKV videos; FLAC, WAV and MP3 are written.
+All five lossless formats found in trading circles are read natively, as are AIFF, ALAC, MP3, MP2, AAC and Vorbis, the M4A, MKA and Ogg containers, and the audio track of MP4, MOV and MKV videos; FLAC, WAV and MP3 are written.
 
 | Format | Read and check | Write | Notes |
 | --- | --- | --- | --- |
@@ -53,7 +53,7 @@ All five lossless formats found in trading circles are read natively, as are AIF
 | WavPack | Yes, lossless, 16 to 32-bit and float | No | Hybrid (lossy), DSD and multichannel files are refused with a clear message |
 | MP3, MP2 | Yes, gapless | MP3 only, 320 CBR and V0 | Always flagged as lossy; never converted to FLAC ("fake lossless") |
 | M4A (ALAC or AAC) | Yes, ALAC 16 to 32-bit, AAC-LC | No | ALAC converts to FLAC bit for bit; AAC is flagged as lossy; iTunes tags carried over |
-| MP4 (video) | The audio track: AAC or ALAC | No | For concert videos: the video is not read. An MP4 next to the audio files of a show is a bonus, not a track, and is left out; a folder of MP4 files is a show of its own. Media info gives the file's bit rate "with the video" |
+| MP4, M4V, MOV (video) | The audio track: AAC, ALAC or PCM (QuickTime recorders and camcorders often keep plain PCM) | No | For concert videos: the video is not read. An MP4 next to the audio files of a show is a bonus, not a track, and is left out; a folder of MP4 files is a show of its own. Media info gives the file's bit rate "with the video" |
 | MKV (Matroska video) | The audio track: PCM, FLAC, AAC, MP2, MP3 or Vorbis | No | As for MP4: the video is not read, a bonus MKV next to a show's audio files is left out. Media info adds the video codec and size, and every audio track when there are several. An AC-3, E-AC-3 or DTS soundtrack is described (Details, Media info) but not decoded yet; Extract audio saves it as it is |
 | MKA (Matroska audio) | Yes, with FLAC, PCM, AAC, MP2, MP3 or Vorbis inside | No | AC-3, DTS and Opus tracks are not decoded yet: the file is named with its codec; tags carried over |
 | OGG (.ogg, .oga) | Yes, Vorbis or FLAC inside | No | Vorbis is flagged as lossy; FLAC in Ogg converts to FLAC bit for bit; Opus is not decoded yet (said so); tags carried over |
@@ -201,7 +201,7 @@ Share > Share card (also in the Tools menu, the right-click menu and on the band
 
 ### Lossy files (MP3, MP2, AAC, Vorbis)
 
-MP3 and MP2 files, AAC in M4A, MP4, MKA or MKV files, and Ogg Vorbis files can be added like any other show, mostly to recognise them for what they are.
+MP3 and MP2 files, AAC in M4A, MP4, MOV, MKA or MKV files, and Ogg Vorbis files can be added like any other show, mostly to recognise them for what they are.
 
 - Details, decode test, spectrogram, checksums and torrents work on them; decoding is gapless when the LAME header gives the encoder delay (AAC files include the encoder delay, which only matters for joining tracks).
 - They are marked "Lossy file" and never called CD-ready. Lossless? gives a firm "Lossy (MP3)" or "Lossy (AAC)" verdict, with the measures for reference.
@@ -413,7 +413,7 @@ Bootleg Toolbox covers the everyday jobs TLH is used for and adds Linux, WavPack
 | Read FLAC, WAV, SHN, APE | Yes | Yes |
 | Read WavPack | No | Yes |
 | Read MP2, MP3 | Yes | Yes, gapless, always flagged as lossy |
-| Read M4A (ALAC, AAC), MKA, AIFF, Ogg and the audio of MP4 and MKV videos | No | Yes (AC-3, DTS and Opus not decoded yet) |
+| Read M4A (ALAC, AAC), MKA, AIFF, Ogg and the audio of MP4, MOV and MKV videos | No | Yes (AC-3, DTS and Opus not decoded yet) |
 | Read MKW | Yes | No |
 | 32-bit float WAV | Not described | Read; bit-exact or measured 24-bit conversion to FLAC |
 | Encode FLAC | Yes, through flac.exe | Yes, built in, verified after every file |

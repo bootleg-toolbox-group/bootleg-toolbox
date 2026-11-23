@@ -636,7 +636,7 @@ fn welcome(ui: &mut egui::Ui, p: Palette, busy: bool) -> Option<usize> {
                 let groups: [(&[&str], Level); 3] = [
                     (&["FLAC", "WAV", "AIFF", "APE", "SHN", "WavPack", "ALAC"], Level::Warn),
                     (&["MP3", "MP2", "AAC", "Ogg Vorbis"], Level::Info),
-                    (&["M4A", "MKA", "MP4 videos", "MKV videos", "DVD folders"], Level::Ok),
+                    (&["M4A", "MKA", "MP4/MOV videos", "MKV videos", "DVD folders"], Level::Ok),
                 ];
                 for (names, kind) in groups {
                     let widths: Vec<f32> = names.iter().map(|n| text_width(ui, n, 12.0) + 20.0).collect();
@@ -1549,7 +1549,7 @@ impl App {
                 }
             }
             Dialog::AddFiles => {
-                if let Some(files) = file_dialog(self.parent).add_filter("Audio", &["flac", "wav", "aif", "aiff", "aifc", "ape", "shn", "wv", "mp3", "mp2", "m4a", "mka", "ogg", "oga", "mp4", "mkv"]).pick_files() {
+                if let Some(files) = file_dialog(self.parent).add_filter("Audio", &["flac", "wav", "aif", "aiff", "aifc", "ape", "shn", "wv", "mp3", "mp2", "m4a", "mka", "ogg", "oga", "mp4", "m4v", "mov", "mkv"]).pick_files() {
                     self.add_paths(files, true);
                 }
             }
